@@ -13,14 +13,35 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VSIX_DIR="$ROOT/incoming/vsix"
 
-fetch_vsix() {  # fetch_vsix <namespace> <name>
-  local meta url ver
-  meta="$(curl -sf --proto '=https' "https://open-vsx.org/api/$1/$2/latest")"
+fetch_vsix() {  # fetch_vsix <namespace> <name> [target-platform]
+  # Extensions with native modules (Continue: sqlite3/lancedb/onnx) must use the
+  # platform build, not the universal one, or they fail to activate.
+  local meta url ver plat="${3:-}"
+  if [[ -n "$plat" ]]; then
+    meta="$(curl -sf --proto '=https' "https://open-vsx.org/api/$1/$2/$plat/latest" || true)"
+  fi
+  [[ -n "${meta:-}" ]] || meta="$(curl -sf --proto '=https' "https://open-vsx.org/api/$1/$2/latest")"
   url="$(echo "$meta" | jq -r '.files.download')"
   ver="$(echo "$meta" | jq -r '.version')"
-  echo "==> $1.$2 $ver"
+  echo "==> $1.$2 $ver ${plat:-universal}" >&2
   curl -sfL --proto '=https' -o "$VSIX_DIR/$1.$2-$ver.vsix" "$url"
   echo "$VSIX_DIR/$1.$2-$ver.vsix"
+}
+
+graft_ripgrep() {
+  # Open VSX builds of Continue ship without the ripgrep binary and die on
+  # activation with "Could not find ripgrep binary" - graft VSCodium's own rg in.
+  local ext rg dest
+  ext="$(ls -d "$HOME/.vscode-oss/extensions"/continue.continue-* 2>/dev/null | sort | tail -1)"
+  [[ -n "$ext" ]] || return 0
+  dest="$ext/out/node_modules/@vscode/ripgrep/bin"
+  [[ -x "$dest/rg" ]] && return 0
+  rg="$(find "/Applications/VSCodium.app/Contents/Resources/app/node_modules/@vscode" -name rg -type f 2>/dev/null | head -1)"
+  [[ -n "$rg" ]] || rg="$(command -v rg || true)"
+  [[ -n "$rg" ]] || return 0
+  mkdir -p "$dest"
+  cp "$rg" "$dest/rg" && chmod +x "$dest/rg"
+  echo "==> grafted ripgrep into Continue (Open VSX build ships without it)"
 }
 
 write_continue_config() {
@@ -81,10 +102,12 @@ case "${1:-launch}" in
   install)
     command -v codium >/dev/null || { echo "==> brew install --cask vscodium"; brew install --cask vscodium; }
     mkdir -p "$VSIX_DIR"
-    cont="$(fetch_vsix Continue continue | tail -1)"
-    roo="$(fetch_vsix RooVeterinaryInc roo-cline | tail -1)"
+    arch="darwin-arm64"; [[ "$(uname -m)" == "x86_64" ]] && arch="darwin-x64"
+    cont="$(fetch_vsix Continue continue "$arch")"
+    roo="$(fetch_vsix RooVeterinaryInc roo-cline)"
     codium --install-extension "$cont" --force
     codium --install-extension "$roo"  --force
+    graft_ripgrep
     write_continue_config
     write_codium_settings
     echo

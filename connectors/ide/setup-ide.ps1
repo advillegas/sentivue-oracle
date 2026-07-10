@@ -30,13 +30,37 @@ switch ($Cmd) {
         }
         $vsix = Join-Path $Root "incoming\vsix"
         New-Item -ItemType Directory -Force -Path $vsix | Out-Null
-        foreach ($ext in @(@("Continue", "continue"), @("RooVeterinaryInc", "roo-cline"))) {
-            $ns = $ext[0]; $name = $ext[1]
-            $meta = Invoke-RestMethod -Uri "https://open-vsx.org/api/$ns/$name/latest"
-            $file = Join-Path $vsix "$ns.$name-$($meta.version).vsix"
-            Write-Host "==> $ns.$name $($meta.version)"
+        # Continue ships native modules (sqlite3, lancedb, onnx) - must take the
+        # win32-x64 build, not the universal one, or activation fails.
+        foreach ($ext in @(@("Continue", "continue", "win32-x64"), @("RooVeterinaryInc", "roo-cline", ""))) {
+            $ns = $ext[0]; $name = $ext[1]; $plat = $ext[2]
+            $meta = $null
+            if ($plat) {
+                try { $meta = Invoke-RestMethod -Uri "https://open-vsx.org/api/$ns/$name/$plat/latest" } catch { $meta = $null }
+            }
+            if (-not $meta) { $meta = Invoke-RestMethod -Uri "https://open-vsx.org/api/$ns/$name/latest" }
+            $tag = if ($plat) { "$plat-" } else { "" }
+            $file = Join-Path $vsix "$ns.$name-$tag$($meta.version).vsix"
+            Write-Host "==> $ns.$name $($meta.version) $plat"
             if (-not (Test-Path $file)) { Invoke-WebRequest -Uri $meta.files.download -OutFile $file }
             & $codium --install-extension $file --force | Out-Null
+        }
+        # Open VSX builds of Continue ship WITHOUT the ripgrep binary, so the
+        # extension dies on activation with "Could not find ripgrep binary".
+        # Graft VSCodium's own rg.exe into the extension to fix it.
+        $contExt = Get-ChildItem "$env:USERPROFILE\.vscode-oss\extensions" -Directory -ErrorAction SilentlyContinue |
+            Where-Object Name -match "^continue\.continue-" | Sort-Object Name -Descending | Select-Object -First 1
+        if ($contExt) {
+            $rgDest = Join-Path $contExt.FullName "out\node_modules\@vscode\ripgrep\bin"
+            if (-not (Test-Path (Join-Path $rgDest "rg.exe"))) {
+                $codiumRoot = Split-Path -Parent (Split-Path -Parent $codium)  # ...\VSCodium from ...\VSCodium\bin\codium.cmd
+                $rgSrc = Get-ChildItem (Join-Path $codiumRoot "resources\app\node_modules\@vscode") -Recurse -Filter "rg.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($rgSrc) {
+                    New-Item -ItemType Directory -Force -Path $rgDest | Out-Null
+                    Copy-Item $rgSrc.FullName (Join-Path $rgDest "rg.exe") -Force
+                    Write-Host "==> grafted ripgrep into Continue (Open VSX build ships without it)"
+                }
+            }
         }
         # Continue -> local llama-swap (same config content as the Mac twin)
         $cont = Join-Path $env:USERPROFILE ".continue"
