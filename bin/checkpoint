@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# checkpoint "message" — the ratchet in one command: commit everything + ledger entry.
+# Used by agents mid-task so progress is crash-safe and the ledger stays current.
+set -euo pipefail
+msg="${1:?usage: checkpoint \"message\"}"
+git add -A
+if git diff --cached --quiet; then
+  echo "checkpoint: nothing to commit"
+else
+  git commit -q -m "$msg"
+fi
+root="${ORACLE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+mkdir -p "$root/memory"
+echo "- **$(date '+%Y-%m-%d %H:%M:%S')** [checkpoint:$(basename "$PWD")] $msg ($(git rev-parse --short HEAD))" >> "$root/memory/LEDGER.md"
+echo "checkpoint: $msg ($(git rev-parse --short HEAD))"

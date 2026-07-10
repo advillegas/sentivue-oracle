@@ -1,0 +1,32 @@
+# Goal-only mission: the conductor plans it, executes it, and replans once if the
+# plan stalls. This is the highest-autonomy mode — you give it an outcome, not steps.
+#
+#   oracle mission conductor/missions/autonomous.toml claude 24
+#
+# The planner (opus tier) investigates the repo read-only, decomposes the goal into a
+# task DAG with acceptance criteria AND mechanical checks, then the normal verified
+# execution loop takes over: worktree -> developer -> deterministic checks -> auditor
+# -> (tiebreak) -> merge, with failure memory and escalation throughout.
+
+[mission]
+name = "autonomous-example"
+goal = """Survey this repository's data pipeline and research tooling, then design and
+implement one high-value improvement to research reproducibility (e.g. artifact
+hashing + run manifests, deterministic seeds audit, or an experiment registry in
+Postgres), with tests proving it works. Choose the single most valuable option based
+on what actually exists in the repo; write a short decision note in docs/notes/."""
+engine = "claude"
+hours = 24
+workers = 2
+auto_plan = true
+
+# Background tasks still run in idle gaps, even in auto-plan mode.
+[[background]]
+id = "test-sweep"
+title = "Full test + lint sweep"
+prompt = "Run the entire test suite and linters across the repo; fix trivial breakages (imports, formatting); ledger any real failures without fixing them."
+acceptance = ["ledger entry lists suite status per package"]
+tier = "haiku"
+audit_tier = "haiku"
+escalate = false
+timeout_minutes = 20

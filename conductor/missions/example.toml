@@ -9,6 +9,14 @@ goal = "Build and validate a leakage-free cross-sectional momentum backtest over
 engine = "claude"                   # overridable via --engine
 hours = 24
 report_minutes = 60
+workers = 2                         # second worker drives haiku tasks on the fast lane
+
+# Per-task verification stack (all optional):
+#   checks        shell commands the CONDUCTOR runs itself; every one must exit 0
+#                 before any LLM audit happens (deterministic gate)
+#   audit_tier    default "sonnet" — verifier as strong as the generator
+#   escalate      default true — the final attempt auto-escalates to the opus tier
+#   stall_minutes default 12 — kill a run that goes silent this long
 
 [[tasks]]
 id = "ingest"
@@ -22,6 +30,7 @@ acceptance = [
   "prices table rejects duplicate (date,symbol) rows",
   "universe table carries delisting dates (survivorship-bias guard)",
 ]
+checks = ["uv run --project env pytest pipelines/tests -q"]
 tier = "sonnet"
 timeout_minutes = 40
 
@@ -37,6 +46,7 @@ acceptance = [
   "deciles are balanced within 1 name per bucket each rebalance",
   "uv run --project env pytest signals/tests -q passes",
 ]
+checks = ["uv run --project env pytest signals/tests -q"]
 tier = "sonnet"
 timeout_minutes = 45
 
@@ -51,6 +61,10 @@ acceptance = [
   "net-of-cost equity curve artifact written under artifacts/",
   "turnover consistent with monthly decile rebalance (sanity bound asserted in a test)",
   "results reproducible: two runs produce identical artifacts (seeded, no wall-clock deps)",
+]
+checks = [
+  "uv run --project env pytest backtests/tests -q",
+  "test -n \"$(find artifacts -name '*.parquet' -newer backtests/momentum_ls.py 2>/dev/null | head -1)\" || test -f artifacts/momentum_ls_equity.parquet",
 ]
 tier = "sonnet"
 timeout_minutes = 60
@@ -81,6 +95,8 @@ table research.doc_chunks using the local embeddings endpoint
 under pipelines/index_docs.py with a --dry-run flag."""
 acceptance = ["re-running the indexer twice inserts zero duplicate chunks"]
 tier = "haiku"
+audit_tier = "haiku"      # keep grunt work entirely on the fast lane (true parallelism)
+escalate = false          # never spend the big slot on background chores
 timeout_minutes = 30
 
 [[background]]
@@ -89,4 +105,6 @@ title = "Full test + lint sweep"
 prompt = "Run the entire test suite and linters across the repo; fix trivial breakages (imports, formatting); ledger any real failures without fixing them."
 acceptance = ["ledger entry lists suite status per package"]
 tier = "haiku"
+audit_tier = "haiku"
+escalate = false
 timeout_minutes = 20

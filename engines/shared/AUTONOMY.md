@@ -51,6 +51,7 @@ outdated plan is drift fuel. Steps without checks are wishes, not steps.
 ## 4. The ratchet: monotonic, crash-safe progress
 
 Implement one step → run its CHECK → commit → next step.
+`bash $ORACLE_ROOT/bin/checkpoint "message"` does commit + ledger entry in one command.
 
 - Commits are checkpoints. A run that dies mid-task should lose minutes, not hours.
 - Never end a step with a broken tree. If a step broke things, fixing that outranks
@@ -64,6 +65,9 @@ Implement one step → run its CHECK → commit → next step.
 - A test you never saw fail proves little: when you write a test for a bug, watch it
   fail first, then fix.
 - Numbers in reports and notes come from artifacts on disk, never from recollection.
+- Mission tasks carry MECHANICAL GATES (`checks`) that the conductor executes itself
+  after you finish — run them yourself first; if a gate fails for the conductor, the
+  attempt is spent no matter what your summary claimed.
 
 ## 6. The stuck protocol (two-strike rule)
 

@@ -166,24 +166,39 @@ permanently resident. Default GPU wired limit is raised to 448 GB by the install
 
 - **Automations** — mission TOML defines goal, tasks, dependencies, acceptance criteria;
   the loop continuously answers "what needs to be done? what changed?"
+- **Planning** — `auto_plan = true` missions need only a goal: an opus-tier planner
+  investigates the repo and emits the task DAG (acceptance criteria + mechanical checks
+  included); if the DAG later stalls on failures, one bounded replan routes around them
+  (see `conductor/missions/autonomous.toml`).
 - **Worktrees** — every task executes in its own `git worktree`; agents cannot collide;
-  merges happen only after audit.
+  merges happen only after the full verification stack passes.
+- **Verification stack** — layered, cheapest-first: (1) deterministic `checks` — shell
+  commands the conductor runs itself, every one must exit 0; (2) sonnet-tier auditor
+  (verifier as strong as the generator); (3) opus-tier tiebreak when checks and auditor
+  disagree; (4) optional adversary pass on risk-bearing tasks.
+- **Escalation ladder** — a task's final attempt automatically runs on the opus tier:
+  maximum intelligence exactly where the budget shows it's needed.
+- **Supervision** — output-stall detection (default 12 min of silence) kills runaway
+  runs early instead of burning the full time box; total timeouts back it up; failed
+  attempts hand the next attempt a full `FEEDBACK.md` plus a forced root-cause
+  diagnosis so retries change strategy instead of repeating.
+- **Throughput** — `workers = 2` runs haiku-tier tasks on the always-resident fast lane
+  in parallel with big-slot work; the machine never idles while one model thinks.
 - **Skills** — engines load the domain packs; the ECC `continuous-learning` skill plus
   the conductor's ledger feed new `SKILL.md` candidates back into `skills/`.
 - **Connectors** — MCP: DuckDB data lake, Postgres/Supabase (self-hosted), filesystem, git.
-- **Subagents** — `researcher`, `developer`, `auditor`, `adversary` for both engines;
-  every task result is audited before merge; the adversary reviews time-efficiency.
+- **Subagents** — `researcher`, `developer`, `auditor`, `adversary` for both engines.
 - **Memory** — append-only `memory/LEDGER.md` + `memory/STATE.md` snapshot +
   `memory/FAILURES.md` (approaches that failed and why — read before every attempt),
   plain text, the single source of truth across runs.
-- **Self-healing** — llama-swap health checks with automatic service restart, stall
-  watchdogs (kill + retry with feedback), bounded retries, idle-time work queue,
-  hourly `REPORT-*.md`, and a `FINAL-REPORT.md` at mission end.
+- **Self-healing** — llama-swap health checks with automatic service restart, bounded
+  retries, idle-time work queue, hourly `REPORT-*.md`, and a `FINAL-REPORT.md`.
 - **Long-horizon protocol** — `engines/shared/AUTONOMY.md`, loaded globally by both
   engines and enforced by the conductor's task prompts: session-start recovery ritual,
-  plan-first (`TASKPLAN.md` with per-step checks and a NOT-DOING list), ratchet commits,
-  evidence-or-it-didn't-happen, a two-strike stuck protocol that forces strategy changes,
-  context-rot detection with clean checkpointing, and failure-memory discipline.
+  plan-first (`TASKPLAN.md` with per-step checks and a NOT-DOING list), ratchet commits
+  (`bin/checkpoint`), evidence-or-it-didn't-happen, a two-strike stuck protocol that
+  forces strategy changes, context-rot detection with clean checkpointing, and
+  failure-memory discipline.
 
 ## Honest expectations
 

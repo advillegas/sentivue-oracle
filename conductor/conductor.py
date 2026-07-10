@@ -3,13 +3,20 @@
 SentiVue Oracle conductor — the self-governing mission loop.
 
 Contract (see README):
-  Automations  mission TOML: goal, tasks, dependencies, acceptance criteria
-  Worktrees    every task runs in an isolated git worktree; merge only after audit
-  Subagents    developer run -> auditor verdict -> (optional) adversary on critical tasks
-  Memory       plain-text memory/LEDGER.md (append-only) + memory/STATE.md (snapshot)
-  Reports      hourly REPORT-*.md + FINAL-REPORT.md
-  Self-healing llama-swap health checks with service restart, stall watchdogs,
-               bounded retries with auditor feedback, idle background queue
+  Automations   mission TOML: goal, tasks, dependencies, acceptance criteria — or a
+                bare goal with auto_plan=true (the planner decomposes it, and replans
+                once if the plan stalls)
+  Worktrees     every task runs in an isolated git worktree; merge only after audit
+  Verification  layered: deterministic `checks` (conductor-run, exit code 0) ->
+                sonnet-tier auditor -> opus-tier tiebreak when checks and auditor
+                disagree -> optional adversary pass
+  Escalation    the final attempt of a failing task is auto-escalated to the opus tier
+  Supervision   total timeout AND output-stall detection kill runaway runs early
+  Memory        plain-text memory/LEDGER.md + STATE.md + FAILURES.md; per-attempt
+                FEEDBACK.md handoffs inside the worktree
+  Throughput    optional second worker drives haiku-tier tasks on the always-resident
+                fast lane in parallel with the big slot (workers = 2)
+  Reports       hourly REPORT-*.md + FINAL-REPORT.md
 
 Usage:
   uv run --project env python conductor/conductor.py run conductor/missions/example.toml \
@@ -20,6 +27,7 @@ Stdlib only (Python >= 3.11 for tomllib).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -56,21 +64,49 @@ def now() -> str:
 
 
 def sh(args: list[str], cwd: Path | None = None, timeout: int | None = None,
-       env: dict | None = None) -> subprocess.CompletedProcess:
-    """Run a command in its own session so a watchdog kill takes the whole tree."""
+       env: dict | None = None, stall_timeout: int | None = None) -> subprocess.CompletedProcess:
+    """Run a command in its own session with a total timeout AND an optional
+    output-stall timeout (kill when the process goes silent for too long —
+    catches hung runs long before the total budget is burned)."""
     full_env = {**os.environ, **(env or {})}
     p = subprocess.Popen(args, cwd=cwd, env=full_env, stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, text=True, start_new_session=True)
-    try:
-        out, _ = p.communicate(timeout=timeout)
-        return subprocess.CompletedProcess(args, p.returncode, out or "", "")
-    except subprocess.TimeoutExpired:
+                         stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                         errors="replace", start_new_session=True)
+    chunks: list[str] = []
+    last_activity = time.monotonic()
+
+    def reader() -> None:
+        nonlocal last_activity
+        assert p.stdout is not None
+        for line in p.stdout:
+            chunks.append(line)
+            last_activity = time.monotonic()
+
+    th = threading.Thread(target=reader, daemon=True)
+    th.start()
+    started = time.monotonic()
+    killed = ""
+    while p.poll() is None:
+        t = time.monotonic()
+        if timeout and t - started > timeout:
+            killed = "[WATCHDOG] killed: total timeout"
+            break
+        if stall_timeout and t - last_activity > stall_timeout:
+            killed = "[WATCHDOG] killed: stalled (no output)"
+            break
+        time.sleep(1)
+    if killed:
         try:
             os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-        except ProcessLookupError:
+        except (ProcessLookupError, PermissionError):
             pass
-        out, _ = p.communicate()
-        return subprocess.CompletedProcess(args, -9, (out or "") + "\n[WATCHDOG] killed: timeout", "")
+    try:
+        p.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pass
+    th.join(timeout=5)
+    out = "".join(chunks) + (f"\n{killed}" if killed else "")
+    return subprocess.CompletedProcess(args, -9 if killed else p.returncode, out, "")
 
 
 def git(repo: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProcess:
@@ -79,6 +115,11 @@ def git(repo: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProce
 
 # ---------------------------------------------------------------- mission spec
 
+TASK_FIELDS = {"id", "title", "prompt", "depends_on", "acceptance", "checks", "tier",
+               "audit_tier", "timeout_minutes", "stall_minutes", "max_attempts",
+               "adversary", "escalate", "background"}
+
+
 @dataclass
 class Task:
     id: str
@@ -86,15 +127,31 @@ class Task:
     prompt: str
     depends_on: list[str] = field(default_factory=list)
     acceptance: list[str] = field(default_factory=list)
+    checks: list[str] = field(default_factory=list)   # shell commands; conductor-run gates
     tier: str = "sonnet"
+    audit_tier: str = "sonnet"       # verifier should be at least as strong as generator
     timeout_minutes: int = 45
+    stall_minutes: int = 12          # output-silence kill (swap+prefill can take minutes)
     max_attempts: int = 3
     adversary: bool = False          # extra adversarial pass after audit
+    escalate: bool = True            # final attempt auto-escalates to opus tier
     background: bool = False         # only runs when nothing else is dispatchable
     # runtime state
-    status: str = "pending"          # pending|running|auditing|done|failed|blocked|merge-conflict
+    status: str = "pending"          # pending|claimed|running|auditing|done|failed|blocked|merge-conflict
     attempts: int = 0
     note: str = ""
+
+    @staticmethod
+    def from_dict(d: dict, background: bool = False) -> "Task":
+        clean = {k: v for k, v in d.items() if k in TASK_FIELDS}
+        clean["background"] = background or bool(clean.get("background"))
+        t = Task(**clean)
+        t.timeout_minutes = min(int(t.timeout_minutes), 120)
+        if t.tier not in TIER_MODEL:
+            t.tier = "sonnet"
+        if t.audit_tier not in TIER_MODEL:
+            t.audit_tier = "sonnet"
+        return t
 
 
 @dataclass
@@ -106,20 +163,22 @@ class Mission:
     engine: str = "claude"
     hours: float = 24.0
     report_minutes: int = 60
+    auto_plan: bool = False          # decompose the goal into tasks at mission start
+    workers: int = 1                 # 2 = second worker drives haiku tasks in parallel
 
     @staticmethod
     def load(path: Path, engine: str | None, hours: float | None) -> "Mission":
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
         m = raw.get("mission", {})
-        tasks = [Task(**{**t}) for t in raw.get("tasks", [])]
-        tasks += [Task(**{**t, "background": True}) for t in raw.get("background", [])]
+        tasks = [Task.from_dict(t) for t in raw.get("tasks", [])]
+        tasks += [Task.from_dict(t, background=True) for t in raw.get("background", [])]
         ids = [t.id for t in tasks]
         assert len(ids) == len(set(ids)), "duplicate task ids"
         for t in tasks:
             for d in t.depends_on:
                 assert d in ids, f"task {t.id} depends on unknown task {d}"
         repo = Path(os.path.expanduser(m.get("repo", str(ROOT)))).resolve()
-        return Mission(
+        mission = Mission(
             name=m.get("name", path.stem),
             goal=m.get("goal", ""),
             repo=repo,
@@ -127,16 +186,21 @@ class Mission:
             engine=engine or m.get("engine", "claude"),
             hours=hours or float(m.get("hours", 24)),
             report_minutes=int(m.get("report_minutes", 60)),
+            auto_plan=bool(m.get("auto_plan", False)),
+            workers=max(1, min(int(m.get("workers", 1)), 2)),
         )
+        assert mission.tasks or mission.auto_plan, "mission needs tasks or auto_plan=true"
+        return mission
 
 
 # ---------------------------------------------------------------- engines
 
 def engine_cmd(engine: str, prompt: str, tier: str) -> tuple[list[str], dict]:
-    """argv + extra env for one headless engine run (full autonomy: dedicated box)."""
+    """argv + extra env for one headless engine run (full autonomy: dedicated box).
+    Claude Code uses stream-json so the stall detector sees per-event activity."""
     if engine == "claude":
         return (["bash", str(ROOT / "engines/claude-code/launch.sh"), "-p", prompt,
-                 "--model", tier, "--output-format", "text",
+                 "--model", tier, "--output-format", "stream-json", "--verbose",
                  "--dangerously-skip-permissions"], {})
     if engine == "opencode":
         return (["bash", str(ROOT / "engines/opencode/launch.sh"), "run",
@@ -146,6 +210,61 @@ def engine_cmd(engine: str, prompt: str, tier: str) -> tuple[list[str], dict]:
     raise ValueError(f"unknown engine {engine!r} (use claude|opencode)")
 
 
+def extract_result(engine: str, raw: str) -> str:
+    """Final assistant text from an engine run. Claude stream-json emits one
+    {"type":"result"} event at the end; OpenCode prints plain text."""
+    if engine != "claude":
+        return raw
+    result = ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("type") == "result":
+            result = obj.get("result") or ""
+    return result if result else raw[-4000:]
+
+
+PLAN_CONTRACT = """Respond with STRICT JSON inside a single ```json fenced block: an array of
+3-10 task objects, each:
+{"id": "<kebab-slug>", "title": "<short>", "prompt": "<detailed, fully self-contained
+instructions for an engineer with NO memory of this conversation>",
+ "depends_on": ["<ids>"], "acceptance": ["<criterion>", ...],
+ "checks": ["<shell command that exits 0 iff the criterion holds>", ...],
+ "tier": "sonnet"|"haiku"|"opus", "timeout_minutes": <int, <=90>, "adversary": <bool>}
+Rules: ids unique; depends_on must form a DAG over these ids; every task must be
+independently verifiable; put the mechanical proof of every acceptance criterion into
+checks wherever a shell command can express it; use tier "haiku" for grunt work,
+"opus" only where deep reasoning is essential; adversary=true for risk-bearing tasks."""
+
+
+def parse_plan(text: str) -> list[Task]:
+    blocks = re.findall(r"```json\s*(.*?)```", text, re.S)
+    for block in reversed(blocks):
+        try:
+            raw = json.loads(block)
+        except ValueError:
+            continue
+        if not isinstance(raw, list) or not raw:
+            continue
+        tasks = []
+        for d in raw[:10]:
+            if isinstance(d, dict) and d.get("id") and d.get("prompt"):
+                d.setdefault("title", d["id"])
+                tasks.append(Task.from_dict(d))
+        ids = {t.id for t in tasks}
+        if len(ids) != len(tasks):
+            continue
+        for t in tasks:
+            t.depends_on = [d for d in t.depends_on if d in ids and d != t.id]
+        return tasks
+    return []
+
+
 # ---------------------------------------------------------------- conductor
 
 class Conductor:
@@ -153,9 +272,12 @@ class Conductor:
         self.m = mission
         self.t0 = time.monotonic()
         self.deadline = self.t0 + mission.hours * 3600
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()        # task state + memory files
+        self.gitlock = threading.Lock()     # worktree add / merge / branch ops
+        self.biglock = threading.Lock()     # big-slot serialization (prevents swap thrash)
         self.current: str = "starting up"
-        self.stop_reports = threading.Event()
+        self.stopping = threading.Event()
+        self.replanned = False
         for d in (MEMORY, REPORTS, LOGS, WORKTREES):
             d.mkdir(parents=True, exist_ok=True)
         self.use_git = git(self.m.repo, "rev-parse", "--git-dir").returncode == 0
@@ -221,60 +343,153 @@ class Conductor:
         iterates on prior work instead of starting over."""
         if not self.use_git:
             return self.m.repo
-        if git(self.m.repo, "rev-parse", "--verify", self.branch).returncode != 0:
-            git(self.m.repo, "branch", self.branch)
-        wt = WORKTREES / f"{self.m.name}-{t.id}"
-        if wt.exists():
+        with self.gitlock:
+            if git(self.m.repo, "rev-parse", "--verify", self.branch).returncode != 0:
+                git(self.m.repo, "branch", self.branch)
+            wt = WORKTREES / f"{self.m.name}-{t.id}"
+            if wt.exists():
+                return wt
+            git(self.m.repo, "worktree", "prune")
+            git(self.m.repo, "branch", "-D", self.task_branch(t))   # stale from a prior run
+            r = git(self.m.repo, "worktree", "add", "-b", self.task_branch(t), str(wt), self.branch)
+            if r.returncode != 0:
+                self.ledger("WORKTREE ERROR", r.stdout[-400:])
+                return self.m.repo
             return wt
-        git(self.m.repo, "worktree", "prune")
-        git(self.m.repo, "branch", "-D", self.task_branch(t))   # stale from a prior run
-        r = git(self.m.repo, "worktree", "add", "-b", self.task_branch(t), str(wt), self.branch)
-        if r.returncode != 0:
-            self.ledger("WORKTREE ERROR", r.stdout[-400:])
-            return self.m.repo
-        return wt
 
     def merge_task(self, t: Task, wt: Path) -> bool:
         """Advance the mission branch to the audited task tip.
 
-        Dispatch is sequential and every task branches from the current mission
-        tip, so this is always a fast-forward — implemented as a ref move
-        (`branch -f`), which never touches whatever branch the operator has
-        checked out in the main working copy."""
+        Sequential merges from the current mission tip make this a fast-forward,
+        implemented as a ref move (`branch -f`) so it never touches whatever the
+        operator has checked out. With parallel workers a rebase brings the task
+        branch up to date first."""
         if not self.use_git or wt == self.m.repo:
             return True
-        git(wt, "add", "-A")
-        git(wt, "commit", "-m", f"task({t.id}): {t.title} [audit: pass]")
-        task_branch = self.task_branch(t)
-        r = git(self.m.repo, "branch", "-f", self.branch, task_branch)
-        if r.returncode != 0:
-            t.status = "merge-conflict"
-            self.ledger("MERGE ERROR", f"{t.id}: could not advance {self.branch} "
-                                       f"({r.stdout.strip()[-300:]}); work kept in {wt}")
-            return False
-        git(self.m.repo, "worktree", "remove", "--force", str(wt))
-        git(self.m.repo, "branch", "-D", task_branch)
-        return True
+        with self.gitlock:
+            git(wt, "add", "-A")
+            git(wt, "commit", "-m", f"task({t.id}): {t.title} [audit: pass]")
+            task_branch = self.task_branch(t)
+            if git(self.m.repo, "merge-base", "--is-ancestor", self.branch, task_branch).returncode != 0:
+                r = git(wt, "rebase", self.branch)
+                if r.returncode != 0:
+                    git(wt, "rebase", "--abort")
+                    t.status = "merge-conflict"
+                    self.ledger("MERGE CONFLICT", f"{t.id}: rebase onto {self.branch} failed; "
+                                                  f"work kept in {wt}")
+                    return False
+            r = git(self.m.repo, "branch", "-f", self.branch, task_branch)
+            if r.returncode != 0:
+                t.status = "merge-conflict"
+                self.ledger("MERGE ERROR", f"{t.id}: could not advance {self.branch} "
+                                           f"({r.stdout.strip()[-300:]}); work kept in {wt}")
+                return False
+            git(self.m.repo, "worktree", "remove", "--force", str(wt))
+            git(self.m.repo, "branch", "-D", task_branch)
+            return True
 
-    # ---- agents -------------------------------------------------------------
-    def run_engine(self, prompt: str, tier: str, cwd: Path, timeout_min: int, tag: str) -> str:
+    # ---- engine runs ---------------------------------------------------------
+    def run_engine(self, prompt: str, tier: str, cwd: Path, timeout_min: int,
+                   tag: str, stall_min: int | None = None) -> str:
         self.ensure_serving()
         argv, env = engine_cmd(self.m.engine, prompt, tier)
-        r = sh(argv, cwd=cwd, timeout=timeout_min * 60, env=env)
+        # Only one big-slot (sonnet/opus) request at a time: concurrent big requests
+        # from the parallel worker would thrash the model hot-swap. Fast-lane requests
+        # (haiku model, always resident, --parallel 2) run without the lock.
+        need_big = TIER_MODEL[tier] != TIER_MODEL["haiku"]
+        gate = self.biglock if need_big else contextlib.nullcontext()
+        with gate:
+            r = sh(argv, cwd=cwd, timeout=timeout_min * 60, env=env,
+                   stall_timeout=stall_min * 60 if stall_min else None)
         (LOGS / f"{self.m.name}-{tag}.log").write_text(r.stdout, encoding="utf-8")
-        return r.stdout
+        text = extract_result(self.m.engine, r.stdout)
+        if "[WATCHDOG]" in r.stdout:
+            text += "\n[WATCHDOG] killed"
+        return text
 
+    # ---- planning ------------------------------------------------------------
+    def plan_mission(self) -> bool:
+        self.current = "planning: decomposing the mission goal"
+        self.ledger("PLANNING", "auto_plan: decomposing goal into tasks")
+        tier = "opus" if TIER_MODEL["opus"] != TIER_MODEL["sonnet"] else "sonnet"
+        prompt = (
+            f"You are the mission PLANNER.\nMISSION GOAL: {self.m.goal}\n"
+            f"Repository: {self.m.repo}\n\n"
+            "Investigate the repository READ-ONLY first (git log, key files, tests, docs) "
+            "so the plan reflects reality, then decompose the goal into an executable task "
+            "DAG. Each task is later executed by a fresh engineer in an isolated worktree "
+            "and verified by an independent auditor against its acceptance criteria and "
+            f"checks.\n\n{PLAN_CONTRACT}"
+        )
+        out = self.run_engine(prompt, tier, self.m.repo, 30, "plan", stall_min=12)
+        tasks = parse_plan(out)
+        if not tasks:
+            self.ledger("PLANNING FAILED", "no valid JSON plan produced")
+            return False
+        background = [t for t in self.m.tasks if t.background]
+        self.m.tasks = tasks + background
+        plan_md = "\n".join(f"- **{t.id}** ({t.tier}, deps: {t.depends_on or '—'}): {t.title}"
+                            for t in tasks)
+        (MEMORY / "MISSION-PLAN.md").write_text(
+            f"# Mission plan — {self.m.name}\n\n{now()}\nGoal: {self.m.goal}\n\n{plan_md}\n",
+            encoding="utf-8")
+        self.ledger("PLANNED", f"{len(tasks)} tasks: " + ", ".join(t.id for t in tasks))
+        return True
+
+    def replan(self) -> bool:
+        """One bounded recovery replan when the task DAG stalls on failures."""
+        self.current = "replanning after stall"
+        table = "\n".join(f"- {t.id}: {t.status} ({t.note[:120]})" for t in self.m.tasks)
+        failures = ""
+        fpath = MEMORY / "FAILURES.md"
+        if fpath.exists():
+            failures = fpath.read_text(encoding="utf-8")[-3000:]
+        tier = "opus" if TIER_MODEL["opus"] != TIER_MODEL["sonnet"] else "sonnet"
+        prompt = (
+            f"You are the mission PLANNER. The plan has STALLED.\n"
+            f"MISSION GOAL: {self.m.goal}\nRepository: {self.m.repo}\n\n"
+            f"TASK STATE:\n{table}\n\nFAILURE MEMORY (most recent):\n{failures}\n\n"
+            "Produce REPLACEMENT tasks that route around the failures (different approach, "
+            "smaller steps, or explicit diagnostics first). Completed tasks are kept; every "
+            "failed/blocked/pending task is discarded in favor of your new plan. Do not "
+            f"re-propose an approach the failure memory shows to be dead.\n\n{PLAN_CONTRACT}"
+        )
+        out = self.run_engine(prompt, tier, self.m.repo, 30, "replan", stall_min=12)
+        new = parse_plan(out)
+        if not new:
+            self.ledger("REPLAN FAILED", "no valid JSON plan produced")
+            return False
+        keep = [t for t in self.m.tasks if t.status == "done" or t.background]
+        valid_ids = {t.id for t in keep} | {t.id for t in new}
+        for t in new:
+            if any(k.id == t.id for k in keep):
+                t.id = f"{t.id}-r2"
+            t.depends_on = [d for d in t.depends_on if d in valid_ids]
+        with self.lock:
+            self.m.tasks = keep + new
+        self.ledger("REPLANNED", f"{len(new)} recovery tasks: " + ", ".join(t.id for t in new))
+        return True
+
+    # ---- prompts ---------------------------------------------------------------
     def developer_prompt(self, t: Task, feedback: str) -> str:
         acc = "\n".join(f"  {i+1}. {a}" for i, a in enumerate(t.acceptance)) or "  (none listed)"
+        gates = ""
+        if t.checks:
+            gates = ("\n\nMECHANICAL GATES — the conductor runs these itself after you finish; "
+                     "every one must exit 0:\n" +
+                     "\n".join(f"  $ {c}" for c in t.checks))
         fb = ""
         if feedback:
-            fb = (f"\n\nATTEMPT {t.attempts} — THE PREVIOUS ATTEMPT FAILED:\n{feedback}\n"
+            fb = (f"\n\nATTEMPT {t.attempts} — THE PREVIOUS ATTEMPT FAILED. Full details are in "
+                  "FEEDBACK.md in this directory; the summary:\n"
+                  f"{feedback[:1200]}\n"
                   "Do NOT re-run the failed approach harder. First write the DIAGNOSIS block in "
                   "TASKPLAN.md (root cause, not symptom — 5 lines), then execute a changed plan. "
                   "Repeating a logged failure wastes the mission's budget.")
         return (
             f"MISSION: {self.m.goal}\nTASK [{t.id}]: {t.title}\n\n{t.prompt}\n\n"
-            f"ACCEPTANCE CRITERIA (audited independently — all must demonstrably hold):\n{acc}{fb}\n\n"
+            f"ACCEPTANCE CRITERIA (audited independently — all must demonstrably hold):\n"
+            f"{acc}{gates}{fb}\n\n"
             "You operate under the Long-Horizon Autonomy Protocol (in your loaded instructions). "
             "Non-negotiables for this run:\n"
             f"1. START RITUAL before any edit: read {MEMORY / 'STATE.md'}, the tail of "
@@ -282,8 +497,9 @@ class Conductor:
             "run `git log --oneline -10` and `git status` here; read TASKPLAN.md if present.\n"
             "2. Write TASKPLAN.md (GOAL / 3-7 STEPS each with a CHECK / NOT-DOING) before "
             "touching code; keep it updated — it is your anchor against drift.\n"
-            "3. Work the ratchet: one step, run its CHECK, commit, next step. Never end a "
-            "step with a broken tree.\n"
+            "3. Work the ratchet: one step, run its CHECK, commit "
+            "(`bash $ORACLE_ROOT/bin/checkpoint \"msg\"` does commit + ledger in one step), "
+            "next step. Never end a step with a broken tree.\n"
             "4. Evidence standard: a criterion counts only with the command AND its fresh output.\n"
             "5. Re-anchor every ~10 actions: re-read the criteria and your current step.\n"
             f"6. Finish: full test suite from clean state, commit, ledger entry to "
@@ -292,7 +508,21 @@ class Conductor:
             "what you ruled out, what you would try next>'."
         )
 
-    def audit(self, t: Task, wt: Path) -> tuple[bool, str]:
+    # ---- verification stack ------------------------------------------------------
+    def run_checks(self, t: Task, wt: Path) -> tuple[bool, str]:
+        """Deterministic gates. LLM judgment only begins after exit codes agree."""
+        if not t.checks:
+            return True, ""
+        fails = []
+        for c in t.checks:
+            r = sh(["bash", "-lc", c], cwd=wt, timeout=900)
+            status = "OK" if r.returncode == 0 else f"EXIT {r.returncode}"
+            self.ledger(f"CHECK {t.id}", f"[{status}] $ {c}")
+            if r.returncode != 0:
+                fails.append(f"$ {c}\n{r.stdout[-1500:]}")
+        return (not fails), "\n\n".join(fails)
+
+    def audit(self, t: Task, wt: Path, tier: str | None = None, tag: str = "") -> tuple[bool, str]:
         t.status = "auditing"
         self.write_state()
         diff = ""
@@ -309,7 +539,8 @@ class Conductor:
             "was weakened or deleted to force a pass — both are FAIL reasons.\n"
             "Finish with exactly one line: 'AUDIT: PASS' or 'AUDIT: FAIL: <reasons>'."
         )
-        out = self.run_engine(prompt, "haiku", wt, 20, f"{t.id}-audit{t.attempts}")
+        out = self.run_engine(prompt, tier or t.audit_tier, wt, 25,
+                              f"{t.id}-audit{t.attempts}{tag}", stall_min=12)
         m = re.findall(r"AUDIT:\s*(PASS|FAIL:?.*)", out)
         verdict = m[-1] if m else "FAIL: auditor produced no verdict"
         return verdict.startswith("PASS"), verdict
@@ -320,7 +551,7 @@ class Conductor:
             "current directory: edge cases, statistical validity, silent failures, wasted effort. "
             "Reproduce anything you claim. End with 'ADVERSARY: <c> critical, <m> major, <n> minor'."
         )
-        out = self.run_engine(prompt, "opus", wt, 30, f"{t.id}-adversary")
+        out = self.run_engine(prompt, "opus", wt, 30, f"{t.id}-adversary", stall_min=15)
         m = re.findall(r"ADVERSARY:.*", out)
         self.ledger(f"ADVERSARY on {t.id}", m[-1] if m else "no summary line")
 
@@ -336,26 +567,53 @@ class Conductor:
                 t.status, t.note = "pending", "deadline reached before dispatch"
                 return
             t.attempts += 1
+            tier = t.tier
+            if (t.escalate and t.attempts == t.max_attempts
+                    and TIER_MODEL["opus"] != TIER_MODEL[t.tier]):
+                tier = "opus"
+                self.ledger(f"ESCALATE {t.id}", "final attempt runs on the opus tier")
             t.status = "running"
-            self.current = f"task {t.id} (attempt {t.attempts}, {t.tier})"
+            self.current = f"task {t.id} (attempt {t.attempts}, {tier})"
             self.write_state()
-            self.ledger(f"DISPATCH {t.id}", f"attempt {t.attempts}/{t.max_attempts}, tier {t.tier}")
+            self.ledger(f"DISPATCH {t.id}", f"attempt {t.attempts}/{t.max_attempts}, tier {tier}")
             wt = self.make_worktree(t)
-            out = self.run_engine(self.developer_prompt(t, feedback), t.tier, wt,
-                                  t.timeout_minutes, f"{t.id}-dev{t.attempts}")
+            if feedback:
+                (wt / "FEEDBACK.md").write_text(
+                    f"# Attempt {t.attempts - 1} failure details\n\n{feedback}\n", encoding="utf-8")
+            # Thinking models emit no stream events mid-thought; give opus runs
+            # a longer silence allowance before the stall watchdog fires.
+            stall = max(t.stall_minutes, 20) if tier == "opus" else t.stall_minutes
+            out = self.run_engine(self.developer_prompt(t, feedback), tier, wt,
+                                  t.timeout_minutes, f"{t.id}-dev{t.attempts}",
+                                  stall_min=stall)
             if "[WATCHDOG] killed" in out:
-                feedback = "Previous attempt hung and was killed. Decompose the work; commit incrementally."
+                feedback = ("The previous attempt hung (or went silent) and was killed. "
+                            "The approach was likely too monolithic — decompose the work, "
+                            "commit after every step, avoid long-running commands.")
                 self.ledger(f"WATCHDOG {t.id}", "stalled run killed — retrying")
                 self.log_failure(t, "watchdog-kill",
-                                 "run exceeded its time box and was killed; the approach was "
-                                 "likely too monolithic — decompose and commit incrementally")
+                                 "run exceeded its time box or went silent and was killed")
                 continue
-            if re.search(r"^BLOCKED:", out.strip().splitlines()[-1] if out.strip() else "", re.M):
-                t.status, t.note = "blocked", out.strip().splitlines()[-1][:300]
+            last_line = out.strip().splitlines()[-1] if out.strip() else ""
+            if re.search(r"^BLOCKED:", last_line, re.M):
+                t.status, t.note = "blocked", last_line[:300]
                 self.ledger(f"BLOCKED {t.id}", t.note)
                 self.log_failure(t, "blocked", t.note)
                 return
+            checks_ok, checks_out = self.run_checks(t, wt)
+            if not checks_ok:
+                self.log_failure(t, "checks-fail", checks_out[:600])
+                feedback = f"Deterministic checks failed:\n{checks_out}"
+                continue
             ok, verdict = self.audit(t, wt)
+            if (not ok and t.checks
+                    and TIER_MODEL["opus"] != TIER_MODEL[t.audit_tier]):
+                # Checks passed but the auditor disagrees — tiebreak with the
+                # strongest model (skipped when the profile maps opus to the same
+                # model, where a re-audit would add nothing).
+                ok2, verdict2 = self.audit(t, wt, tier="opus", tag="-tiebreak")
+                if ok2:
+                    ok, verdict = True, verdict2 + " [opus tiebreak overrode initial FAIL]"
             self.ledger(f"AUDIT {t.id}", verdict[:300])
             if ok:
                 if t.adversary:
@@ -369,13 +627,47 @@ class Conductor:
         self.ledger(f"FAILED {t.id}", t.note)
         self.log_failure(t, "exhausted", t.note)
 
+    # ---- scheduling -----------------------------------------------------------
+    def claim(self, background: bool, fast_only: bool = False) -> Task | None:
+        """Atomically pick a dispatchable task and mark it claimed."""
+        with self.lock:
+            done = {t.id for t in self.m.tasks if t.status == "done"}
+            for t in self.m.tasks:
+                if t.background != background or t.status != "pending":
+                    continue
+                if fast_only and t.tier != "haiku":
+                    continue
+                if all(d in done for d in t.depends_on):
+                    t.status = "claimed"
+                    return t
+        return None
+
     def dispatchable(self, background: bool) -> Task | None:
+        """Read-only view (used by reports)."""
         done = {t.id for t in self.m.tasks if t.status == "done"}
         for t in self.m.tasks:
             if (t.background == background and t.status == "pending"
                     and all(d in done for d in t.depends_on)):
                 return t
         return None
+
+    def all_terminal(self) -> bool:
+        return all(t.status in ("done", "failed", "blocked", "merge-conflict")
+                   for t in self.m.tasks)
+
+    def anything_active(self) -> bool:
+        return any(t.status in ("claimed", "running", "auditing") for t in self.m.tasks)
+
+    def fast_worker(self) -> None:
+        """Second worker: drives haiku-tier tasks on the always-resident fast lane,
+        in parallel with the big slot. Worktrees isolate; gitlock serializes merges."""
+        while not self.stopping.is_set() and time.monotonic() < self.cutoff():
+            t = self.claim(False, fast_only=True) or self.claim(True, fast_only=True)
+            if not t:
+                self.stopping.wait(20)
+                continue
+            self.ledger(f"FAST-LANE {t.id}", "picked up by the parallel fast worker")
+            self.run_task(t)
 
     # ---- reporting ----------------------------------------------------------
     def report(self, final: bool = False) -> Path:
@@ -404,7 +696,7 @@ class Conductor:
         return p
 
     def _report_thread(self) -> None:
-        while not self.stop_reports.wait(self.m.report_minutes * 60):
+        while not self.stopping.wait(self.m.report_minutes * 60):
             p = self.report()
             self.ledger("HOURLY REPORT", str(p.relative_to(ROOT)))
 
@@ -412,35 +704,42 @@ class Conductor:
     def run(self) -> int:
         self.ledger("MISSION START",
                     f"goal='{self.m.goal}' engine={self.m.engine} budget={self.m.hours}h "
-                    f"tasks={len(self.m.tasks)} repo={self.m.repo}")
+                    f"tasks={len(self.m.tasks)} workers={self.m.workers} repo={self.m.repo}")
         if not self.use_git:
             self.ledger("WARN", "target repo is not a git repo — running without worktree isolation")
-        reporter = threading.Thread(target=self._report_thread, daemon=True)
-        reporter.start()
+        if self.m.auto_plan and not [t for t in self.m.tasks if not t.background]:
+            if not self.plan_mission():
+                self.ledger("MISSION END", "planning failed; nothing to execute")
+                return 1
+        threading.Thread(target=self._report_thread, daemon=True).start()
+        if self.m.workers > 1:
+            threading.Thread(target=self.fast_worker, daemon=True).start()
         try:
             while time.monotonic() < self.cutoff():
                 self.write_state()
-                task = self.dispatchable(False)
-                if task:
-                    self.run_task(task)
+                t = self.claim(False) or self.claim(True)
+                if t:
+                    self.run_task(t)
                     continue
-                bg = self.dispatchable(True)
-                if bg:
-                    self.current = f"idle — running background task {bg.id}"
-                    self.ledger("IDLE", f"no foreground work dispatchable; using time on {bg.id}")
-                    self.run_task(bg)
+                if self.anything_active():        # parallel worker is mid-task
+                    time.sleep(15)
                     continue
-                pending = [t for t in self.m.tasks if t.status == "pending"]
-                if not pending:
+                if self.all_terminal():
                     self.ledger("MISSION COMPLETE", "no pending tasks remain")
                     break
+                # Pending tasks exist but none are dispatchable: dependencies failed.
+                if self.m.auto_plan and not self.replanned:
+                    self.replanned = True
+                    if self.replan():
+                        continue
+                pending = [t for t in self.m.tasks if t.status == "pending"]
                 self.current = f"stalled — {len(pending)} tasks blocked by failed dependencies"
                 self.ledger("STALLED", self.current + " — ending early rather than idling")
                 break
         except KeyboardInterrupt:
             self.ledger("INTERRUPTED", "operator stopped the mission")
         finally:
-            self.stop_reports.set()
+            self.stopping.set()
             self.current = "mission ended"
             self.write_state()
             p = self.report(final=True)
