@@ -59,17 +59,16 @@ DOCTRINE="$(cat "$ROOT/engines/shared/ENVOY.md")"
 if [[ "$ENGINE" == "claude" ]]; then
   ARGS=(--settings "$ROOT/engines/claude-code/envoy-settings.json"
         --append-system-prompt "$DOCTRINE")
+  QUEUE_PROMPT="Process every open item in memory/NET-REQUESTS.md per your envoy doctrine: NEED items via envoy-fetch into quarantine; FIND items via envoy-discover, distilled into incoming/notes/. Then summarize what was fetched, researched, refused, or needs specification."
   if [[ $QUEUE -eq 1 ]]; then
-    bash engines/claude-code/launch.sh "${ARGS[@]}" \
-      -p "Process every open item in memory/NET-REQUESTS.md per your envoy doctrine, then summarize what was fetched, refused, or needs specification." \
-      --output-format text
+    bash engines/claude-code/launch.sh "${ARGS[@]}" -p "$QUEUE_PROMPT" --output-format text
   else
     bash engines/claude-code/launch.sh "${ARGS[@]}"
   fi
 elif [[ "$ENGINE" == "opencode" ]]; then
+  QUEUE_PROMPT="Process every open item in memory/NET-REQUESTS.md per your envoy doctrine: NEED items via envoy-fetch into quarantine; FIND items via envoy-discover, distilled into incoming/notes/. Then summarize what was fetched, researched, refused, or needs specification."
   if [[ $QUEUE -eq 1 ]]; then
-    bash engines/opencode/launch.sh run --agent envoy \
-      "Process every open item in memory/NET-REQUESTS.md per your envoy doctrine, then summarize what was fetched, refused, or needs specification."
+    bash engines/opencode/launch.sh run --agent envoy "$QUEUE_PROMPT"
   else
     bash engines/opencode/launch.sh --agent envoy
   fi

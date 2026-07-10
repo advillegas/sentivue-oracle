@@ -4,6 +4,8 @@
     "allow": [
       "Bash(envoy-fetch:*)",
       "Bash(bin/envoy-fetch:*)",
+      "Bash(envoy-discover:*)",
+      "Bash(bin/envoy-discover:*)",
       "Bash(shasum:*)",
       "Bash(pip download:*)",
       "Bash(npm pack:*)",

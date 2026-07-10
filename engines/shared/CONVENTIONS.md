@@ -12,7 +12,10 @@ If your work genuinely needs an external artifact:
 
 1. Append a request to `memory/NET-REQUESTS.md`:
    `- [ ] <date> <mission>/<task>: NEED pip:pkg==x.y.z — WHY <reason> — USED-IN <path>`
-   (exact pinned versions; vague requests get bounced back).
+   for artifacts (exact pinned versions; vague requests get bounced back), or
+   `- [ ] <date> <mission>/<task>: FIND <generalized question> — WHY <reason>`
+   for discovery/research. Phrase FIND requests in public terms only — never
+   project symbols, file names, or data values; the envoy will refuse otherwise.
 2. Continue with a local alternative if one exists; otherwise end with
    `BLOCKED: awaiting NET-REQUEST <summary>`.
 3. Fulfilled artifacts appear quarantined under `incoming/` with hashes in

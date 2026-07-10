@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# envoy-discover — sanitized DISCOVERY for the envoy: find things without leaking
+# anything. Structured public-knowledge APIs only (no general search engines);
+# every query passes an IP-safety sanitizer and is audit-logged.
+#
+#   envoy-discover so <terms...>          Stack Overflow questions (error skeletons, how-tos)
+#   envoy-discover so-thread <id>         top answers for a question id
+#   envoy-discover issues <terms...>      GitHub issues/PRs (long-tail bugs)
+#   envoy-discover github <terms...>      GitHub repositories (find tools)
+#   envoy-discover pypi <exact-name>      PyPI package info (exact name)
+#   envoy-discover npm <terms...>         npm registry search
+#   envoy-discover crates <terms...>      crates.io search
+#   envoy-discover arxiv <terms...>       arXiv papers
+#   envoy-discover models <terms...>      Hugging Face models
+#   envoy-discover wiki <title>           Wikipedia summary (concept lookup)
+#
+# SANITIZER (structural never-send guarantees):
+#   <=120 chars, <=12 words, tokens <=32 chars, charset [A-Za-z0-9 ._+-] only,
+#   no base64/hex-looking runs, nothing matching connectors/discovery-blocklist.txt
+#   (project names and identifiers that must never appear in an outbound query).
+#   Every query is recorded in incoming/PROVENANCE.md.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BLOCK="$ROOT/connectors/discovery-blocklist.txt"
+PROV="$ROOT/incoming/PROVENANCE.md"
+UA="envoy/1.0"
+mkdir -p "$ROOT/incoming"
+[[ -f "$PROV" ]] || echo "# Download provenance — every artifact the envoy ever fetched." > "$PROV"
+
+mode="${1:-help}"; shift || true
+q="$*"
+
+refuse() { echo "REFUSED: $1"; exit 1; }
+
+sanitize() {
+  [[ -n "$q" ]] || refuse "empty query"
+  [[ ${#q} -le 120 ]] || refuse "query too long (max 120 chars) — generalize it"
+  [[ $(echo "$q" | wc -w) -le 12 ]] || refuse "too many words (max 12) — strip to the skeleton"
+  echo "$q" | grep -Eq '^[A-Za-z0-9 ._+-]+$' || refuse "only letters, digits, space, . _ + - allowed"
+  for tok in $q; do
+    [[ ${#tok} -le 32 ]] || refuse "token '$tok' too long — that looks like an identifier, not a term"
+  done
+  echo "$q" | grep -Eq '[A-Za-z0-9+/=]{24,}' && refuse "encoded-data-looking token"
+  if [[ -f "$BLOCK" ]]; then
+    lower="$(echo "$q" | tr 'A-Z' 'a-z')"
+    while IFS= read -r w; do
+      w="$(echo "$w" | xargs | tr 'A-Z' 'a-z')"; [[ -z "$w" || "$w" == \#* ]] && continue
+      [[ "$lower" == *"$w"* ]] && refuse "query contains blocklisted identifier '$w' — never name project internals outbound"
+    done < "$BLOCK"
+  fi
+  ENC="$(jq -rn --arg q "$q" '$q|@uri')"
+}
+
+log_query() {  # log_query <endpoint-host>
+  printf -- "- %s | discover:%s | %s | q=\"%s\"\n" \
+    "$(date '+%Y-%m-%d %H:%M')" "$mode" "$1" "$q" >> "$PROV"
+}
+
+get() { curl -sf --compressed --proto '=https' --request GET --max-time 60 -A "$UA" "$1"; }
+
+case "$mode" in
+  so)
+    sanitize; log_query "api.stackexchange.com"
+    get "https://api.stackexchange.com/2.3/search/advanced?order=desc&sort=relevance&q=$ENC&site=stackoverflow&pagesize=10" \
+      | jq -r '.items[] | "[\(.score)] \(if .is_answered then "ANSWERED" else "open" end) (\(.answer_count) answers)\n  \(.title)\n  id=\(.question_id)  \(.link)\n"'
+    echo "(fetch answers: envoy-discover so-thread <id>)"
+    ;;
+  so-thread)
+    [[ "$q" =~ ^[0-9]+$ ]] || refuse "so-thread takes a numeric question id"
+    log_query "api.stackexchange.com"
+    get "https://api.stackexchange.com/2.3/questions/$q/answers?order=desc&sort=votes&site=stackoverflow&filter=withbody&pagesize=3" \
+      | jq -r '.items[] | "=== answer score=\(.score) accepted=\(.is_accepted) ===\n\(.body | gsub("<[^>]*>"; "") | .[0:3000])\n"'
+    ;;
+  issues)
+    sanitize; log_query "api.github.com"
+    get "https://api.github.com/search/issues?q=$ENC&per_page=10" \
+      | jq -r '.items[] | "[\(.state)] \(.title)  (\(.comments) comments)\n  \(.html_url)\n"'
+    ;;
+  github)
+    sanitize; log_query "api.github.com"
+    get "https://api.github.com/search/repositories?q=$ENC&per_page=10&sort=stars" \
+      | jq -r '.items[] | "\(.full_name)  \u2605\(.stargazers_count)  pushed \(.pushed_at[0:10])\n  \(.description // "-")\n  \(.html_url)\n"'
+    ;;
+  pypi)
+    sanitize
+    [[ $(echo "$q" | wc -w) -eq 1 ]] || refuse "pypi lookup takes one exact package name (discover names via 'github'/'so')"
+    log_query "pypi.org"
+    get "https://pypi.org/pypi/$ENC/json" \
+      | jq -r '"\(.info.name) \(.info.version)\n  \(.info.summary // "-")\n  license: \(.info.license // "-")  requires: \(.info.requires_python // "-")\n  \(.info.project_url // .info.package_url)"'
+    ;;
+  npm)
+    sanitize; log_query "registry.npmjs.org"
+    get "https://registry.npmjs.org/-/v1/search?text=$ENC&size=10" \
+      | jq -r '.objects[] | "\(.package.name)@\(.package.version)  score=\(.score.final|.*100|round)/100\n  \(.package.description // "-")\n"'
+    ;;
+  crates)
+    sanitize; log_query "crates.io"
+    get "https://crates.io/api/v1/crates?q=$ENC&per_page=10" \
+      | jq -r '.crates[] | "\(.name) \(.max_stable_version // .max_version)  \u2193\(.downloads)\n  \(.description // "-" | gsub("\n";" "))\n"'
+    ;;
+  arxiv)
+    sanitize; log_query "export.arxiv.org"
+    get "https://export.arxiv.org/api/query?search_query=all:$ENC&max_results=10&sortBy=relevance" \
+      | grep -E "<(title|id|published)>" | sed -E 's/^ *<[^>]+>//; s/<\/[^>]+>$//' \
+      | awk 'NR>1 {print}' | paste - - - | awk -F'\t' '{printf "%s\n  %s  (%s)\n\n", $2, $1, substr($3,1,10)}'
+    ;;
+  models)
+    sanitize; log_query "huggingface.co"
+    get "https://huggingface.co/api/models?search=$ENC&limit=10&sort=downloads" \
+      | jq -r '.[] | "\(.id)  \u2193\(.downloads // 0)  \u2661\(.likes // 0)"'
+    ;;
+  wiki)
+    sanitize
+    title="$(echo "$q" | tr ' ' '_')"
+    log_query "en.wikipedia.org"
+    get "https://en.wikipedia.org/api/rest_v1/page/summary/$title" \
+      | jq -r '"\(.title)\n\(.extract // "no summary")\n\(.content_urls.desktop.page // "")"'
+    ;;
+  help|*)
+    sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    ;;
+esac

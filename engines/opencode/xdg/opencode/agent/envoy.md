@@ -11,6 +11,9 @@ permission:
     "envoy-fetch *": allow
     "bin/envoy-fetch *": allow
     "bash bin/envoy-fetch *": allow
+    "envoy-discover *": allow
+    "bin/envoy-discover *": allow
+    "bash bin/envoy-discover *": allow
     "shasum *": allow
     "ls *": allow
     "cat *": allow

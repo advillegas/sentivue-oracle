@@ -1,0 +1,12 @@
+# Identifiers that must NEVER appear in an outbound discovery query
+# (case-insensitive substring match; envoy-discover refuses matching queries).
+# Seed with project names, product names, org names, and any proprietary symbols.
+# Add generously: a refused query costs seconds, a leaked identifier is forever.
+
+sentivue
+spartan
+advillegas
+villegas
+mma-poe
+boxing-poe
+oracle-vault

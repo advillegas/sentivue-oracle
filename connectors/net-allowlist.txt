@@ -14,9 +14,15 @@ static.crates.io
 docs.rs
 # source forges (read paths only; fetch tool is GET-only regardless)
 github.com
+api.github.com
 codeload.github.com
 raw.githubusercontent.com
 objects.githubusercontent.com
+# discovery + knowledge (structured APIs; queried via envoy-discover's sanitizer)
+api.stackexchange.com
+arxiv.org
+export.arxiv.org
+en.wikipedia.org
 # models
 huggingface.co
 cdn-lfs.huggingface.co

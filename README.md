@@ -183,11 +183,25 @@ construction:
 - Everything it downloads is **quarantined** in `incoming/` with sha256 + source in
   `incoming/PROVENANCE.md`. The envoy never installs or executes what it fetched;
   workers install from the local quarantine and never fetch. One-way valve.
-- Workers queue needs in `memory/NET-REQUESTS.md`; `oracle envoy --queue` processes
-  the queue headlessly; the air-gap is dropped for the window and **restored
-  automatically on exit** (trap), even if the session crashes.
+- **Discovery without leakage** (`bin/envoy-discover`): sanitized queries to
+  structured public-knowledge APIs — Stack Overflow, GitHub issues/repos, PyPI,
+  npm, crates.io, arXiv, Hugging Face, Wikipedia. The sanitizer enforces length,
+  charset, and token caps, rejects encoded-data-looking strings, and refuses any
+  query containing identifiers from `connectors/discovery-blocklist.txt` (project
+  names and internals that must never leave). Every query is audit-logged. This
+  covers the long-tail-debugging and "find the right tool/paper" gaps while
+  keeping general search engines off.
+- Workers queue needs in `memory/NET-REQUESTS.md` (`NEED pip:pkg==x.y.z` for
+  artifacts, `FIND <generalized question>` for research); `oracle envoy --queue`
+  processes the queue headlessly; the air-gap is dropped for the window and
+  **restored automatically on exit** (trap), even if the session crashes.
 - Doctrine in `engines/shared/ENVOY.md`; engine-level permission sets pin the
   envoy to exactly this behavior on both Claude Code and OpenCode.
+- **Deferred (by decision, noted for later):** a fully local research library —
+  Kiwix archives of Stack Overflow (~75 GB) and Wikipedia (~100 GB) plus bulk
+  arXiv packs, indexed into the existing pgvector RAG — which would move most
+  discovery entirely offline. Fetching the archives is a standing envoy job
+  whenever storage planning allows.
 
 ## UIs (all localhost)
 
