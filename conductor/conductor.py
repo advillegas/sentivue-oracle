@@ -1047,6 +1047,13 @@ class Conductor:
         if waiting:
             lines += ["\n**AWAITING OPERATOR APPROVAL** (write `APPROVE <id>` into "
                       "`memory/APPROVALS.md`): " + ", ".join(t.id for t in waiting)]
+        nr = MEMORY / "NET-REQUESTS.md"
+        if nr.exists():
+            open_reqs = sum(1 for ln in nr.read_text(encoding="utf-8").splitlines()
+                            if ln.strip().startswith("- [ ]"))
+            if open_reqs:
+                lines += [f"\n**OPEN NETWORK REQUESTS:** {open_reqs} — run `oracle envoy --queue` "
+                          "to fulfil them in a controlled window"]
         nxt = self.dispatchable(False)
         lines += [f"\n**Planned next:** {nxt.id + ' — ' + nxt.title if nxt else 'nothing pending'}"]
         try:

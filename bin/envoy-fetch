@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# envoy-fetch — the ONLY network tool the envoy agent may use. Fetch-only by
+# construction: HTTPS GET to allowlisted registry/docs domains, no query
+# strings, no request bodies, size/time caps, sha256 provenance, quarantine
+# inbox. It cannot POST and it never installs or executes what it fetched.
+#
+#   envoy-fetch <https-url> [outname]        raw artifact/doc fetch
+#   envoy-fetch --pip <package==version>     wheel/sdist via pip download (pypi only)
+#   envoy-fetch --npm <package@version>      tarball via npm pack (npmjs only)
+#
+# Everything lands in incoming/<date>/ with an entry in incoming/PROVENANCE.md.
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ALLOWLIST="$ROOT/connectors/net-allowlist.txt"
+INBOX="$ROOT/incoming/$(date +%F)"
+PROV="$ROOT/incoming/PROVENANCE.md"
+mkdir -p "$INBOX"
+[[ -f "$PROV" ]] || echo "# Download provenance — every artifact the envoy ever fetched." > "$PROV"
+
+record() { # record <what> <source> <path>
+  local sha size
+  sha=$(shasum -a 256 "$3" 2>/dev/null | cut -d' ' -f1 || sha256sum "$3" | cut -d' ' -f1)
+  size=$(du -h "$3" | cut -f1)
+  printf -- "- %s | %s | %s | sha256=%s | %s | %s\n" \
+    "$(date '+%Y-%m-%d %H:%M')" "$1" "$2" "$sha" "$size" "$3" >> "$PROV"
+  echo "FETCHED: $3"
+  echo "  sha256=$sha size=$size"
+  echo "  provenance recorded. Quarantined — verify before anything installs it."
+}
+
+case "${1:-}" in
+  --pip)
+    pkg="${2:?usage: envoy-fetch --pip <package==version>}"
+    [[ "$pkg" == *"=="* ]] || { echo "REFUSED: pin an exact version (pkg==x.y.z)"; exit 1; }
+    mkdir -p "$INBOX/pip"
+    pip download --no-deps --dest "$INBOX/pip" "$pkg"
+    for f in "$INBOX/pip"/*; do record "pip:$pkg" "pypi.org" "$f"; done
+    ;;
+  --npm)
+    pkg="${2:?usage: envoy-fetch --npm <package@version>}"
+    [[ "$pkg" == *"@"* ]] || { echo "REFUSED: pin an exact version (pkg@x.y.z)"; exit 1; }
+    mkdir -p "$INBOX/npm"
+    ( cd "$INBOX/npm" && npm pack "$pkg" --silent )
+    for f in "$INBOX/npm"/*.tgz; do record "npm:$pkg" "registry.npmjs.org" "$f"; done
+    ;;
+  --*)
+    echo "unknown flag $1"; exit 1
+    ;;
+  *)
+    url="${1:?usage: envoy-fetch <https-url> [outname]}"
+    out="${2:-$(basename "${url%%\?*}")}"
+    # --- structural fetch-only guarantees ---
+    [[ "$url" == https://* ]]      || { echo "REFUSED: https only"; exit 1; }
+    [[ "$url" != *"?"* ]]          || { echo "REFUSED: query strings are an exfiltration channel"; exit 1; }
+    [[ ${#url} -le 512 ]]          || { echo "REFUSED: URL too long (max 512)"; exit 1; }
+    host="$(echo "$url" | sed -E 's#https://([^/]+)/?.*#\1#' | tr 'A-Z' 'a-z')"
+    ok=0
+    while IFS= read -r dom; do
+      dom="$(echo "$dom" | xargs)"; [[ -z "$dom" || "$dom" == \#* ]] && continue
+      [[ "$host" == "$dom" || "$host" == *".$dom" ]] && { ok=1; break; }
+    done < "$ALLOWLIST"
+    [[ $ok -eq 1 ]] || { echo "REFUSED: $host is not in connectors/net-allowlist.txt"; exit 1; }
+    dest="$INBOX/$out"
+    curl -fL --proto '=https' --request GET --max-filesize 4294967296 \
+         --max-time 1800 --retry 3 -o "$dest" "$url"
+    record "url" "$host" "$dest"
+    ;;
+esac

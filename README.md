@@ -168,16 +168,53 @@ oracle vault backup /Volumes/usb          bin\oracle.ps1 vault backup E:\
   `vault backup` tarballs the whole vault for external/USB rotation. Moving work
   between nodes offline is an ordinary `git fetch` from a vault backup on a drive.
 
+## Controlled internet: the envoy (a dedicated security-layer agent)
+
+Workers are permanently offline — their engines deny every network tool, firewall or
+not. When the ecosystem genuinely needs something from outside (a library, an MCP
+server, documentation), that goes through the **envoy**: a dedicated internet agent
+that runs only in operator-opened windows (`oracle envoy`) and is fetch-only by
+construction:
+
+- Its sole network tool is `bin/envoy-fetch`: HTTPS **GET** to domains in
+  `connectors/net-allowlist.txt` (registries + docs only — no search engines, since
+  URLs are an exfiltration channel), no query strings, capped size, version pins
+  required.
+- Everything it downloads is **quarantined** in `incoming/` with sha256 + source in
+  `incoming/PROVENANCE.md`. The envoy never installs or executes what it fetched;
+  workers install from the local quarantine and never fetch. One-way valve.
+- Workers queue needs in `memory/NET-REQUESTS.md`; `oracle envoy --queue` processes
+  the queue headlessly; the air-gap is dropped for the window and **restored
+  automatically on exit** (trap), even if the session crashes.
+- Doctrine in `engines/shared/ENVOY.md`; engine-level permission sets pin the
+  envoy to exactly this behavior on both Claude Code and OpenCode.
+
+## UIs (all localhost)
+
+- **`oracle console`** — mission control at `http://127.0.0.1:8800`: live mission
+  state, one-click operator approvals, the network-request queue, ledger tail, and
+  reports (stdlib Python, zero dependencies).
+- **`oracle vault ui install`** — Gitea at `http://127.0.0.1:3300`: the GitHub-like
+  face of the vault (browse, diffs, blame, search). Vault repos are added as
+  local-path **mirrors**, so the vault stays the source of truth and Gitea re-syncs
+  hourly. Sqlite, registration disabled, offline mode, `launchd`-supervised.
+- Interactive coding remains in the engines' own TUIs (`oracle claude` /
+  `oracle opencode`); llama-swap's built-in UI at `:9099` shows model activity.
+
 ## Privacy posture
 
 - No Cursor, no hosted APIs, no accounts. Models, inference, data, and memory never
   leave the machine.
-- Every service binds `127.0.0.1` only (llama-swap, llama-server, Postgres, PostgREST, Studio).
+- Every service binds `127.0.0.1` only (llama-swap, llama-server, Postgres, PostgREST,
+  Studio, Gitea, the console).
 - Telemetry, error reporting, and auto-update are disabled for both engines.
 - `make harden` installs a pf anchor that blocks ALL outbound traffic machine-wide
   except loopback — a software air gap (optional, reversible with `harden-offline.sh off`).
-- The only network phase is bootstrap: Homebrew, npm pins, model downloads, docker
-  image pulls, uv cache warm. `make verify` proves the stack works with networking off.
+  `oracle envoy` opens it briefly and always restores it.
+- Network touches the machine in exactly two ways after bootstrap: envoy windows
+  (fetch-only, allowlisted, quarantined, provenance-tracked) — and nothing else.
+- The only broad network phase is bootstrap: Homebrew, npm pins, model downloads,
+  docker image pulls, uv cache warm. `make verify` proves the stack works offline.
 
 ## Model ensemble (defaults, editable in `serving/models.manifest`)
 

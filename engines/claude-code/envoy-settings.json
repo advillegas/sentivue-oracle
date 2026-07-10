@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Bash(envoy-fetch:*)",
+      "Bash(bin/envoy-fetch:*)",
+      "Bash(shasum:*)",
+      "Bash(pip download:*)",
+      "Bash(npm pack:*)",
+      "Bash(ls:*)", "Bash(cat:*)", "Bash(tar -t:*)",
+      "Edit(./memory/NET-REQUESTS.md)",
+      "Edit(./incoming/**)"
+    ],
+    "deny": [
+      "WebFetch", "WebSearch",
+      "Bash(curl:*)", "Bash(wget:*)", "Bash(nc:*)", "Bash(ssh:*)", "Bash(scp:*)",
+      "Bash(git push:*)",
+      "Bash(pip install:*)", "Bash(npm install:*)", "Bash(uv pip install:*)",
+      "Read(./connectors/supabase/.env)", "Read(./.env)"
+    ]
+  }
+}

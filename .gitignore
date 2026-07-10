@@ -12,6 +12,7 @@ data/*
 !data/.gitkeep
 artifacts/
 backups/
+incoming/
 
 # rendered / machine-specific configs and installer state
 serving/llama-swap.rendered.yaml
