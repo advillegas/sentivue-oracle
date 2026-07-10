@@ -108,11 +108,11 @@ update_user_config() {
 
   # Keybindings for new agent tabs (created only if the user has none yet)
   local keys="$dir/keybindings.json"
-  if [[ -f "$keys" ]] && grep -q "Oracle Agent: Claude Code" "$keys" && grep -q '"location": "editor"' "$keys"; then
-    # migrate our own earlier default (editor tabs) to the secondary side bar
-    sed -i '' 's/"location": "editor"/"location": "view"/g' "$keys" 2>/dev/null || \
-      sed -i 's/"location": "editor"/"location": "view"/g' "$keys"
-    echo "==> keybindings migrated: agent tabs now open in the secondary side bar"
+  if [[ -f "$keys" ]] && grep -q "Oracle Agent: Claude Code" "$keys" && grep -q '"location": "view"' "$keys"; then
+    # normalize our own earlier defaults back to editor tabs
+    sed -i '' 's/"location": "view"/"location": "editor"/g' "$keys" 2>/dev/null || \
+      sed -i 's/"location": "view"/"location": "editor"/g' "$keys"
+    echo "==> keybindings normalized: agent tabs open as editor tabs"
   fi
   if [[ ! -f "$keys" ]]; then
     cat > "$keys" <<'EOF'
@@ -120,17 +120,17 @@ update_user_config() {
   {
     "key": "cmd+shift+a",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: Claude Code", "location": "view" }
+    "args": { "profileName": "Oracle Agent: Claude Code", "location": "editor" }
   },
   {
     "key": "cmd+shift+alt+a",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: Claude Code (worktree)", "location": "view" }
+    "args": { "profileName": "Oracle Agent: Claude Code (worktree)", "location": "editor" }
   },
   {
     "key": "cmd+alt+o",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: OpenCode", "location": "view" }
+    "args": { "profileName": "Oracle Agent: OpenCode", "location": "editor" }
   }
 ]
 EOF

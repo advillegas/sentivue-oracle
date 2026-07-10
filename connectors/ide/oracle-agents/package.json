@@ -1,8 +1,8 @@
 {
   "name": "oracle-agents",
   "displayName": "SentiVue Oracle Agents",
-  "description": "Agents sidebar: launch parallel agent tabs, drive missions, and browse session journals - all on local models.",
-  "version": "0.1.0",
+  "description": "Agent sidebar in the Secondary Side Bar: open agents and missions, see everything running, jump between them - all on local models.",
+  "version": "0.2.0",
   "publisher": "sentivue",
   "license": "MIT",
   "engines": { "vscode": "^1.80.0" },
@@ -11,39 +11,42 @@
   "main": "./extension.js",
   "contributes": {
     "viewsContainers": {
-      "activitybar": [
+      "secondarySidebar": [
         {
           "id": "oracle-agents",
-          "title": "Oracle Agents",
+          "title": "Agents",
           "icon": "media/oracle.svg"
         }
       ]
     },
     "views": {
       "oracle-agents": [
-        { "id": "oracleAgents.agents", "name": "Agents", "icon": "media/oracle.svg" },
-        { "id": "oracleAgents.mission", "name": "Mission", "icon": "media/oracle.svg" },
-        { "id": "oracleAgents.sessions", "name": "Sessions", "icon": "media/oracle.svg" }
+        { "id": "oracleAgents.live", "name": "Agents & Missions", "icon": "media/oracle.svg" },
+        { "id": "oracleAgents.mission", "name": "Mission Status", "icon": "media/oracle.svg" },
+        { "id": "oracleAgents.sessions", "name": "Session Journals", "icon": "media/oracle.svg" }
       ]
     },
     "commands": [
-      { "command": "oracleAgents.newClaude", "title": "Oracle: New Agent Tab (Claude Code)", "icon": "$(add)" },
-      { "command": "oracleAgents.newClaudeWorktree", "title": "Oracle: New Agent Tab in Worktree", "icon": "$(git-branch)" },
-      { "command": "oracleAgents.newOpenCode", "title": "Oracle: New Agent Tab (OpenCode)", "icon": "$(rocket)" },
+      { "command": "oracleAgents.newClaude", "title": "Oracle: New Agent (Claude Code)", "icon": "$(add)" },
+      { "command": "oracleAgents.newClaudeWorktree", "title": "Oracle: New Agent in Worktree", "icon": "$(git-branch)" },
+      { "command": "oracleAgents.newOpenCode", "title": "Oracle: New Agent (OpenCode)", "icon": "$(rocket)" },
       { "command": "oracleAgents.startMission", "title": "Oracle: Start Mission...", "icon": "$(play)" },
+      { "command": "oracleAgents.reveal", "title": "Oracle: Focus Agent" },
+      { "command": "oracleAgents.kill", "title": "Oracle: Close Agent", "icon": "$(trash)" },
       { "command": "oracleAgents.openLatestReport", "title": "Oracle: Open Latest Mission Report" },
       { "command": "oracleAgents.openLedger", "title": "Oracle: Open Ledger" },
-      { "command": "oracleAgents.dockRight", "title": "Oracle: Dock Agent Terminals in Secondary Side Bar" },
-      { "command": "oracleAgents.dockBottom", "title": "Oracle: Restore Terminal Panel to Bottom" },
       { "command": "oracleAgents.refresh", "title": "Oracle: Refresh Agents Sidebar", "icon": "$(refresh)" }
     ],
     "menus": {
       "view/title": [
-        { "command": "oracleAgents.newClaude", "when": "view == oracleAgents.agents", "group": "navigation@1" },
-        { "command": "oracleAgents.refresh", "when": "view == oracleAgents.agents", "group": "navigation@2" },
-        { "command": "oracleAgents.startMission", "when": "view == oracleAgents.mission", "group": "navigation@1" },
-        { "command": "oracleAgents.refresh", "when": "view == oracleAgents.mission", "group": "navigation@2" },
+        { "command": "oracleAgents.newClaude", "when": "view == oracleAgents.live", "group": "navigation@1" },
+        { "command": "oracleAgents.startMission", "when": "view == oracleAgents.live", "group": "navigation@2" },
+        { "command": "oracleAgents.refresh", "when": "view == oracleAgents.live", "group": "navigation@3" },
+        { "command": "oracleAgents.refresh", "when": "view == oracleAgents.mission", "group": "navigation@1" },
         { "command": "oracleAgents.refresh", "when": "view == oracleAgents.sessions", "group": "navigation@1" }
+      ],
+      "view/item/context": [
+        { "command": "oracleAgents.kill", "when": "view == oracleAgents.live && viewItem == runningAgent", "group": "inline" }
       ]
     }
   }

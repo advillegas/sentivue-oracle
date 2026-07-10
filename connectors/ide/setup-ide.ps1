@@ -89,15 +89,15 @@ function Update-UserConfig {
     if (-not $Quiet) { Write-Host "==> merged VSCodium user settings (agent-tab profiles, telemetry off)" }
 
     # Keybindings for new agent tabs (created only if the user has none yet).
-    # location "view" = the terminal panel, which the agents extension docks
-    # into the SECONDARY SIDE BAR on first run (Cursor-style agent tabs).
+    # Agents open as EDITOR TABS (any number side by side); the Agents sidebar
+    # in the secondary side bar is the switchboard that lists and focuses them.
     $keysPath = Join-Path $userDir "keybindings.json"
     if (Test-Path $keysPath) {
-        # migrate our own earlier default (editor tabs) to the secondary side bar
+        # normalize our own earlier defaults back to editor tabs
         $raw = Get-Content $keysPath -Raw
-        if ($raw -match "Oracle Agent: Claude Code" -and $raw -match '"location": "editor"') {
-            $raw -replace '"location": "editor"', '"location": "view"' | Set-Content $keysPath
-            if (-not $Quiet) { Write-Host "==> keybindings migrated: agent tabs now open in the secondary side bar" }
+        if ($raw -match "Oracle Agent: Claude Code" -and $raw -match '"location": "view"') {
+            $raw -replace '"location": "view"', '"location": "editor"' | Set-Content $keysPath
+            if (-not $Quiet) { Write-Host "==> keybindings normalized: agent tabs open as editor tabs" }
         }
     }
     if (-not (Test-Path $keysPath)) {
@@ -106,17 +106,17 @@ function Update-UserConfig {
   {
     "key": "ctrl+shift+a",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: Claude Code", "location": "view" }
+    "args": { "profileName": "Oracle Agent: Claude Code", "location": "editor" }
   },
   {
     "key": "ctrl+shift+alt+a",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: Claude Code (worktree)", "location": "view" }
+    "args": { "profileName": "Oracle Agent: Claude Code (worktree)", "location": "editor" }
   },
   {
     "key": "ctrl+alt+o",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: OpenCode", "location": "view" }
+    "args": { "profileName": "Oracle Agent: OpenCode", "location": "editor" }
   }
 ]
 '@ | Set-Content -Path $keysPath
