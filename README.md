@@ -79,6 +79,20 @@ On the authoring machine: `make dist` produces a clean tarball (no models, no
 secrets, no caches). Move it by USB/AirDrop — or push to a private git remote if
 you have one. No cloud service is required.
 
+### Pre-downloading the models on Windows (optional, saves a night)
+
+The ~700 GB model download can run on a Windows machine ahead of time — ideally
+straight onto an exFAT external drive:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File bootstrap\download-models.ps1 -Dest E:\oracle-models
+```
+
+Same manifest/profile as the Mac scripts, resumable, auto-retries. Then on the
+Mac either copy the folder to `~/sentivue-oracle/models` or symlink it
+(`ln -s /Volumes/<drive>/oracle-models ~/sentivue-oracle/models`) and the
+installer's download phase will see everything already present and skip it.
+
 ## Quickstart (on the Mac Studio)
 
 ```bash
