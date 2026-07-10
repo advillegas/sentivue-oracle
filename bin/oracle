@@ -55,7 +55,7 @@ oracle — offline agentic workstation
   health         oracle verify           oracle doctor
   privacy        oracle harden [off]     oracle envoy [--queue]   controlled fetch-only network window
   ui             oracle desk             native desktop app (Rust, chat + missions + models + vault)
-                 oracle ide [install]    Cursor-like IDE (VSCodium + Continue + Roo, local models)
+                 oracle ide [install]    Cursor-like IDE (VSCodium + Continue + Kilo, local models)
                  oracle console          mission control at http://127.0.0.1:8800
                  oracle vault ui install|start|stop|status        GitHub-like UI at http://127.0.0.1:3300
   git vault      oracle vault init|sync|new|clone|list|backup     (offline private remote)

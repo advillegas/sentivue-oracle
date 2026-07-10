@@ -21,6 +21,7 @@ if ($c -eq "1") {
     if ($ide -match "^[Yy]") {
         winget uninstall --id VSCodium.VSCodium -e --silent
         Remove-Item "$env:USERPROFILE\.continue" -Recurse -Force
+        Remove-Item "$env:USERPROFILE\.config\kilo" -Recurse -Force
         Write-Host "==> IDE removed"
     }
 }

@@ -1,6 +1,7 @@
 # Windows twin of setup-ide.sh: the Cursor-like IDE on local models.
 # VSCodium (telemetry-free VS Code) + Continue (chat/edit/autocomplete) +
-# Roo Code (agentic panel), all pointed at llama-swap on 127.0.0.1:9099.
+# Kilo Code (agentic panel), all pointed at llama-swap on 127.0.0.1:9099.
+# (Kilo Code replaced Roo Code, which was discontinued May 2026.)
 # Parallel agent tabs: Ctrl+Shift+A opens an engine session as an editor tab,
 # any number at once, each optionally in its own git worktree (no collisions).
 # Models are auto-detected from the machine on every launch (sync-models.ps1).
@@ -41,13 +42,13 @@ function Update-UserConfig {
         }
     }
     $agentTab = Join-Path $PSScriptRoot "agent-tab.ps1"
-    $settings["telemetry.telemetryLevel"] = "off"
+    $settings["telemetry.telemetryLevel"] = "off"   # Kilo Code honors this too
     $settings["update.mode"] = "none"
     $settings["extensions.autoUpdate"] = $false
     $settings["extensions.autoCheckUpdates"] = $false
     $settings["editor.inlineSuggest.enabled"] = $true
     $settings["continue.enableTabAutocomplete"] = $true
-    $settings["roo-cline.autoImportSettingsPath"] = (Join-Path $Root "state\roo-import.json")
+    $settings.Remove("roo-cline.autoImportSettingsPath") | Out-Null   # Roo retired
     if (-not $settings.ContainsKey("workbench.colorTheme")) { $settings["workbench.colorTheme"] = "Default Dark Modern" }
     $profiles = @{}
     if ($settings.ContainsKey("terminal.integrated.profiles.windows") -and $settings["terminal.integrated.profiles.windows"]) {
@@ -70,7 +71,7 @@ function Update-UserConfig {
     }
     $settings["terminal.integrated.profiles.windows"] = $profiles
     ConvertTo-Json -InputObject $settings -Depth 20 | Set-Content -Path $settingsPath
-    if (-not $Quiet) { Write-Host "==> merged VSCodium user settings (agent-tab profiles, Roo auto-import, telemetry off)" }
+    if (-not $Quiet) { Write-Host "==> merged VSCodium user settings (agent-tab profiles, telemetry off)" }
 
     # Keybindings for new agent tabs (created only if the user has none yet)
     $keysPath = Join-Path $userDir "keybindings.json"
@@ -109,9 +110,11 @@ switch ($Cmd) {
         }
         $vsix = Join-Path $Root "incoming\vsix"
         New-Item -ItemType Directory -Force -Path $vsix | Out-Null
+        # migration: Roo Code was discontinued (May 2026) - replace it with Kilo
+        & $codium --uninstall-extension RooVeterinaryInc.roo-cline 2>$null | Out-Null
         # Continue ships native modules (sqlite3, lancedb, onnx) - must take the
         # win32-x64 build, not the universal one, or activation fails.
-        foreach ($ext in @(@("Continue", "continue", "win32-x64"), @("RooVeterinaryInc", "roo-cline", ""))) {
+        foreach ($ext in @(@("Continue", "continue", "win32-x64"), @("kilocode", "kilo-code", "win32-x64"))) {
             $ns = $ext[0]; $name = $ext[1]; $plat = $ext[2]
             $meta = $null
             if ($plat) {
@@ -141,12 +144,12 @@ switch ($Cmd) {
                 }
             }
         }
-        # Continue + Roo model config: auto-detected from this machine
+        # Continue + Kilo model config: auto-detected from this machine
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync-models.ps1")
         Update-UserConfig
         Write-Host ""
-        Write-Host "IDE ready. Models are auto-detected on every launch; Roo Code imports"
-        Write-Host "its provider profile automatically on startup (state\roo-import.json)."
+        Write-Host "IDE ready. Models are auto-detected on every launch; Kilo Code reads"
+        Write-Host "its generated config from ~\.config\kilo\kilo.jsonc (local provider only)."
         Write-Host "Agent tabs: Ctrl+Shift+A (Claude Code), Ctrl+Shift+Alt+A (worktree),"
         Write-Host "Ctrl+Alt+O (OpenCode) - or the terminal '+' dropdown, 'Oracle Agent' profiles."
         Write-Host "Launch with: bin\oracle.ps1 ide"

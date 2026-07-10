@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # The Cursor-like IDE for the appliance: VSCodium (telemetry-free VS Code) with
-# Continue (chat / inline edit / autocomplete) and Roo Code (agentic side panel),
+# Continue (chat / inline edit / autocomplete) and Kilo Code (agentic side panel),
 # all pointed at the local llama-swap endpoint. Fully offline after install.
+# (Kilo Code replaced Roo Code, which was discontinued May 2026.)
 #
 #   bash connectors/ide/setup-ide.sh install    cask + pinned .vsix + configs
 #   bash connectors/ide/setup-ide.sh launch     open the IDE on this repo
 #
 # Cursor-parity map: chat with codebase -> Continue chat (Cmd+L); inline edits ->
 # Continue edit (Cmd+I); tab autocomplete -> Continue (fast lane model); agent
-# composer -> Roo Code panel (reads/writes files, runs terminal, plan/act);
+# composer -> Kilo Code panel (reads/writes files, runs terminal, plan/act);
 # parallel agent tabs -> Cmd+Shift+A opens an engine session as an editor tab,
 # any number at once, each optionally in its own git worktree (no collisions).
 # Models are auto-detected from the machine on every launch (sync-models.sh).
@@ -62,7 +63,6 @@ update_user_config() {
   local merged
   if ! merged="$(jq \
     --arg tab "$tab" \
-    --arg roo "$ROOT/state/roo-import.json" \
     '. + {
       "telemetry.telemetryLevel": "off",
       "update.mode": "none",
@@ -70,7 +70,6 @@ update_user_config() {
       "extensions.autoCheckUpdates": false,
       "editor.inlineSuggest.enabled": true,
       "continue.enableTabAutocomplete": true,
-      "roo-cline.autoImportSettingsPath": $roo,
       "workbench.colorTheme": (."workbench.colorTheme" // "Default Dark Modern"),
       "terminal.integrated.profiles.osx": ((."terminal.integrated.profiles.osx" // {}) + {
         "Oracle Agent: Claude Code": {
@@ -91,7 +90,7 @@ update_user_config() {
     return 0
   fi
   echo "$merged" > "$settings"
-  echo "==> merged VSCodium user settings (agent-tab profiles, Roo auto-import, telemetry off)"
+  echo "==> merged VSCodium user settings (agent-tab profiles, telemetry off)"
 
   # Keybindings for new agent tabs (created only if the user has none yet)
   local keys="$dir/keybindings.json"
@@ -124,16 +123,18 @@ case "${1:-launch}" in
     command -v codium >/dev/null || { echo "==> brew install --cask vscodium"; brew install --cask vscodium; }
     mkdir -p "$VSIX_DIR"
     arch="darwin-arm64"; [[ "$(uname -m)" == "x86_64" ]] && arch="darwin-x64"
+    # migration: Roo Code was discontinued (May 2026) - replace it with Kilo
+    codium --uninstall-extension RooVeterinaryInc.roo-cline >/dev/null 2>&1 || true
     cont="$(fetch_vsix Continue continue "$arch")"
-    roo="$(fetch_vsix RooVeterinaryInc roo-cline)"
+    kilo="$(fetch_vsix kilocode kilo-code "$arch")"
     codium --install-extension "$cont" --force
-    codium --install-extension "$roo"  --force
+    codium --install-extension "$kilo" --force
     graft_ripgrep
     bash "$ROOT/connectors/ide/sync-models.sh"
     update_user_config
     echo
-    echo "IDE ready. Models are auto-detected on every launch; Roo Code imports"
-    echo "its provider profile automatically on startup (state/roo-import.json)."
+    echo "IDE ready. Models are auto-detected on every launch; Kilo Code reads"
+    echo "its generated config from ~/.config/kilo/kilo.jsonc (local provider only)."
     echo "Agent tabs: Cmd+Shift+A (Claude Code), Cmd+Shift+Alt+A (worktree),"
     echo "Cmd+Alt+O (OpenCode) - or the terminal '+' dropdown, 'Oracle Agent' profiles."
     echo "Launch with: oracle ide"

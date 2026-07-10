@@ -246,10 +246,12 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
 - **`oracle ide`** — the Cursor-like IDE: **VSCodium** (telemetry-free VS Code — the
   same platform Cursor is built on) with **Continue** (codebase chat `Cmd+L`, inline
   edits `Cmd+I`, tab autocomplete on the fast lane, embeddings-backed codebase
-  indexing) and **Roo Code** (the agentic composer panel: plan/act, file edits,
-  terminal) — all pointed at llama-swap, so every keystroke of AI runs on local
-  models. `oracle ide install` sets it up (extensions from open-vsx, configs
-  generated, updates and telemetry off); `oracle ide` opens the repo.
+  indexing) and **Kilo Code** (the agentic composer panel: plan/act, file edits,
+  terminal — the maintained successor to the discontinued Roo Code, configured
+  local-provider-only with telemetry and session sharing disabled) — all pointed
+  at llama-swap, so every keystroke of AI runs on local models. `oracle ide
+  install` sets it up (extensions from open-vsx, configs generated, updates and
+  telemetry off); `oracle ide` opens the repo.
 - **Parallel agent tabs** — `Cmd+Shift+A` (`Ctrl+Shift+A` on Windows) opens a full
   engine session (Claude Code) as an editor tab; open as many as you want, side by
   side, like Cursor's agent tabs. `Cmd+Shift+Alt+A` opens the agent in its **own git
@@ -258,7 +260,7 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
   terminal `+` dropdown ("Oracle Agent" profiles).
 - **Model auto-detection** — every IDE launch runs `sync-models`, which asks the
   serving layer (or scans `models/`) for what's actually installed, then rewires
-  Continue, Roo Code (auto-imported provider profile), the engine tier maps
+  Continue, Kilo Code (generated `~/.config/kilo/kilo.jsonc`), the engine tier maps
   (`serving/tiers.env`), and the opus/sonnet/haiku aliases to models that exist on
   this machine. Download a new model and it shows up everywhere on the next launch.
 - **`oracle console`** — mission control at `http://127.0.0.1:8800`: live mission
