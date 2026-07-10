@@ -82,6 +82,11 @@ else
   echo "WARN: skipped wired-limit (no sudo). Run manually: sudo sysctl iogpu.wired_limit_mb=458752"
 fi
 
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "==> [8b/8] Local git vault (offline private remote + auto-backup target)"
+  bash bootstrap/vault.sh init || echo "WARN: vault init failed — run 'oracle vault init' later"
+fi
+
 mkdir -p memory logs reports state && touch memory/.gitkeep
 echo
 echo "Bootstrap complete. Next:"

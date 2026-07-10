@@ -20,6 +20,7 @@ case "$cmd" in
                                         || exec sudo bash bootstrap/harden-offline.sh ;;
   models)     exec bash bootstrap/download-models.sh ;;
   skills)     exec bash bootstrap/sync-skills.sh ;;
+  vault)      exec bash bootstrap/vault.sh "$@" ;;
   mission)    # oracle mission <mission.toml> [claude|opencode] [hours]
     m="${1:?usage: oracle mission <mission.toml> [engine] [hours]}"
     eng="${2:-claude}"; hrs="${3:-24}"
@@ -40,6 +41,7 @@ oracle — offline agentic workstation
                  oracle state            oracle report        oracle ledger [n]
   health         oracle verify           oracle doctor
   privacy        oracle harden [off]
+  git vault      oracle vault init|sync|new|clone|list|backup   (offline private remote)
   maintenance    oracle models           oracle skills        oracle uninstall [--purge]
 EOF
     ;;

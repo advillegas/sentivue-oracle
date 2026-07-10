@@ -60,6 +60,17 @@ n=$(ls skills/*/SKILL.md 2>/dev/null | wc -l | xargs)
 grep -q DISABLE_TELEMETRY engines/claude-code/home/settings.json 2>/dev/null \
   && ok "claude telemetry disabled" || bad "telemetry env missing" "restore settings.json"
 
+echo "== git vault (offline private remote) =="
+if git remote get-url vault >/dev/null 2>&1; then
+  ok "vault remote -> $(git remote get-url vault)"
+  git fetch --quiet vault 2>/dev/null || true
+  behind=$(git rev-list --count vault/main..main 2>/dev/null || echo "?")
+  if [[ "$behind" == "0" ]]; then ok "vault main is current"
+  else meh "vault main behind by $behind commit(s)" "oracle vault sync"; fi
+else
+  meh "no vault remote configured" "oracle vault init"
+fi
+
 echo "== privacy =="
 if sudo -n pfctl -sr 2>/dev/null | grep -q "block drop out"; then ok "pf egress block ACTIVE (air-gapped)"
 else meh "pf egress block not active" "optional: oracle harden"; fi

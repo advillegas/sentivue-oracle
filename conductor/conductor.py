@@ -406,7 +406,21 @@ class Conductor:
                 return False
             git(self.m.repo, "worktree", "remove", "--force", str(wt))
             git(self.m.repo, "branch", "-D", task_branch)
-            return True
+        self.vault_backup([self.branch])          # offline private remote, if configured
+        return True
+
+    def vault_backup(self, refs: list[str] | None = None) -> None:
+        """Push work to the local 'vault' remote (bare repo on this machine —
+        the air-gapped stand-in for a hosted origin). Silent no-op when the
+        vault remote isn't configured; failures warn but never block work."""
+        if not self.use_git:
+            return
+        if git(self.m.repo, "remote", "get-url", "vault").returncode != 0:
+            return
+        args = ["push", "--quiet", "vault"] + (refs if refs else ["--all"])
+        r = git(self.m.repo, *args, timeout=120)
+        if r.returncode != 0:
+            self.ledger("VAULT WARN", f"backup push failed: {r.stdout.strip()[-200:]}")
 
     # ---- engine runs ---------------------------------------------------------
     def run_engine(self, prompt: str, tier: str, cwd: Path, timeout_min: int,
@@ -1109,6 +1123,7 @@ class Conductor:
                     self.ledger("RETRO ERROR", str(e)[:200])
             self.current = "mission ended"
             self.write_state()
+            self.vault_backup()                    # everything, incl. task branches kept for forensics
             p = self.report(final=True)
             self.ledger("MISSION END", str(p.relative_to(ROOT)))
         return 0 if all(t.status == "done" for t in self.m.tasks if not t.background) else 1

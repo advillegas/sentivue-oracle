@@ -134,6 +134,29 @@ cleanly removes services, symlinks, and — with `--purge` — the models.)
 Both engines read the same skills, subagents, conventions (`AGENTS.md`), and MCP
 connectors. Switching engines is a per-session decision, not a migration.
 
+## Local git vault (the offline "origin")
+
+An air-gapped machine still needs a remote: the vault is a directory of
+history-protected bare git repositories (`~/oracle-git-vault`, configurable via
+`ORACLE_VAULT`) — a private local origin with zero dependencies beyond git.
+The installer creates it and registers a `vault` remote on this repo; the
+conductor then pushes every merged mission branch to it automatically and
+everything at mission end, so autonomous work is always backed up off the
+working copy. Vault repos refuse deletes and non-fast-forward pushes by
+default (append-only history).
+
+```bash
+oracle vault sync                 # push all branches+tags of this repo
+oracle vault new my-strategy      # bare repo for a new project
+oracle vault clone my-strategy    # clone it out anywhere on the machine
+oracle vault list                 # inventory: branches, sizes, last activity
+oracle vault backup /Volumes/usb  # tarball the whole vault for offsite rotation
+```
+
+`oracle doctor` reports whether the vault is current. For work on other
+projects, `oracle vault sync <path>` auto-creates that project's bare repo on
+first push.
+
 ## Privacy posture
 
 - No Cursor, no hosted APIs, no accounts. Models, inference, data, and memory never
