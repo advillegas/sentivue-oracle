@@ -12,6 +12,12 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 
+function Find-CodiumInstalled {
+    if (Get-Command codium -ErrorAction SilentlyContinue) { return $true }
+    return (Test-Path "$env:LOCALAPPDATA\Programs\VSCodium\bin\codium.cmd") -or
+           (Test-Path "$env:ProgramFiles\VSCodium\bin\codium.cmd")
+}
+
 switch ($Cmd) {
     "vault"  { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\vault.ps1") @Rest }
     "models" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\download-models.ps1") @Rest }
@@ -33,6 +39,10 @@ switch ($Cmd) {
     "status" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") status }
     "claude"   { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\claude-code\launch.ps1") @Rest }
     "opencode" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\opencode\launch.ps1") @Rest }
+    "ide" {
+        $sub = "launch"; if ($Rest.Count -gt 0) { $sub = $Rest[0] }
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "connectors\ide\setup-ide.ps1") $sub
+    }
     "desk" {
         $bin = Join-Path $Root "desk\target\release\oracle-desk.exe"
         if (-not (Test-Path $bin)) {
@@ -79,14 +89,19 @@ switch ($Cmd) {
             Write-Host "==================== SentiVue Oracle ===================="
             Write-Host "  Windows platform - $Root"
             Write-Host "========================================================="
-            Write-Host "  0) desktop app (chat/missions)     s) serve models   t) status"
+            Write-Host "  0) desktop app (chat/missions)     8) IDE (Cursor-like, local models)"
             Write-Host "  1) Claude Code session             2) OpenCode session"
             Write-Host "  3) sync repo to local vault        4) vault inventory"
             Write-Host "  5) download models                 6) commit + package + push"
-            Write-Host "  7) open repo folder                q) quit"
+            Write-Host "  7) open repo folder                s) serve models   t) status   q) quit"
             $c = Read-Host "choose"
             switch ($c) {
                 "0" { & powershell -ExecutionPolicy Bypass -File $PSCommandPath desk }
+                "8" {
+                    $ide = Join-Path $Root "connectors\ide\setup-ide.ps1"
+                    if (Find-CodiumInstalled) { & powershell -ExecutionPolicy Bypass -File $ide launch }
+                    else { & powershell -ExecutionPolicy Bypass -File $ide install; & powershell -ExecutionPolicy Bypass -File $ide launch }
+                }
                 "s" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") start }
                 "t" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") status }
                 "1" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\claude-code\launch.ps1") }

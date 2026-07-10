@@ -1,0 +1,61 @@
+{
+  "numStartups": 1,
+  "firstStartTime": "2026-07-10T09:14:44.996Z",
+  "machineID": "ee9647d0497120a3c579603c8688302e66aff62526447ca7d7101ae498d8786a",
+  "opusProMigrationComplete": true,
+  "sonnet1m45MigrationComplete": true,
+  "seenNotifications": {},
+  "migrationVersion": 13,
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "2.1.205",
+  "projects": {
+    "C:/Users/Aaron/sentivue-oracle": {
+      "allowedTools": [],
+      "mcpContextUris": [],
+      "mcpServers": {},
+      "enabledMcpjsonServers": [],
+      "disabledMcpjsonServers": [],
+      "hasTrustDialogAccepted": true,
+      "projectOnboardingSeenCount": 1,
+      "hasClaudeMdExternalIncludesApproved": false,
+      "hasClaudeMdExternalIncludesWarningShown": false,
+      "lastGracefulShutdown": true,
+      "lastVersionBase": "2.1.205",
+      "lastCost": 0,
+      "lastAPIDuration": 0,
+      "lastAPIDurationWithoutRetries": 0,
+      "lastToolDuration": 0,
+      "lastDuration": 46598,
+      "lastStartTime": 1783674884671,
+      "lastLinesAdded": 0,
+      "lastLinesRemoved": 0,
+      "lastTotalInputTokens": 0,
+      "lastTotalOutputTokens": 0,
+      "lastTotalCacheCreationInputTokens": 0,
+      "lastTotalCacheReadInputTokens": 0,
+      "lastTotalWebSearchRequests": 0,
+      "lastFpsAverage": 2.78,
+      "lastFpsLow1Pct": 112.64,
+      "lastModelUsage": {},
+      "lastSessionId": "14cdc97e-d2d0-4021-8cae-c71ebd369148",
+      "lastSessionMetrics": {
+        "frame_duration_ms_count": 127,
+        "frame_duration_ms_min": 0.049999999999272404,
+        "frame_duration_ms_max": 17.283399999999915,
+        "frame_duration_ms_avg": 0.9705228346456504,
+        "frame_duration_ms_p50": 0.1904999999969732,
+        "frame_duration_ms_p95": 4.264690000002882,
+        "frame_duration_ms_p99": 8.338555999998196
+      }
+    }
+  },
+  "githubRepoPaths": {
+    "advillegas/sentivue-oracle": [
+      "C:\\Users\\Aaron\\sentivue-oracle"
+    ]
+  },
+  "userID": "6cac1d13e90008e4dc9334b864011691f4546b276ef9a35c1858d4ca0f7a092a",
+  "lastReleaseNotesSeen": "2.1.205",
+  "officialMarketplaceAutoInstallAttempted": true,
+  "officialMarketplaceAutoInstalled": true
+}

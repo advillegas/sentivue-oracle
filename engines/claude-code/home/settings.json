@@ -16,21 +16,31 @@
     "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
   },
-  "model": "qwen3-coder-480b",
   "includeCoAuthoredBy": false,
   "permissions": {
-    "defaultMode": "acceptEdits",
     "allow": [
       "Bash(uv run:*)",
-      "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
-      "Bash(git add:*)", "Bash(git commit:*)",
-      "Bash(cargo build:*)", "Bash(cargo test:*)", "Bash(cargo clippy:*)",
-      "Bash(pytest:*)", "Bash(cmake:*)", "Bash(make test:*)"
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(pytest:*)",
+      "Bash(cmake:*)",
+      "Bash(make test:*)"
     ],
     "deny": [
-      "WebFetch", "WebSearch",
-      "Bash(curl:*)", "Bash(wget:*)",
+      "WebFetch",
+      "WebSearch",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
       "Read(./connectors/supabase/.env)"
-    ]
-  }
+    ],
+    "defaultMode": "acceptEdits"
+  },
+  "model": "qwen3-coder-480b",
+  "theme": "dark"
 }
