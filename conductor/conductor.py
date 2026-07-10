@@ -984,6 +984,9 @@ class Conductor:
                 "tiebreak_overrides": sum(1 for r in att if r.get("tiebreak")),
                 "escalated_attempts": sum(1 for r in att if r.get("escalated")),
                 "regressions_reopened": sum(1 for r in recs if r.get("kind") == "regression"),
+                "infra_events": sum(1 for r in recs if r.get("kind") == "infra"),
+                "overseer_concerns": sum(1 for r in recs if r.get("kind") == "overseer"
+                                         and "CONCERN" in str(r.get("verdict", ""))),
                 "mean_attempt_secs": round(sum(int(r.get("secs", 0)) for r in att) / len(att))
                     if att else None,
             }

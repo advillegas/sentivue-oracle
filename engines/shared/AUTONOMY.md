@@ -168,6 +168,28 @@ produced a real incident.
   each later merge (regression sweep) and reopens what broke. Design your checks
   knowing they will be re-run against future states of the tree: make them
   deterministic, self-contained, and fast.
+- **Diagnose from the artifact, not from your last change.** When something breaks,
+  read the actual error surface FIRST (the extension-host log, the server stderr,
+  the API error body) and reproduce in isolation. "My last edit must have caused
+  it" is a hypothesis, not a diagnosis — the real cause was in a log the whole time
+  when this platform's IDE extension "mysteriously" failed to activate.
+- **Hello-world smoke tests prove almost nothing.** Verify with a production-shaped
+  probe. An agent session opens with >25k tokens of context, so a serving stack
+  that answers a 10-token hello can still be 100% unusable for its actual job —
+  this platform shipped exactly that bug (two 8k slots instead of one 32k slot).
+- **A config key you never saw take effect is a guess.** Tools ignore unknown keys
+  silently (this platform's `listen:` yaml key was really a CLI flag; the server
+  sat exposed on 0.0.0.0:8080 until someone looked). After writing config, verify
+  the OBSERVABLE effect: the bound address, the loaded model, the real context size.
+- **Check the pulse of third-party dependencies at pin time.** Repo archived? Last
+  release date? Platform-specific builds present (a "universal" VSIX shipped without
+  its native binaries and died on activation)? Two minutes of checking beats
+  shipping a dependency that was discontinued two months before you installed it.
+- **Failure classification precedes failure accounting.** "The work failed" and
+  "the platform failed the work" are different events with different remedies; an
+  infrastructure error recorded as a task failure poisons the failure memory with
+  false negatives. The conductor refunds infra-caused attempts (INFRA strikes) —
+  preserve that distinction in anything you build on top.
 
 ## 13. The evolving loop (how this protocol improves itself)
 
@@ -217,3 +239,12 @@ success criterion. The current protocol is the baseline plus these entries.
 - **v1.0 (2026-07-09)** — baseline protocol as committed; derived from first
   principles plus the frontier-loop meta-analysis
   (`docs/meta-analysis-frontier-loops.md`).
+- **v1.1 (2026-07-10)** — operator retrospective of the platform build itself
+  (the assistant meta-analyzed its own process failures): added five §12 patterns
+  (artifact-first diagnosis, production-shaped smoke tests, config-effect
+  verification, dependency pulse checks, failure classification before accounting);
+  paired mechanical guards: conductor INFRA-strike attempt refunds, self-
+  provisioning toolbelt (`bootstrap/ensure-tools.*`), checkpoint large-file guard,
+  doctor context-size + loopback-binding checks. Success criterion: zero mission
+  attempts burned on already-seen infrastructure classes (context-size, missing
+  tool, dead endpoint, wrong bind) at the next retrospective.

@@ -42,12 +42,44 @@ done < <(grep -Ev '^\s*(#|$)' serving/models.manifest)
 
 echo "== serving =="
 [[ -f serving/llama-swap.rendered.yaml ]] && ok "rendered config" || bad "config not rendered" "oracle serve"
+# tier map must point at models that exist on disk (a missing tier model silently
+# degrades every engine to whatever is left — the "acting like 2022" failure)
+if [[ -f serving/tiers.env ]]; then
+  while IFS='=' read -r k v; do
+    [[ "$k" == *_MODEL && -n "$v" ]] || continue
+    if [[ -n "$(find "models/$v" -name '*.gguf' -type f 2>/dev/null | head -1)" ]]; then
+      ok "tier $k -> $v (on disk)"
+    else
+      bad "tier $k -> $v has no gguf on disk" "oracle models; then bash connectors/ide/sync-models.sh"
+    fi
+  done < serving/tiers.env
+else
+  meh "serving/tiers.env missing" "run ./install or connectors/ide/sync-models.sh"
+fi
+HAIKU="$(sed -n 's/^HAIKU_MODEL=//p' serving/tiers.env 2>/dev/null | head -1)"
+HAIKU="${HAIKU:-qwen3-coder-30b}"
 if curl -sf -m 5 http://127.0.0.1:9099/health >/dev/null 2>&1; then
   ok "llama-swap healthy"
+  # loopback-only binding is a privacy invariant, not an assumption — verify it
+  if lsof -nP -iTCP:9099 -sTCP:LISTEN 2>/dev/null | grep -qE '(\*|0\.0\.0\.0|\[::\]):9099'; then
+    bad "llama-swap listening on ALL interfaces" "service must use --listen 127.0.0.1:9099 (serving/service.sh)"
+  else
+    ok "llama-swap bound to loopback only"
+  fi
   r=$(curl -sf -m 60 http://127.0.0.1:9099/v1/chat/completions -H 'Content-Type: application/json' \
-    -d '{"model":"qwen3-coder-30b","max_tokens":8,"messages":[{"role":"user","content":"say OK"}]}' \
+    -d "{\"model\":\"$HAIKU\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"say OK\"}]}" \
     | jq -r '.choices[0].message.content' 2>/dev/null)
-  [[ -n "$r" && "$r" != "null" ]] && ok "fast lane inference: $r" || bad "fast lane not answering" "oracle restart; tail logs/llama-swap.err.log"
+  [[ -n "$r" && "$r" != "null" ]] && ok "fast lane inference ($HAIKU): $r" || bad "fast lane not answering" "oracle restart; tail logs/llama-swap.err.log"
+  # production-shaped probe: agent sessions open with >25k tokens; a serving stack
+  # that only answers hello-sized prompts is unusable no matter how healthy it looks
+  bigprompt=$(printf 'lorem ipsum dolor sit amet %.0s' $(seq 1 5200))
+  code=$(curl -s -o /tmp/oracle-ctx-probe.json -w '%{http_code}' -m 300 \
+    http://127.0.0.1:9099/v1/chat/completions -H 'Content-Type: application/json' \
+    -d "{\"model\":\"$HAIKU\",\"max_tokens\":4,\"messages\":[{\"role\":\"user\",\"content\":\"$bigprompt\"}]}")
+  if [[ "$code" == "200" ]]; then ok "agent-scale context probe (~26k tokens) accepted"
+  else bad "agent-scale context probe rejected (HTTP $code): $(head -c 120 /tmp/oracle-ctx-probe.json 2>/dev/null)" \
+           "context split across --parallel slots? one 32k slot beats two 8k slots"
+  fi
 else
   bad "llama-swap not responding" "oracle serve; then tail logs/llama-swap.err.log"
 fi

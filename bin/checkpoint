@@ -1,9 +1,25 @@
 #!/usr/bin/env bash
 # checkpoint "message" — the ratchet in one command: commit everything + ledger entry.
 # Used by agents mid-task so progress is crash-safe and the ledger stays current.
+# Guard: refuses to commit huge binaries (the class of incident that once pushed
+# ~1 GB of toolchain into history and needed a rewrite + force-push to undo).
 set -euo pipefail
 msg="${1:?usage: checkpoint \"message\"}"
 git add -A
+
+# large-file guard: nothing over 50 MB gets committed by an agent
+big=""
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  sz=$(wc -c < "$f" | xargs)
+  if [[ "$sz" -gt $((50 * 1024 * 1024)) ]]; then big="$big  $f ($((sz / 1024 / 1024)) MB)\n"; fi
+done < <(git diff --cached --name-only --diff-filter=AM)
+if [[ -n "$big" ]]; then
+  printf 'checkpoint: REFUSED — staged files over 50 MB:\n%b' "$big"
+  echo "checkpoint: unstage them (git restore --staged <file>) and add to .gitignore; artifacts belong in artifacts/ or models/"
+  exit 1
+fi
+
 if git diff --cached --quiet; then
   echo "checkpoint: nothing to commit"
 else
