@@ -31,6 +31,9 @@ __pycache__/
 # node
 node_modules/
 
+# machine-local toolchains (engines, llama binaries) — installed, never committed
+.tools/
+
 # secrets / local env
 .env
 connectors/supabase/.env
