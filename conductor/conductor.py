@@ -129,7 +129,7 @@ def git(repo: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProce
 
 TASK_FIELDS = {"id", "title", "prompt", "depends_on", "acceptance", "checks", "tier",
                "audit_tier", "timeout_minutes", "stall_minutes", "max_attempts",
-               "adversary", "escalate", "background", "requires_approval"}
+               "adversary", "escalate", "background", "requires_approval", "research"}
 
 
 @dataclass
@@ -149,6 +149,7 @@ class Task:
     escalate: bool = True            # final attempt auto-escalates to opus tier
     background: bool = False         # only runs when nothing else is dispatchable
     requires_approval: bool = False  # waits until memory/APPROVALS.md has 'APPROVE <id>'
+    research: bool = False           # read-only researcher pass feeds the first attempt
     # runtime state
     status: str = "pending"          # pending|claimed|running|auditing|done|failed|blocked|merge-conflict
     attempts: int = 0
@@ -265,11 +266,13 @@ instructions for an engineer with NO memory of this conversation>",
  "depends_on": ["<ids>"], "acceptance": ["<criterion>", ...],
  "checks": ["<shell command that exits 0 iff the criterion holds>", ...],
  "tier": "sonnet"|"haiku"|"opus", "timeout_minutes": <int, <=90>, "adversary": <bool>,
- "requires_approval": <bool>}
+ "requires_approval": <bool>, "research": <bool>}
 Rules: ids unique; depends_on must form a DAG over these ids; every task must be
 independently verifiable; put the mechanical proof of every acceptance criterion into
 checks wherever a shell command can express it; use tier "haiku" for grunt work,
-"opus" only where deep reasoning is essential; adversary=true for risk-bearing tasks.
+"opus" only where deep reasoning is essential; adversary=true for risk-bearing tasks;
+research=true for tasks entering unfamiliar code or data (a read-only researcher pass
+briefs the engineer first).
 Destructive or irreversible operations (database mutations, mass deletes/merges,
 schema changes, anything hard to undo) MUST be split into two tasks: a read-only
 DRY-RUN task that produces a reviewable report, and an EXECUTE task that depends on
@@ -536,8 +539,33 @@ class Conductor:
         self.ledger("REPLANNED", f"{len(new)} recovery tasks: " + ", ".join(t.id for t in new))
         return True
 
+    # ---- research pass ---------------------------------------------------------
+    def research_pass(self, t: Task, wt: Path) -> str:
+        """Read-only reconnaissance on the fast lane before the first developer
+        attempt: code archaeology, data profiling, prior art in the ledger. The
+        brief is persisted to the worktree and injected into the developer prompt."""
+        prompt = (
+            f"You are the RESEARCHER for task [{t.id}] '{t.title}'. STRICTLY READ-ONLY: "
+            "modify nothing; your only output is a findings brief for the engineer who "
+            "implements this task next.\n\n"
+            f"TASK BRIEF:\n{t.prompt}\n\n"
+            "Method: survey the code that this task will touch (grep/glob, then read the "
+            "load-bearing files completely); profile any relevant data; check "
+            "memory/LEDGER.md and memory/FAILURES.md for prior art and dead ends.\n"
+            "Report under 60 lines: FINDINGS (numbered, each with file:line or query "
+            "evidence), RISKS (what could invalidate the plan), RECOMMENDATION (the "
+            "single approach you would take, and why)."
+        )
+        out = self.run_engine(prompt, "haiku", wt, 12, f"{t.id}-research", stall_min=8).strip()
+        if out:
+            (wt / "RESEARCH.md").write_text(f"# Researcher brief — {t.id}\n\n{out}\n",
+                                            encoding="utf-8")
+            self.ledger(f"RESEARCH {t.id}", f"brief written ({len(out.splitlines())} lines)")
+            self.proc("research", task=t.id, lines=len(out.splitlines()))
+        return out
+
     # ---- prompts ---------------------------------------------------------------
-    def developer_prompt(self, t: Task, feedback: str) -> str:
+    def developer_prompt(self, t: Task, feedback: str, brief: str = "") -> str:
         acc = "\n".join(f"  {i+1}. {a}" for i, a in enumerate(t.acceptance)) or "  (none listed)"
         gates = ""
         if t.checks:
@@ -552,8 +580,12 @@ class Conductor:
                   "Do NOT re-run the failed approach harder. First write the DIAGNOSIS block in "
                   "TASKPLAN.md (root cause, not symptom — 5 lines), then execute a changed plan. "
                   "Repeating a logged failure wastes the mission's budget.")
+        rb = ""
+        if brief:
+            rb = ("\n\nRESEARCHER BRIEF (read-only recon done for you — full text in "
+                  f"RESEARCH.md here):\n{brief[:2500]}")
         return (
-            f"MISSION: {self.m.goal}\nTASK [{t.id}]: {t.title}\n\n{t.prompt}\n\n"
+            f"MISSION: {self.m.goal}\nTASK [{t.id}]: {t.title}\n\n{t.prompt}{rb}\n\n"
             f"ACCEPTANCE CRITERIA (audited independently — all must demonstrably hold):\n"
             f"{acc}{gates}{fb}\n\n"
             "You operate under the Long-Horizon Autonomy Protocol (in your loaded instructions). "
@@ -652,10 +684,16 @@ class Conductor:
             if feedback:
                 (wt / "FEEDBACK.md").write_text(
                     f"# Attempt {t.attempts - 1} failure details\n\n{feedback}\n", encoding="utf-8")
+            brief = ""
+            if t.research and t.attempts == 1:
+                try:
+                    brief = self.research_pass(t, wt)
+                except Exception as e:            # recon is best-effort, never blocks
+                    self.ledger(f"RESEARCH ERROR {t.id}", str(e)[:200])
             # Thinking models emit no stream events mid-thought; give opus runs
             # a longer silence allowance before the stall watchdog fires.
             stall = max(t.stall_minutes, 20) if tier == "opus" else t.stall_minutes
-            out = self.run_engine(self.developer_prompt(t, feedback), tier, wt,
+            out = self.run_engine(self.developer_prompt(t, feedback, brief), tier, wt,
                                   t.timeout_minutes, f"{t.id}-dev{t.attempts}",
                                   stall_min=stall)
             def attempt_end(outcome: str, **kw) -> None:
@@ -1060,8 +1098,43 @@ class Conductor:
         path.write_text("\n".join(lines), encoding="utf-8")
         return f"conductor/missions/amendments-{date}.toml"
 
+    # ---- overseer (continuous time-use audit) --------------------------------
+    def overseer(self) -> str:
+        """The original contract: 'auditor agents must monitor and ensure we are
+        making effective use of time at all times.' Every report interval, a
+        fast-lane, read-only pass judges how the mission is spending its time:
+        spinning tasks, repeated failures, idle capacity, drift from the goal.
+        The verdict lands in the ledger, the telemetry, and the hourly report."""
+        def tail(p: Path, n: int) -> str:
+            return p.read_text(encoding="utf-8")[-n:] if p.exists() else ""
+        table = "\n".join(f"- {t.id}: {t.status}, attempts {t.attempts}/{t.max_attempts}"
+                          f" ({t.note[:100]})" for t in self.m.tasks)
+        elapsed = (time.monotonic() - self.t0) / 3600
+        prompt = (
+            "You are the mission OVERSEER — the time-use auditor. STRICTLY READ-ONLY: "
+            "modify nothing; your entire output is this judgment.\n\n"
+            f"MISSION GOAL: {self.m.goal}\n"
+            f"ELAPSED: {elapsed:.1f} h of {self.m.hours} h budget\n"
+            f"NOW: {self.current}\n\nTASKS:\n{table}\n\n"
+            f"LEDGER (tail):\n{tail(MEMORY / 'LEDGER.md', 4000)}\n\n"
+            f"FAILURE MEMORY (tail):\n{tail(MEMORY / 'FAILURES.md', 2000)}\n\n"
+            "Judge, in at most 8 lines: (1) is machine time being used effectively "
+            "right now, at this burn rate? (2) is any task spinning — repeated attempts "
+            "hitting the same wall — that should be BLOCKED or rerouted instead of "
+            "retried? (3) what is the single highest-value next action for the loop? "
+            "Then end with EXACTLY one line: 'OVERSEER: OK' or "
+            "'OVERSEER: CONCERN: <the one thing to change>'."
+        )
+        out = self.run_engine(prompt, "haiku", self.m.repo, 8,
+                              f"overseer-{dt.datetime.now():%H%M}", stall_min=6).strip()
+        m = re.findall(r"OVERSEER:.*", out)
+        verdict = m[-1][:300] if m else "OVERSEER: no verdict produced"
+        self.ledger("OVERSEER", verdict)
+        self.proc("overseer", verdict=verdict)
+        return out
+
     # ---- reporting ----------------------------------------------------------
-    def report(self, final: bool = False) -> Path:
+    def report(self, final: bool = False, overseer_text: str = "") -> Path:
         counts: dict[str, int] = {}
         for t in self.m.tasks:
             counts[t.status] = counts.get(t.status, 0) + 1
@@ -1088,6 +1161,8 @@ class Conductor:
                           "to fulfil them in a controlled window"]
         nxt = self.dispatchable(False)
         lines += [f"\n**Planned next:** {nxt.id + ' — ' + nxt.title if nxt else 'nothing pending'}"]
+        if overseer_text:
+            lines += ["\n## Overseer — time-use audit\n", overseer_text]
         try:
             tail = (MEMORY / "LEDGER.md").read_text(encoding="utf-8").splitlines()[-12:]
             lines += ["\n## Ledger tail", *tail]
@@ -1099,7 +1174,12 @@ class Conductor:
 
     def _report_thread(self) -> None:
         while not self.stopping.wait(self.m.report_minutes * 60):
-            p = self.report()
+            osr = ""
+            try:
+                osr = self.overseer()          # best-effort; the report never blocks on it
+            except Exception as e:
+                self.ledger("OVERSEER ERROR", str(e)[:200])
+            p = self.report(overseer_text=osr)
             self.ledger("HOURLY REPORT", str(p.relative_to(ROOT)))
 
     # ---- main loop ----------------------------------------------------------

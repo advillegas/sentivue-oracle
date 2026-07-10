@@ -31,6 +31,7 @@ switch ($Cmd) {
         New-Item -ItemType Directory -Force -Path $env:npm_config_prefix | Out-Null
         Write-Host "==> engines: claude-code@$($pins['CLAUDE_CODE_NPM_VERSION']) + opencode@$($pins['OPENCODE_NPM_VERSION'])"
         npm install -g "@anthropic-ai/claude-code@$($pins['CLAUDE_CODE_NPM_VERSION'])" "opencode-ai@$($pins['OPENCODE_NPM_VERSION'])"
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\sync-skills.ps1")
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") setup
         Write-Host "==> setup complete: 'oracle.ps1 serve' then 'oracle.ps1 claude'"
     }

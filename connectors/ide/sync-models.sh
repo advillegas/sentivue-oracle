@@ -144,11 +144,19 @@ if [[ -n "$sonnet" ]]; then
          '.provider.oracle.models=$mm | .model=$s | .small_model=$h' "$O" > "$O.tmp" && mv "$O.tmp" "$O"
     fi
   fi
-  ADV="$ROOT/engines/opencode/xdg/opencode/agent/adversary.md"
-  if [[ -f "$ADV" ]]; then
-    sed -i '' "s|^model: oracle/.*|model: oracle/$opus|" "$ADV" 2>/dev/null || \
-      sed -i "s|^model: oracle/.*|model: oracle/$opus|" "$ADV"
-  fi
+  # OpenCode agent personas: remap each role's model line onto this machine's tiers
+  AGENT_DIR="$ROOT/engines/opencode/xdg/opencode/agent"
+  set_agent_model() {  # set_agent_model <file> <model>
+    [[ -f "$AGENT_DIR/$1" ]] || return 0
+    sed -i '' "s|^model: oracle/.*|model: oracle/$2|" "$AGENT_DIR/$1" 2>/dev/null || \
+      sed -i "s|^model: oracle/.*|model: oracle/$2|" "$AGENT_DIR/$1"
+  }
+  set_agent_model researcher.md "$haiku"
+  set_agent_model auditor.md    "$haiku"
+  set_agent_model librarian.md  "$haiku"
+  set_agent_model developer.md  "$sonnet"
+  set_agent_model envoy.md      "$sonnet"
+  set_agent_model adversary.md  "$opus"
 else
   echo "sync-models: WARNING - only embedding models found; download a chat model"
 fi

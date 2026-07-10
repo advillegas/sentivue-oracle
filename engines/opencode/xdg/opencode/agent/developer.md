@@ -1,7 +1,7 @@
 ---
 description: Implements a task against explicit acceptance criteria inside an assigned worktree.
 mode: subagent
-model: oracle/qwen3-coder-480b
+model: oracle/qwen2.5-coder-7b
 temperature: 0.5
 ---
 

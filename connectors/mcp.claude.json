@@ -3,13 +3,13 @@
     "duckdb": {
       "command": "uvx",
       "args": [
-        "--from", "mcp-server-duckdb==0.6.2", "mcp-server-duckdb",
+        "--from", "mcp-server-duckdb==1.1.0", "mcp-server-duckdb",
         "--db-path", "${ORACLE_ROOT}/data/lake.duckdb"
       ]
     },
     "postgres": {
       "command": "uvx",
-      "args": ["--from", "postgres-mcp==0.4.1", "postgres-mcp", "--access-mode", "restricted"],
+      "args": ["--from", "postgres-mcp==0.3.0", "postgres-mcp", "--access-mode", "restricted"],
       "env": {
         "DATABASE_URI": "postgresql://postgres:${ORACLE_PG_PASSWORD}@127.0.0.1:54322/postgres"
       }

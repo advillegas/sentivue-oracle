@@ -120,9 +120,17 @@ if ($sonnet) {
             ConvertTo-Json -InputObject $j -Depth 20 | Set-Content -Path $oc
         } catch { Write-Host "WARN: could not patch opencode.json: $($_.Exception.Message)" }
     }
-    $adv = Join-Path $Root "engines\opencode\xdg\opencode\agent\adversary.md"
-    if (Test-Path $adv) {
-        (Get-Content $adv) -replace "^model: oracle/.*", "model: oracle/$opus" | Set-Content $adv
+    # OpenCode agent personas: remap each role's model line onto this machine's tiers
+    $agentTier = @{
+        "researcher.md" = $haiku; "auditor.md" = $haiku; "librarian.md" = $haiku
+        "developer.md" = $sonnet; "envoy.md" = $sonnet; "adversary.md" = $opus
+    }
+    $agentDir = Join-Path $Root "engines\opencode\xdg\opencode\agent"
+    foreach ($kv in $agentTier.GetEnumerator()) {
+        $f = Join-Path $agentDir $kv.Key
+        if (Test-Path $f) {
+            (Get-Content $f) -replace "^model: oracle/.*", "model: oracle/$($kv.Value)" | Set-Content $f
+        }
     }
 } else {
     Write-Host "sync-models: WARNING - only embedding models found; download a chat model"

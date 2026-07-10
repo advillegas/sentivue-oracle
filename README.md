@@ -330,7 +330,9 @@ permanently resident. Default GPU wired limit is raised to 448 GB by the install
 - **Skills** — engines load the domain packs; the ECC `continuous-learning` skill plus
   the conductor's ledger feed new `SKILL.md` candidates back into `skills/`.
 - **Connectors** — MCP: DuckDB data lake, Postgres/Supabase (self-hosted), filesystem, git.
-- **Subagents** — `researcher`, `developer`, `auditor`, `adversary` for both engines.
+- **Subagents** — `researcher`, `developer`, `auditor`, `adversary`, `librarian`
+  (memory curator), `envoy` (controlled network) for both engines; plus conductor-run
+  roles: `planner`, `overseer` (hourly time-use audit), `historian`, `meta-analyst`.
 - **Memory** — append-only `memory/LEDGER.md` + `memory/STATE.md` snapshot +
   `memory/FAILURES.md` (approaches that failed and why — read before every attempt) +
   `memory/LESSONS.md` (distilled at mission end, read at every start — mission N+1

@@ -26,12 +26,15 @@ and machine learning engineering for the operator.
 
 ## Model tiers — spend compute deliberately
 
-- **haiku / fast lane** (`qwen3-coder-30b`, always resident): file surveys, grep-level
-  research, formatting, commit messages, audits of small diffs, background chores.
-- **sonnet / big slot** (`qwen3-coder-480b`, default): all real implementation work.
-- **opus / big slot** (`kimi-k2-thinking`): architecture, hard debugging, math-heavy
-  derivations, adversarial review of critical systems. Swapping the big slot costs
-  1–2 minutes — batch your opus-worthy questions rather than ping-ponging tiers.
+Tier aliases are remapped per machine to whatever is actually installed
+(`serving/tiers.env`, auto-detected); reason in tiers, not model names:
+
+- **haiku / fast lane** (always resident): file surveys, grep-level research,
+  formatting, commit messages, audits of small diffs, background chores.
+- **sonnet / big slot** (default): all real implementation work.
+- **opus / big slot**: architecture, hard debugging, math-heavy derivations,
+  adversarial review of critical systems. Swapping the big slot costs minutes —
+  batch your opus-worthy questions rather than ping-ponging tiers.
 
 ## Memory protocol (plain text, append-only)
 
@@ -75,6 +78,15 @@ and machine learning engineering for the operator.
   Verdict format: `AUDIT: PASS` or `AUDIT: FAIL: <reasons>`. No fixes, only findings.
 - `adversary` — assumes the work is wrong: hunts edge cases, overfitting, silent
   failure modes, wasted effort. Also reviews whether time is being used effectively.
+- `librarian` — memory curator: reconciles STATE.md with the ledger, distills
+  recurring failures into lessons. History is append-only; only snapshots change.
+- `envoy` — the only role that ever touches the network, fetch-only, in
+  operator-opened windows (see the network doctrine above).
+
+Conductor-run roles (independent engine runs, not persona files): the `planner`
+decomposes goals, the `overseer` audits time-use every report interval, the
+`historian` distills lessons at mission end, and the `meta-analyst` runs the
+retrospective that proposes protocol amendments.
 
 Route heavy lifting to subagents on the fast lane; keep the big slot for synthesis.
 

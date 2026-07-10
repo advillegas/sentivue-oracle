@@ -17,6 +17,8 @@ workers = 2                         # second worker drives haiku tasks on the fa
 #   audit_tier    default "sonnet" — verifier as strong as the generator
 #   escalate      default true — the final attempt auto-escalates to the opus tier
 #   stall_minutes default 12 — kill a run that goes silent this long
+#   research      default false — fast-lane read-only researcher pass briefs the
+#                 first developer attempt (RESEARCH.md in the worktree)
 
 [[tasks]]
 id = "ingest"
@@ -33,6 +35,7 @@ acceptance = [
 checks = ["uv run --project env pytest pipelines/tests -q"]
 tier = "sonnet"
 timeout_minutes = 40
+research = true           # profile the parquet data before writing the ingester
 
 [[tasks]]
 id = "signal"

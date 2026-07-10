@@ -32,7 +32,7 @@
                                "command":  [
                                                "uvx",
                                                "--from",
-                                               "mcp-server-duckdb==0.6.2",
+                                               "mcp-server-duckdb==1.1.0",
                                                "mcp-server-duckdb",
                                                "--db-path",
                                                "{env:ORACLE_ROOT}/data/lake.duckdb"
@@ -44,7 +44,7 @@
                                  "command":  [
                                                  "uvx",
                                                  "--from",
-                                                 "postgres-mcp==0.4.1",
+                                                 "postgres-mcp==0.3.0",
                                                  "postgres-mcp",
                                                  "--access-mode",
                                                  "restricted"
