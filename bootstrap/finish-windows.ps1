@@ -15,10 +15,15 @@ if (-not (Test-Path "$Root\.git")) {
 }
 git add -A
 $hasIdentity = (git config user.email) -and (git config user.name)
+if (-not $hasIdentity) {
+    # Repo-local identity using the owner's GitHub no-reply address, so GitHub
+    # attributes commits to the right account (email match drives the avatar).
+    git config user.name "advillegas"
+    git config user.email "74381111+advillegas@users.noreply.github.com"
+}
 $msg = "SentiVue Oracle: offline agentic workstation (Claude Code + OpenCode engines, guided installer)"
 if (git status --porcelain) {
-    if ($hasIdentity) { git commit -m $msg | Out-Host }
-    else { git -c user.name="Aaron" -c user.email="aaron@users.noreply.github.com" commit -m $msg | Out-Host }
+    git commit -m $msg | Out-Host
 } else {
     Write-Host "==> nothing new to commit"
 }
