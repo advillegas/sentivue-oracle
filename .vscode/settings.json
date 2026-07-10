@@ -1,7 +1,8 @@
 {
+  "window.title": "SentiVue Oracle${separator}${activeEditorShort}",
   "workbench.startupEditor": "none",
-  "workbench.colorTheme": "Default Dark Modern",
+  "workbench.colorTheme": "Dark Modern",
   "continue.enableTabAutocomplete": true,
   "editor.inlineSuggest.enabled": true,
-  "extensions.ignoreRecommendations": false
+  "extensions.ignoreRecommendations": true
 }
