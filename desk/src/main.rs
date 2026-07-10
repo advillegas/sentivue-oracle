@@ -9,6 +9,7 @@
 mod data;
 mod engine;
 mod launchpad;
+mod payload;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -32,6 +33,9 @@ struct ChatMsg {
 
 struct DeskApp {
     root: PathBuf,
+    installed: bool,             // false => first-run self-extraction screen
+    install_dest: String,
+    install_msg: Option<String>,
     tab: Tab,
     // chat
     engine_kind: EngineKind,
@@ -54,8 +58,13 @@ struct DeskApp {
 
 impl DeskApp {
     fn new() -> Self {
-        let root = data::find_root();
+        let found = data::find_root();
+        let installed = found.is_some();
+        let root = found.unwrap_or_else(data::default_install_dir);
         let mut app = Self {
+            install_dest: root.display().to_string(),
+            install_msg: None,
+            installed,
             root,
             tab: Tab::Launch,
             engine_kind: EngineKind::Claude,
@@ -79,8 +88,42 @@ impl DeskApp {
             models: None,
             vault_text: String::new(),
         };
-        app.refresh();
+        if app.installed {
+            app.refresh();
+        }
         app
+    }
+
+    fn install_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(40.0);
+        ui.vertical_centered(|ui| {
+            ui.heading("SentiVue Oracle");
+            ui.label("self-contained development ecosystem — this executable IS the platform");
+            ui.add_space(20.0);
+            if payload::has_payload() {
+                ui.label("Install the platform to:");
+                ui.add(egui::TextEdit::singleline(&mut self.install_dest).desired_width(420.0));
+                ui.add_space(8.0);
+                if ui.button("Install here (self-extract, ~1 s)").clicked() {
+                    let dest = PathBuf::from(self.install_dest.trim());
+                    match payload::extract_to(&dest) {
+                        Ok(n) => {
+                            self.install_msg = Some(format!("installed {n} files"));
+                            self.root = dest;
+                            self.installed = true;
+                            self.refresh();
+                        }
+                        Err(e) => self.install_msg = Some(format!("failed: {e}")),
+                    }
+                }
+            } else {
+                ui.label("This build carries no embedded payload; place the exe inside a platform checkout.");
+            }
+            if let Some(m) = &self.install_msg {
+                ui.add_space(6.0);
+                ui.label(m.as_str());
+            }
+        });
     }
 
     fn refresh(&mut self) {
@@ -345,6 +388,10 @@ impl DeskApp {
 
 impl eframe::App for DeskApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.installed {
+            egui::CentralPanel::default().show(ctx, |ui| self.install_ui(ui));
+            return;
+        }
         self.pump_engine();
         if self.last_refresh.elapsed() > Duration::from_secs(3) {
             self.refresh();
@@ -381,6 +428,22 @@ impl eframe::App for DeskApp {
 }
 
 fn main() -> eframe::Result {
+    // Headless self-extraction for scripts/installers: oracle-desk --extract-to <dir>
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--extract-to") {
+        if let Some(dir) = args.get(i + 1) {
+            match payload::extract_to(std::path::Path::new(dir)) {
+                Ok(n) => {
+                    println!("extracted {n} files to {dir}");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("extract failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 860.0])

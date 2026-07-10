@@ -5,29 +5,35 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub fn find_root() -> PathBuf {
+pub fn find_root() -> Option<PathBuf> {
     if let Ok(r) = std::env::var("ORACLE_ROOT") {
         let p = PathBuf::from(r);
         if p.join("serving/models.manifest").exists() {
-            return p;
+            return Some(p);
         }
     }
     if let Ok(exe) = std::env::current_exe() {
         for anc in exe.ancestors() {
             if anc.join("serving/models.manifest").exists() {
-                return anc.to_path_buf();
+                return Some(anc.to_path_buf());
             }
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
         for anc in cwd.ancestors() {
             if anc.join("serving/models.manifest").exists() {
-                return anc.to_path_buf();
+                return Some(anc.to_path_buf());
             }
         }
-        return cwd;
     }
-    PathBuf::from(".")
+    None
+}
+
+pub fn default_install_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join("sentivue-oracle")
 }
 
 pub fn read_tail(path: &Path, lines: usize) -> String {
