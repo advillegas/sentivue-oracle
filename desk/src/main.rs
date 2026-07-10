@@ -10,6 +10,7 @@ mod data;
 mod engine;
 mod launchpad;
 mod payload;
+mod theme;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -194,10 +195,10 @@ impl DeskApp {
         let models = launchpad::models_present(&self.root);
 
         ui.add_space(8.0);
-        ui.heading("SentiVue Oracle — the whole platform from here");
+        ui.heading(egui::RichText::new("✻ SentiVue Oracle — the whole platform from here").color(theme::ORANGE));
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let dot = |ok: bool| if ok { egui::Color32::from_rgb(63, 185, 80) } else { egui::Color32::from_rgb(248, 81, 73) };
+            let dot = |ok: bool| if ok { theme::GREEN } else { theme::RED };
             ui.colored_label(dot(healthy), "●"); ui.label("serving");
             ui.separator();
             ui.colored_label(dot(engines), "●"); ui.label("engines");
@@ -274,37 +275,61 @@ impl DeskApp {
             .stick_to_bottom(true)
             .show(ui, |ui| {
                 for m in &self.messages {
-                    let (tag, color) = match m.role {
-                        "you" => ("you", egui::Color32::from_rgb(88, 166, 255)),
-                        "oracle" => ("oracle", egui::Color32::from_rgb(63, 185, 80)),
-                        "tool" => ("tool", egui::Color32::from_rgb(210, 153, 34)),
-                        _ => ("system", egui::Color32::GRAY),
-                    };
-                    ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(color, format!("{tag} >"));
-                        ui.label(m.text.as_str());
-                    });
-                    ui.add_space(4.0);
+                    match m.role {
+                        "you" => {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.colored_label(theme::CORAL, "❯");
+                                ui.label(m.text.as_str());
+                            });
+                        }
+                        "tool" => {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.colored_label(theme::GREEN, "⏺");
+                                ui.colored_label(theme::DIM, m.text.trim_matches(['[', ']']));
+                            });
+                        }
+                        "oracle" => {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.colored_label(theme::CORAL, "✻");
+                                ui.label(m.text.as_str());
+                            });
+                        }
+                        _ => {
+                            ui.colored_label(theme::DIM, m.text.as_str());
+                        }
+                    }
+                    ui.add_space(6.0);
                 }
                 if !self.streaming.is_empty() {
                     ui.horizontal_wrapped(|ui| {
-                        ui.colored_label(egui::Color32::from_rgb(63, 185, 80), "oracle >");
+                        ui.colored_label(theme::CORAL, "✻");
                         ui.label(self.streaming.as_str());
                     });
                 }
             });
         ui.separator();
-        ui.horizontal(|ui| {
-            let editor = egui::TextEdit::singleline(&mut self.input)
-                .hint_text("ask the oracle…")
-                .desired_width(ui.available_width() - 70.0);
-            let resp = ui.add(editor);
-            let send_clicked = ui.button("send").clicked();
-            if send_clicked || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
-                self.send_prompt();
-                resp.request_focus();
-            }
-        });
+        egui::Frame::none()
+            .fill(theme::BG_DEEP)
+            .stroke(egui::Stroke::new(1.0, theme::BORDER))
+            .rounding(egui::Rounding::same(6.0))
+            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(theme::CORAL, "❯");
+                    let editor = egui::TextEdit::singleline(&mut self.input)
+                        .hint_text("ask the oracle…")
+                        .frame(false)
+                        .desired_width(ui.available_width() - 40.0);
+                    let resp = ui.add(editor);
+                    let send_clicked = ui.button("⏎").clicked();
+                    if send_clicked
+                        || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+                    {
+                        self.send_prompt();
+                        resp.request_focus();
+                    }
+                });
+            });
     }
 
     fn missions_ui(&mut self, ui: &mut egui::Ui) {
@@ -315,7 +340,7 @@ impl DeskApp {
                 for id in ids {
                     ui.horizontal(|ui| {
                         ui.monospace(id.as_str());
-                        if ui.button("APPROVE").clicked() {
+                        if ui.button(egui::RichText::new("APPROVE").color(theme::ORANGE)).clicked() {
                             data::approve(&self.root, &id);
                             self.last_refresh = Instant::now() - Duration::from_secs(60);
                         }
@@ -362,9 +387,9 @@ impl DeskApp {
     fn models_ui(&mut self, ui: &mut egui::Ui) {
         if let Some(m) = &self.models {
             let (dot, label) = if m.healthy {
-                (egui::Color32::from_rgb(63, 185, 80), "llama-swap: healthy")
+                (theme::GREEN, "llama-swap: healthy")
             } else {
-                (egui::Color32::from_rgb(248, 81, 73), "llama-swap: down (oracle serve)")
+                (theme::RED, "llama-swap: down (oracle serve)")
             };
             ui.horizontal(|ui| {
                 ui.colored_label(dot, "●");
@@ -399,8 +424,10 @@ impl eframe::App for DeskApp {
         ctx.request_repaint_after(Duration::from_millis(250));
 
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.heading("SentiVue Oracle");
+                ui.colored_label(theme::CORAL, egui::RichText::new("✻").heading());
+                ui.heading(egui::RichText::new("✻ SentiVue Oracle").color(theme::ORANGE));
                 ui.separator();
                 ui.selectable_value(&mut self.tab, Tab::Launch, "Launch");
                 ui.selectable_value(&mut self.tab, Tab::Chat, "Chat");
@@ -411,9 +438,26 @@ impl eframe::App for DeskApp {
                     ui.label(
                         egui::RichText::new(self.root.display().to_string())
                             .small()
-                            .color(egui::Color32::GRAY),
+                            .color(theme::DIM),
                     );
                 });
+            });
+            ui.add_space(2.0);
+        });
+
+        egui::TopBottomPanel::bottom("statusline").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                let healthy = self.models.as_ref().map(|m| m.healthy).unwrap_or(false);
+                let (dot, txt) = if healthy { (theme::GREEN, "serving") } else { (theme::DIM, "offline") };
+                ui.colored_label(dot, "●");
+                ui.colored_label(theme::DIM, txt);
+                ui.separator();
+                ui.colored_label(theme::DIM, self.engine_kind.label());
+                if let Some(sid) = &self.session_id {
+                    ui.separator();
+                    let short: String = sid.chars().take(8).collect();
+                    ui.colored_label(theme::DIM, format!("session {short}"));
+                }
             });
         });
 
@@ -454,7 +498,7 @@ fn main() -> eframe::Result {
         "SentiVue Oracle",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            theme::apply(&cc.egui_ctx);
             Ok(Box::new(DeskApp::new()))
         }),
     )
