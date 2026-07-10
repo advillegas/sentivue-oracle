@@ -1,0 +1,27 @@
+---
+description: Always commit and push to origin after completing any change in this repo
+alwaysApply: true
+---
+
+# Always commit and push after changes
+
+After completing any coherent unit of work in this repository (feature, fix, config
+change, docs), ALWAYS finish by committing and pushing — without waiting to be asked:
+
+1. `git add -A`
+2. `git commit -m "<what and why, one line>"` — use the repo-local identity already
+   configured (`advillegas <74381111+advillegas@users.noreply.github.com>`); never
+   invent a placeholder name or email.
+3. `git push origin main`
+4. Confirm the push succeeded (`git status -sb` shows `main...origin/main` with no
+   ahead/behind) and report the commit SHA.
+
+Notes:
+
+- One commit per coherent change-set; don't batch unrelated work into one commit.
+- The remote is the private repo `advillegas/sentivue-oracle`. It must stay private.
+- Never force-push unless explicitly asked; if a push is rejected, fetch and retry.
+- If a push genuinely cannot complete (auth/network), say so explicitly at the end of
+  the turn — never end a turn with silently unpushed commits.
+- This applies to the Windows authoring machine. On the deployed (air-gapped) Mac,
+  committing still applies; pushing obviously does not.
