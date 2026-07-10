@@ -54,6 +54,7 @@ struct DeskApp {
     session_id: Option<String>,
     streaming: String,
     // cached panels
+    refresh_rx: Option<std::sync::mpsc::Receiver<data::Snapshot>>,
     last_refresh: Instant,
     state_md: String,
     ledger_tail: String,
@@ -81,6 +82,7 @@ impl DeskApp {
             a_rx: None,
             a_streaming: String::new(),
             a_smart: false,
+            refresh_rx: None,
             engine_kind: EngineKind::Claude,
             input: String::new(),
             messages: vec![ChatMsg {
@@ -141,15 +143,39 @@ impl DeskApp {
     }
 
     fn refresh(&mut self) {
-        let r = &self.root;
-        self.state_md = data::read_tail(&r.join("memory/STATE.md"), 60);
-        self.ledger_tail = data::read_tail(&r.join("memory/LEDGER.md"), 25);
-        self.netreq_tail = data::read_tail(&r.join("memory/NET-REQUESTS.md"), 20);
-        self.approvals = data::awaiting_approvals(r);
-        self.reports = data::list_reports(r);
-        self.models = Some(data::model_status());
-        self.vault_text = data::vault_inventory(r);
-        self.last_refresh = Instant::now();
+        // Never block the redraw loop: gather everything on a worker thread.
+        if self.refresh_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root = self.root.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(data::snapshot(&root));
+        });
+        self.refresh_rx = Some(rx);
+    }
+
+    fn pump_refresh(&mut self) {
+        let done = if let Some(rx) = &self.refresh_rx {
+            if let Ok(s) = rx.try_recv() {
+                self.state_md = s.state_md;
+                self.ledger_tail = s.ledger_tail;
+                self.netreq_tail = s.netreq_tail;
+                self.approvals = s.approvals;
+                self.reports = s.reports;
+                self.models = Some(s.models);
+                self.vault_text = s.vault_text;
+                self.last_refresh = Instant::now();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if done {
+            self.refresh_rx = None;
+        }
     }
 
     fn pump_engine(&mut self) {
@@ -544,41 +570,34 @@ impl eframe::App for DeskApp {
         }
         self.pump_engine();
         self.pump_assistant();
+        self.pump_refresh();
         if self.last_refresh.elapsed() > Duration::from_secs(3) {
             self.refresh();
         }
         ctx.request_repaint_after(Duration::from_millis(250));
 
-        egui::SidePanel::left("nav")
-            .exact_width(172.0)
-            .frame(egui::Frame::default()
-                .fill(theme::BG_DEEP)
-                .inner_margin(egui::Margin::symmetric(10.0, 12.0)))
-            .show(ctx, |ui| {
-                ui.label(egui::RichText::new("SENTIVUE ORACLE").small().strong().color(theme::DIM));
-                ui.add_space(10.0);
-                for (t, label) in [
-                    (Tab::Launch, "Launch"),
-                    (Tab::Assistant, "Assistant"),
-                    (Tab::Code, "Code"),
-                    (Tab::Missions, "Missions"),
-                    (Tab::Models, "Models"),
-                    (Tab::Vault, "Vault"),
-                ] {
-                    let selected = self.tab == t;
-                    let text = if selected {
-                        egui::RichText::new(label).color(theme::TEXT)
-                    } else {
-                        egui::RichText::new(label).color(theme::DIM)
-                    };
-                    if ui.add_sized([150.0, 26.0], egui::SelectableLabel::new(selected, text)).clicked() {
-                        self.tab = t;
-                    }
-                }
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.label(egui::RichText::new(self.root.display().to_string()).small().color(theme::DIM));
+        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                ui.colored_label(theme::CORAL, egui::RichText::new("✻").heading());
+                ui.heading(egui::RichText::new("✻ SentiVue Oracle").color(theme::ORANGE));
+                ui.separator();
+                ui.selectable_value(&mut self.tab, Tab::Launch, "Launch");
+                ui.selectable_value(&mut self.tab, Tab::Assistant, "Assistant");
+                ui.selectable_value(&mut self.tab, Tab::Code, "Code");
+                ui.selectable_value(&mut self.tab, Tab::Missions, "Missions");
+                ui.selectable_value(&mut self.tab, Tab::Models, "Models");
+                ui.selectable_value(&mut self.tab, Tab::Vault, "Vault");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(self.root.display().to_string())
+                            .small()
+                            .color(theme::DIM),
+                    );
                 });
             });
+            ui.add_space(2.0);
+        });
 
         egui::TopBottomPanel::bottom("statusline").show(ctx, |ui| {
             ui.horizontal(|ui| {

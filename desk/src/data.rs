@@ -29,6 +29,30 @@ pub fn find_root() -> Option<PathBuf> {
     None
 }
 
+/// Everything the panels display, gathered OFF the UI thread (network + git can
+/// block for seconds; the redraw loop must never wait on them).
+pub struct Snapshot {
+    pub state_md: String,
+    pub ledger_tail: String,
+    pub netreq_tail: String,
+    pub approvals: Vec<String>,
+    pub reports: Vec<PathBuf>,
+    pub models: ModelStatus,
+    pub vault_text: String,
+}
+
+pub fn snapshot(root: &Path) -> Snapshot {
+    Snapshot {
+        state_md: read_tail(&root.join("memory/STATE.md"), 60),
+        ledger_tail: read_tail(&root.join("memory/LEDGER.md"), 25),
+        netreq_tail: read_tail(&root.join("memory/NET-REQUESTS.md"), 20),
+        approvals: awaiting_approvals(root),
+        reports: list_reports(root),
+        models: model_status(),
+        vault_text: vault_inventory(root),
+    }
+}
+
 /// (fast, smart) chat models for this machine's profile, from serving/tiers.env.
 pub fn tier_models(root: &Path) -> (String, String) {
     let mut fast = "qwen3-coder-30b".to_string();
