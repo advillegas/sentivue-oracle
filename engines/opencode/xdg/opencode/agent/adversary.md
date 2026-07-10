@@ -1,7 +1,7 @@
 ---
 description: Adversarial checker for critical or risk-bearing work - assumes the work is wrong and hunts edge cases, overfitting, silent failures, wasted effort.
 mode: subagent
-model: oracle/kimi-k2-thinking
+model: oracle/qwen2.5-coder-7b
 temperature: 0.7
 tools:
   write: false

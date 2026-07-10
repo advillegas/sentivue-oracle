@@ -19,6 +19,8 @@ write_plist() {
     <string>$BIN</string>
     <string>--config</string>
     <string>$CONFIG</string>
+    <string>--listen</string>
+    <string>127.0.0.1:9099</string>
   </array>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>

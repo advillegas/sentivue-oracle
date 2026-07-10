@@ -11,6 +11,15 @@
       "problemMatcher": []
     },
     {
+      "label": "Oracle: sync IDE models (auto)",
+      "type": "shell",
+      "windows": { "command": "powershell -NoProfile -ExecutionPolicy Bypass -File connectors/ide/sync-models.ps1" },
+      "osx": { "command": "bash connectors/ide/sync-models.sh" },
+      "runOptions": { "runOn": "folderOpen" },
+      "presentation": { "reveal": "silent", "panel": "dedicated" },
+      "problemMatcher": []
+    },
+    {
       "label": "Oracle: status",
       "type": "shell",
       "windows": { "command": "powershell -NoProfile -ExecutionPolicy Bypass -File serving/serve-windows.ps1 status" },

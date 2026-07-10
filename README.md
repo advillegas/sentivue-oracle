@@ -250,6 +250,17 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
   terminal) — all pointed at llama-swap, so every keystroke of AI runs on local
   models. `oracle ide install` sets it up (extensions from open-vsx, configs
   generated, updates and telemetry off); `oracle ide` opens the repo.
+- **Parallel agent tabs** — `Cmd+Shift+A` (`Ctrl+Shift+A` on Windows) opens a full
+  engine session (Claude Code) as an editor tab; open as many as you want, side by
+  side, like Cursor's agent tabs. `Cmd+Shift+Alt+A` opens the agent in its **own git
+  worktree + branch** so parallel agents never collide — merge the branch when you
+  like the result. `Cmd+Alt+O` opens an OpenCode tab. Also available from the
+  terminal `+` dropdown ("Oracle Agent" profiles).
+- **Model auto-detection** — every IDE launch runs `sync-models`, which asks the
+  serving layer (or scans `models/`) for what's actually installed, then rewires
+  Continue, Roo Code (auto-imported provider profile), the engine tier maps
+  (`serving/tiers.env`), and the opus/sonnet/haiku aliases to models that exist on
+  this machine. Download a new model and it shows up everywhere on the next launch.
 - **`oracle console`** — mission control at `http://127.0.0.1:8800`: live mission
   state, one-click operator approvals, the network-request queue, ledger tail, and
   reports (stdlib Python, zero dependencies).

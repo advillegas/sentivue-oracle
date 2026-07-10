@@ -16,6 +16,8 @@ $LlamaTag = "b9948"
 $SwapVer = "236"
 
 function Get-ActiveModels {
+    # A model is active if the profile selects it OR it is already downloaded -
+    # anything sitting in models\ was put there on purpose and should be served.
     $profileFile = Join-Path $Root "serving\models.profile"
     $active = $null
     if (Test-Path $profileFile) {
@@ -25,7 +27,10 @@ function Get-ActiveModels {
         Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") } | ForEach-Object {
             $f = $_ -split "\|"
             [pscustomobject]@{ Name = $f[0].Trim(); Slot = $f[3].Trim(); Ctx = $f[4].Trim(); Flags = $f[5].Trim() }
-        } | Where-Object { $null -eq $active -or $active -contains $_.Name }
+        } | Where-Object {
+            $downloaded = [bool](Get-ChildItem (Join-Path $Root "models\$($_.Name)") -Recurse -Filter "*.gguf" -ErrorAction SilentlyContinue | Select-Object -First 1)
+            ($null -eq $active) -or ($active -contains $_.Name) -or $downloaded
+        }
     return $rows
 }
 
@@ -50,7 +55,8 @@ switch ($Cmd) {
     }
     "render" {
         $server = (Join-Path $Tools "llama\llama-server.exe") -replace "\\", "/"
-        $lines = @("listen: `"127.0.0.1:9099`"", "healthCheckTimeout: 900", "logLevel: info", "", "models:")
+        # NOTE: the listen address is a CLI flag (--listen), not a config key.
+        $lines = @("healthCheckTimeout: 900", "logLevel: info", "", "models:")
         $resident = @(); $big = @(); $missing = @()
         foreach ($r in Get-ActiveModels) {
             $dir = Join-Path $Root "models\$($r.Name)"
@@ -87,7 +93,7 @@ switch ($Cmd) {
         & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath stop 2>$null | Out-Null
         New-Item -ItemType Directory -Force -Path (Join-Path $Root "state"), (Join-Path $Root "logs") | Out-Null
         $p = Start-Process -FilePath (Join-Path $Tools "llama-swap.exe") `
-            -ArgumentList "--config", $Rendered -WindowStyle Hidden -PassThru `
+            -ArgumentList "--config", $Rendered, "--listen", "127.0.0.1:9099" -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $Root "logs\llama-swap.win.out.log") `
             -RedirectStandardError (Join-Path $Root "logs\llama-swap.win.err.log")
         Set-Content -Path $PidFile -Value $p.Id

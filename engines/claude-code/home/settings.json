@@ -1,46 +1,46 @@
 {
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://127.0.0.1:9099",
-    "ANTHROPIC_AUTH_TOKEN": "oracle-local",
-    "ANTHROPIC_MODEL": "qwen3-coder-480b",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "kimi-k2-thinking",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen3-coder-480b",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen3-coder-30b",
-    "ANTHROPIC_SMALL_FAST_MODEL": "qwen3-coder-30b",
-    "API_TIMEOUT_MS": "1800000",
-    "BASH_DEFAULT_TIMEOUT_MS": "600000",
-    "MAX_THINKING_TOKENS": "32000",
-    "DISABLE_TELEMETRY": "1",
-    "DISABLE_ERROR_REPORTING": "1",
-    "DISABLE_AUTOUPDATER": "1",
-    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
-  },
-  "includeCoAuthoredBy": false,
-  "permissions": {
-    "allow": [
-      "Bash(uv run:*)",
-      "Bash(git status:*)",
-      "Bash(git diff:*)",
-      "Bash(git log:*)",
-      "Bash(git add:*)",
-      "Bash(git commit:*)",
-      "Bash(cargo build:*)",
-      "Bash(cargo test:*)",
-      "Bash(cargo clippy:*)",
-      "Bash(pytest:*)",
-      "Bash(cmake:*)",
-      "Bash(make test:*)"
-    ],
-    "deny": [
-      "WebFetch",
-      "WebSearch",
-      "Bash(curl:*)",
-      "Bash(wget:*)",
-      "Read(./connectors/supabase/.env)"
-    ],
-    "defaultMode": "acceptEdits"
-  },
-  "model": "qwen3-coder-480b",
-  "theme": "dark"
+    "env":  {
+                "ANTHROPIC_BASE_URL":  "http://127.0.0.1:9099",
+                "ANTHROPIC_AUTH_TOKEN":  "oracle-local",
+                "API_TIMEOUT_MS":  "1800000",
+                "BASH_DEFAULT_TIMEOUT_MS":  "600000",
+                "MAX_THINKING_TOKENS":  "32000",
+                "DISABLE_TELEMETRY":  "1",
+                "DISABLE_ERROR_REPORTING":  "1",
+                "DISABLE_AUTOUPDATER":  "1",
+                "DISABLE_NON_ESSENTIAL_MODEL_CALLS":  "1",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":  "1",
+                "ANTHROPIC_MODEL":  "qwen2.5-coder-7b",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL":  "qwen2.5-coder-7b",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL":  "qwen2.5-coder-7b",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "qwen2.5-coder-7b",
+                "ANTHROPIC_SMALL_FAST_MODEL":  "qwen2.5-coder-7b"
+            },
+    "includeCoAuthoredBy":  false,
+    "permissions":  {
+                        "allow":  [
+                                      "Bash(uv run:*)",
+                                      "Bash(git status:*)",
+                                      "Bash(git diff:*)",
+                                      "Bash(git log:*)",
+                                      "Bash(git add:*)",
+                                      "Bash(git commit:*)",
+                                      "Bash(cargo build:*)",
+                                      "Bash(cargo test:*)",
+                                      "Bash(cargo clippy:*)",
+                                      "Bash(pytest:*)",
+                                      "Bash(cmake:*)",
+                                      "Bash(make test:*)"
+                                  ],
+                        "deny":  [
+                                     "WebFetch",
+                                     "WebSearch",
+                                     "Bash(curl:*)",
+                                     "Bash(wget:*)",
+                                     "Read(./connectors/supabase/.env)"
+                                 ],
+                        "defaultMode":  "acceptEdits"
+                    },
+    "theme":  "dark",
+    "model":  "qwen2.5-coder-7b"
 }

@@ -81,6 +81,7 @@ switch ($Cmd) {
         Write-Host "  setup                                     engines (pinned) + serving toolchain (one time)"
         Write-Host "  serve | status | stop                     local model serving (llama-swap on :9099)"
         Write-Host "  claude | opencode                         engine sessions on local models"
+        Write-Host "  ide  [install|sync]                       Cursor-like IDE (agent tabs, auto-detected models)"
         Write-Host "  desk                                      native desktop app (chat/missions/models/vault)"
         Write-Host "  menu                                      interactive menu (the desktop shortcut opens this)"
         Write-Host "  vault   init|sync|new|clone|list|backup   local private git remote"

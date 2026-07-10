@@ -8,8 +8,10 @@ MANIFEST="serving/models.manifest"
 PROFILE="serving/models.profile"
 OUT="serving/llama-swap.rendered.yaml"
 
-is_active() {  # no profile file => everything active
-  [[ ! -f "$PROFILE" ]] || grep -qx "$1" "$PROFILE"
+is_active() {  # active if profiled OR already downloaded (no profile file => all)
+  [[ ! -f "$PROFILE" ]] && return 0
+  grep -qx "$1" "$PROFILE" && return 0
+  [[ -n "$(find "models/$1" -name '*.gguf' -type f 2>/dev/null | head -1)" ]]
 }
 
 first_gguf() {  # first shard of a multi-part GGUF, or the single .gguf
@@ -29,7 +31,7 @@ cat > "$TMP" <<'EOF'
 #   Claude Code -> Anthropic  http://127.0.0.1:9099/v1/messages
 #   OpenCode    -> OpenAI     http://127.0.0.1:9099/v1/chat/completions
 
-listen: "127.0.0.1:9099"
+# listen address is a CLI flag (--listen 127.0.0.1:9099), set by service.sh
 healthCheckTimeout: 900          # big models need minutes to load from SSD
 logLevel: info
 
