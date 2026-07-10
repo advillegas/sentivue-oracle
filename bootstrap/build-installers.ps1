@@ -24,7 +24,9 @@ $macLines = @(
 '#!/bin/bash'
 '# SentiVue Oracle installer - double-click to run. If macOS blocks it'
 '# (downloaded file), right-click the file and choose Open the first time.'
-'set -euo pipefail'
+'set -uo pipefail'
+'trap ''code=$?; echo; echo "INSTALLER ERROR (exit $code). Nothing destructive happened."; echo "You can re-run this installer any time."; read -r -p "Press Enter to close... "'' ERR'
+'set -e'
 'clear'
 'echo "=============================================================="'
 'echo "        SentiVue Oracle - guided installation"'
@@ -33,29 +35,26 @@ $macLines = @(
 'echo "=============================================================="'
 'echo'
 'DEFAULT="$HOME/sentivue-oracle"'
-'read -r -p "Install location [$DEFAULT]: " DEST'
+'read -r -p "Press ENTER to install to $DEFAULT (or type another path): " DEST'
 'DEST="${DEST:-$DEFAULT}"'
 'if [[ -e "$DEST/README.md" ]]; then'
-'  read -r -p "$DEST already exists. Overwrite files with this version? [y/N] " OK'
-'  [[ "${OK:-n}" =~ ^[Yy]$ ]] || { echo "Cancelled."; exit 0; }'
+'  echo "==> existing installation found - files will be updated in place"'
 'fi'
 'mkdir -p "$DEST"'
-'echo "==> unpacking payload..."'
+'echo "==> unpacking..."'
 'PAYLOAD_LINE=$(awk "/^__PAYLOAD_BELOW__$/ {print NR + 1; exit 0}" "$0")'
 'tail -n +"$PAYLOAD_LINE" "$0" | tar -xz --strip-components=1 -C "$DEST"'
 'chmod +x "$DEST/install" "$DEST/bin/"* "$DEST/bootstrap/"*.sh "$DEST/serving/service.sh" 2>/dev/null || true'
-'echo "==> unpacked to $DEST"'
+'echo "==> installed to $DEST"'
 'echo'
-'echo "The guided installer will now walk you through:"'
-'echo "  preflight checks -> tools -> model profile choice -> downloads -> verify"'
-'echo "Every phase is resumable: re-run $DEST/install any time."'
+'echo "Continuing into the guided setup (it will prompt for the model profile:"'
+'echo "  full ~700 GB / coder ~315 GB / minimal ~40 GB smoke test)."'
+'echo "Every phase is resumable - re-running this installer is always safe."'
 'echo'
-'read -r -p "Start guided installation now? [Y/n] " GO'
-'if [[ ! "${GO:-y}" =~ ^[Nn]$ ]]; then'
-'  cd "$DEST" && exec bash install'
-'else'
-'  echo "When ready:  cd $DEST && bash install"'
-'fi'
+'cd "$DEST"'
+'bash install || true'
+'echo'
+'read -r -p "Press Enter to close... "'
 'exit 0'
 '__PAYLOAD_BELOW__'
 )
@@ -67,66 +66,85 @@ Write-Host ("==> {0}  ({1:N1} MB)" -f (Split-Path -Leaf $macPath), ((Get-Item $m
 # ============================== Windows .cmd =================================
 $psPayload = @'
 $ErrorActionPreference = "Stop"
-Write-Host "=============================================================="
-Write-Host "        SentiVue Oracle - Windows node setup"
-Write-Host "  Authoring tools: model pre-downloader + local git vault."
-Write-Host "  (The full appliance runs on the Mac - use the .command file)"
-Write-Host "=============================================================="
-Write-Host ""
-$default = Join-Path $env:USERPROFILE "sentivue-oracle"
-$dest = Read-Host "Install location [$default]"
-if (-not $dest) { $dest = $default }
-if (Test-Path (Join-Path $dest "README.md")) {
-    $ok = Read-Host "$dest already exists. Overwrite files with this version? [y/N]"
-    if ($ok -notmatch "^[Yy]$") { Write-Host "Cancelled."; exit 0 }
-}
-Write-Host "==> unpacking payload..."
-$raw = [IO.File]::ReadAllText($env:ORACLE_SETUP_SELF)
-$mk = "#==" + "B64PAYLOAD" + "==#"   # built dynamically so the literal appears once in this file
-$b64 = ($raw -split $mk)[1] -replace "[^A-Za-z0-9+/=]", ""
-$tmp = Join-Path $env:TEMP "oracle-setup-payload.zip"
-[IO.File]::WriteAllBytes($tmp, [Convert]::FromBase64String($b64))
-$stage = Join-Path $env:TEMP "oracle-setup-stage"
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
-Expand-Archive -Path $tmp -DestinationPath $stage -Force
-New-Item -ItemType Directory -Force -Path $dest | Out-Null
-Copy-Item (Join-Path $stage "sentivue-oracle\*") $dest -Recurse -Force
-Remove-Item $tmp, $stage -Recurse -Force
-Write-Host "==> unpacked to $dest"
-Write-Host ""
-$hasGit = [bool](Get-Command git -ErrorAction SilentlyContinue)
-if ($hasGit) {
-    $v = Read-Host "Initialize the local git vault (private offline backup remote)? [Y/n]"
-    if ($v -notmatch "^[Nn]$") {
-        if (-not (Test-Path (Join-Path $dest ".git"))) { git -C $dest init -b main | Out-Null; git -C $dest add -A; git -C $dest -c user.name="oracle" -c user.email="oracle@localhost" commit -q -m "installer import" }
-        & powershell -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\vault.ps1") init
+try {
+    Write-Host "=============================================================="
+    Write-Host "        SentiVue Oracle - Windows node setup"
+    Write-Host "  Model pre-downloader + local git vault for the ecosystem."
+    Write-Host "  (The full appliance installs on the Mac via the .command)"
+    Write-Host "=============================================================="
+    Write-Host ""
+    $default = Join-Path $env:USERPROFILE "sentivue-oracle"
+    $dest = Read-Host "Press ENTER to install to $default (or type another path)"
+    if (-not $dest) { $dest = $default }
+    if (Test-Path (Join-Path $dest "README.md")) {
+        Write-Host "==> existing installation found - files will be updated in place"
     }
-} else {
-    Write-Host "NOTE: git not found - install Git for Windows, then run bin\oracle.ps1 vault init"
+    Write-Host "==> unpacking..."
+    $raw = [IO.File]::ReadAllText($env:ORACLE_SETUP_SELF)
+    $mk = "#==" + "B64PAYLOAD" + "==#"   # built dynamically so the literal appears once in this file
+    $b64 = ($raw -split $mk)[1] -replace "[^A-Za-z0-9+/=]", ""
+    $tmp = Join-Path $env:TEMP "oracle-setup-payload.zip"
+    [IO.File]::WriteAllBytes($tmp, [Convert]::FromBase64String($b64))
+    $stage = Join-Path $env:TEMP "oracle-setup-stage"
+    if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+    Expand-Archive -Path $tmp -DestinationPath $stage -Force
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    Copy-Item (Join-Path $stage "sentivue-oracle\*") $dest -Recurse -Force
+    Remove-Item $tmp, $stage -Recurse -Force
+    Write-Host "==> installed to $dest"
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        try {
+            if (-not (Test-Path (Join-Path $dest ".git"))) {
+                git -C $dest init -b main 2>&1 | Out-Null
+                git -C $dest add -A 2>&1 | Out-Null
+                git -C $dest -c user.name="oracle" -c user.email="oracle@localhost" commit -q -m "installer import" 2>&1 | Out-Null
+            }
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\vault.ps1") init 2>&1 | Out-Null
+            Write-Host "==> local git vault: ready (private offline backup remote)"
+        } catch { Write-Host "==> vault setup skipped ($($_.Exception.Message))" }
+    } else {
+        Write-Host "==> git not found - vault can be set up later: bin\oracle.ps1 vault init"
+    }
+    Write-Host ""
+    Write-Host "Optional: pre-download models now (for the Mac; resumable any time later):"
+    Write-Host "  1) full ~700 GB    2) coder ~315 GB    3) minimal ~40 GB    ENTER) skip"
+    $m = Read-Host "choose"
+    $names = @{ "2" = @("qwen3-coder-480b","qwen3-coder-30b","qwen3-embedding-4b"); "3" = @("qwen3-coder-30b","qwen3-embedding-4b") }
+    if ($m -eq "1" -or $m -eq "2" -or $m -eq "3") {
+        if ($names.ContainsKey($m)) { Set-Content -Path (Join-Path $dest "serving\models.profile") -Value ($names[$m] -join "`n") }
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\download-models.ps1")
+    }
+    Write-Host ""
+    Write-Host "=============================================================="
+    Write-Host " Setup complete."
+    Write-Host "   Windows tools:   $dest\bin\oracle.ps1  (vault / models / finish)"
+    Write-Host "   Mac appliance:   run SentiVue-Oracle-Installer-*.command there"
+    Write-Host "=============================================================="
+    Read-Host "Press Enter to close"
+    exit 0
+} catch {
+    Write-Host ""
+    Write-Host "SETUP ERROR: $($_.Exception.Message)"
+    Write-Host $_.ScriptStackTrace
+    Write-Host ""
+    Write-Host "Nothing destructive happened. Re-run the installer after fixing the above."
+    Read-Host "Press Enter to close"
+    exit 1
 }
-Write-Host ""
-Write-Host "Model pre-download (transfers to the Mac later; resumable any time):"
-Write-Host "  1) full    ~700 GB   2) coder ~315 GB   3) minimal ~40 GB   4) skip"
-$m = Read-Host "choose [4]"
-$names = @{ "2" = @("qwen3-coder-480b","qwen3-coder-30b","qwen3-embedding-4b"); "3" = @("qwen3-coder-30b","qwen3-embedding-4b") }
-if ($m -eq "1" -or $m -eq "2" -or $m -eq "3") {
-    if ($names.ContainsKey($m)) { Set-Content -Path (Join-Path $dest "serving\models.profile") -Value ($names[$m] -join "`n") }
-    & powershell -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\download-models.ps1")
-}
-Write-Host ""
-Write-Host "=============================================================="
-Write-Host " Setup complete."
-Write-Host "   Everything else:   $dest\bin\oracle.ps1  (vault / models / finish)"
-Write-Host "   Mac deployment:    use SentiVue-Oracle-Installer-*.command there"
-Write-Host "=============================================================="
-Read-Host "Press Enter to close"
 '@
 
 $cmdHeader = @(
 '@echo off'
+'setlocal'
 'title SentiVue Oracle Setup'
 'set "ORACLE_SETUP_SELF=%~f0"'
 "powershell -NoProfile -ExecutionPolicy Bypass -Command `"`$s=[IO.File]::ReadAllText(`$env:ORACLE_SETUP_SELF); `$a='#=='+'PSPAYLOAD'+'==#'; `$b='#=='+'B64PAYLOAD'+'==#'; iex (((`$s -split `$a)[1]) -split `$b)[0]`""
+'if errorlevel 1 ('
+'  echo.'
+'  echo Setup did not finish. Review the message above ^(window stays open^).'
+'  pause'
+')'
+'endlocal'
 'exit /b'
 '#==PSPAYLOAD==#'
 )
