@@ -43,51 +43,6 @@ switch ($Cmd) {
         $sub = "launch"; if ($Rest.Count -gt 0) { $sub = $Rest[0] }
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "connectors\ide\setup-ide.ps1") $sub
     }
-    "desk" {
-        $bin = Join-Path $Root "desk\target\release\oracle-desk.exe"
-        $prebuilt = Join-Path $Root "desk\prebuilt\oracle-desk-windows-x64.exe"
-        if ((-not (Test-Path $bin)) -and (Test-Path $prebuilt)) {
-            New-Item -ItemType Directory -Force -Path (Split-Path $bin) | Out-Null
-            Copy-Item $prebuilt $bin -Force
-        }
-        if (-not (Test-Path $bin)) {
-            if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-                Write-Host "==> installing rust (one time, winget)"
-                winget install --id Rustlang.Rustup -e --silent
-                $env:PATH = "$env:USERPROFILE\.cargo\bin;" + $env:PATH
-            }
-            # Rust on Windows needs the MSVC linker (VS Build Tools, C++ workload).
-            # If absent, install it unattended via winget (one time, ~2 GB).
-            $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-            function Test-Msvc {
-                (Test-Path $vswhere) -and
-                (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
-            }
-            if (-not (Test-Msvc)) {
-                Write-Host "==> installing Visual Studio Build Tools (C++ workload) - one time, ~2 GB, please wait"
-                winget install Microsoft.VisualStudio.2022.BuildTools --accept-package-agreements --accept-source-agreements `
-                    --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-            }
-            Push-Location (Join-Path $Root "desk")
-            if (Test-Msvc) {
-                Write-Host "==> building oracle-desk (one time, a few minutes)"
-                cargo build --release
-            } else {
-                Write-Host "==> Build Tools unavailable; trying the GNU toolchain (may need MSYS2 binutils)"
-                rustup toolchain install stable-gnu --profile minimal
-                $sc = "$env:USERPROFILE\.rustup\toolchains\stable-x86_64-pc-windows-gnu\lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained"
-                $env:PATH = "$sc;" + $env:PATH
-                cargo +stable-gnu build --release
-            }
-            Pop-Location
-        }
-        if (Test-Path $bin) {
-            Start-Process $bin -WorkingDirectory $Root
-        } else {
-            Write-Host "BUILD FAILED - oracle-desk.exe was not produced. Review the errors above;"
-            Write-Host "re-run after fixing, or install VS Build Tools (C++ workload) for the msvc path."
-        }
-    }
     "menu" {
         while ($true) {
             Write-Host ""
@@ -133,3 +88,4 @@ switch ($Cmd) {
         Write-Host "  finish  [-SkipPush]                       commit + package + push + vault sync"
     }
 }
+

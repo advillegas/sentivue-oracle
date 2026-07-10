@@ -73,12 +73,6 @@ if (-not $rel) {
 
 # ---- upload assets --------------------------------------------------------------
 $assets = @($macInstaller, $winInstaller, $tarball, $zipball)
-$deskExe = Join-Path $Root "desk\target\release\oracle-desk.exe"
-if (Test-Path $deskExe) {
-    $standalone = Join-Path $staging "oracle-desk-windows-x64.exe"
-    Copy-Item $deskExe $standalone -Force
-    $assets += $standalone
-}
 foreach ($f in $assets) {
     $name = Split-Path -Leaf $f
     $ctype = "application/octet-stream"

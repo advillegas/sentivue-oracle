@@ -113,6 +113,3 @@ models:
     }
     default { Write-Host "usage: setup-ide.ps1 {install|launch}" }
 }
-
-# deep brand on install
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path (Split-Path $PSCommandPath) 'brand.ps1')
