@@ -152,13 +152,31 @@ try {
     $gputxt = ""
     if ($vram -gt 0) { $gputxt = ", $vram GB VRAM" }
     Write-Host "Hardware detected: $ram GB RAM$gputxt  ->  suggested profile: $($suggest.Name) ($($suggest.Dl))"
-    foreach ($p in $profiles) {
-        $mark = "  "; if ($p.Name -eq $suggest.Name) { $mark = "->" }
-        Write-Host (" $mark {0,-6} needs >= {1,3} GB memory   download {2}" -f $p.Name, $p.Min, $p.Dl)
+    $names = @($profiles | ForEach-Object { $_.Name })
+    $idx = [array]::IndexOf($names, $suggest.Name); if ($idx -lt 0) { $idx = 0 }
+    if ([Console]::IsInputRedirected) {
+        $chosen = Read-Host "profile [ENTER = $($suggest.Name)]"
+        $sel = $profiles | Where-Object { $_.Name -eq $chosen } | Select-Object -First 1
+        if (-not $sel) { $sel = $suggest }
+    } else {
+        Write-Host "Use Up/Down arrows, ENTER to confirm:"
+        $top = [Console]::CursorTop
+        while ($true) {
+            [Console]::SetCursorPosition(0, $top)
+            for ($i = 0; $i -lt $profiles.Count; $i++) {
+                $p = $profiles[$i]
+                $mark = "   "; if ($i -eq $idx) { $mark = " > " }
+                $line = ("{0}{1,-6} needs >= {2,3} GB memory   download {3}" -f $mark, $p.Name, $p.Min, $p.Dl)
+                $fg = "Gray"; if ($i -eq $idx) { $fg = "Cyan" }
+                Write-Host ($line.PadRight([Console]::WindowWidth - 1)) -ForegroundColor $fg
+            }
+            $k = [Console]::ReadKey($true)
+            if ($k.Key -eq "UpArrow") { $idx = ($idx - 1 + $profiles.Count) % $profiles.Count }
+            elseif ($k.Key -eq "DownArrow") { $idx = ($idx + 1) % $profiles.Count }
+            elseif ($k.Key -eq "Enter") { break }
+        }
+        $sel = $profiles[$idx]
     }
-    $chosen = Read-Host "profile [ENTER = $($suggest.Name)]"
-    $sel = $profiles | Where-Object { $_.Name -eq $chosen } | Select-Object -First 1
-    if (-not $sel) { $sel = $suggest }
     if ($sel.Name -eq "full") { Remove-Item (Join-Path $dest "serving\models.profile") -ErrorAction SilentlyContinue }
     else { Set-Content -Path (Join-Path $dest "serving\models.profile") -Value (($sel.Models -split ",") -join "`n") }
     Set-Content -Path (Join-Path $dest "serving\tiers.env") -Value @("OPUS_MODEL=$($sel.Opus)", "SONNET_MODEL=$($sel.Sonnet)", "HAIKU_MODEL=$($sel.Haiku)")
