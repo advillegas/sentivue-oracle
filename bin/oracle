@@ -25,6 +25,7 @@ case "$cmd" in
     exec bash bootstrap/vault.sh "$@" ;;
   envoy)      exec bash bootstrap/envoy.sh "$@" ;;
   console)    exec uv run --project env python conductor/console.py ;;
+  ide)        exec bash connectors/ide/setup-ide.sh "${1:-launch}" ;;
   mission)    # oracle mission <mission.toml> [claude|opencode] [hours]
     m="${1:?usage: oracle mission <mission.toml> [engine] [hours]}"
     eng="${2:-claude}"; hrs="${3:-24}"
@@ -45,7 +46,8 @@ oracle — offline agentic workstation
                  oracle state            oracle report        oracle ledger [n]
   health         oracle verify           oracle doctor
   privacy        oracle harden [off]     oracle envoy [--queue]   controlled fetch-only network window
-  ui             oracle console          mission control at http://127.0.0.1:8800
+  ui             oracle ide [install]    Cursor-like IDE (VSCodium + Continue + Roo, local models)
+                 oracle console          mission control at http://127.0.0.1:8800
                  oracle vault ui install|start|stop|status        GitHub-like UI at http://127.0.0.1:3300
   git vault      oracle vault init|sync|new|clone|list|backup     (offline private remote)
   maintenance    oracle models           oracle skills        oracle uninstall [--purge]

@@ -79,9 +79,20 @@ memory/         plain-text ledger + state (runtime, gitignored)
 
 ## Getting it onto the Mac (privacy-friendly)
 
-On the authoring machine: `make dist` produces a clean tarball (no models, no
-secrets, no caches). Move it by USB/AirDrop — or push to a private git remote if
-you have one. No cloud service is required.
+**Downloadable installers** live on the repo's [Releases page]
+(https://github.com/advillegas/sentivue-oracle/releases) — built with `git archive`
+(tracked files only, always clean):
+
+```bash
+gh release download v0.1.0 -R advillegas/sentivue-oracle -p 'sentivue-oracle-*.tar.gz'
+tar -xzf sentivue-oracle-*.tar.gz && cd sentivue-oracle && bash install
+```
+
+(`.zip` asset for the Windows node; the repo is private, so downloads authenticate
+via `gh` or a signed-in browser. New releases: `bootstrap/release.ps1 -Version vX.Y.Z`.)
+
+Alternatively: `make dist` produces the same clean tarball locally for USB/AirDrop —
+no cloud required at all — or plain `git clone`.
 
 ### Pre-downloading the models on Windows (optional, saves a night)
 
@@ -205,6 +216,13 @@ construction:
 
 ## UIs (all localhost)
 
+- **`oracle ide`** — the Cursor-like IDE: **VSCodium** (telemetry-free VS Code — the
+  same platform Cursor is built on) with **Continue** (codebase chat `Cmd+L`, inline
+  edits `Cmd+I`, tab autocomplete on the fast lane, embeddings-backed codebase
+  indexing) and **Roo Code** (the agentic composer panel: plan/act, file edits,
+  terminal) — all pointed at llama-swap, so every keystroke of AI runs on local
+  models. `oracle ide install` sets it up (extensions from open-vsx, configs
+  generated, updates and telemetry off); `oracle ide` opens the repo.
 - **`oracle console`** — mission control at `http://127.0.0.1:8800`: live mission
   state, one-click operator approvals, the network-request queue, ledger tail, and
   reports (stdlib Python, zero dependencies).
@@ -212,8 +230,8 @@ construction:
   face of the vault (browse, diffs, blame, search). Vault repos are added as
   local-path **mirrors**, so the vault stays the source of truth and Gitea re-syncs
   hourly. Sqlite, registration disabled, offline mode, `launchd`-supervised.
-- Interactive coding remains in the engines' own TUIs (`oracle claude` /
-  `oracle opencode`); llama-swap's built-in UI at `:9099` shows model activity.
+- Terminal alternatives remain (`oracle claude` / `oracle opencode`); llama-swap's
+  built-in UI at `:9099` shows model activity.
 
 ## Privacy posture
 

@@ -30,6 +30,9 @@ cdn-lfs-us-1.huggingface.co
 # homebrew
 formulae.brew.sh
 ghcr.io
+# ide extensions (open-vsx marketplace + its cdn)
+open-vsx.org
+openvsxorg.blob.core.windows.net
 # docs
 docs.python.org
 readthedocs.io

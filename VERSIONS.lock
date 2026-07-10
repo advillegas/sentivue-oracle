@@ -29,6 +29,9 @@ NODE_MAJOR=22
 UV_INSTALL=brew                         # uv via homebrew
 HF_CLI=huggingface_hub[cli]             # provides `hf download`
 GITEA_BREW_FORMULA=gitea                # optional vault UI; brew pin after install
+VSCODIUM_CASK=vscodium                  # IDE; Continue + Roo Code .vsix versions are
+                                        # resolved at install from open-vsx (latest)
+                                        # and recorded in incoming/PROVENANCE.md
 
 # --- supabase (docker images; verified on Docker Hub 2026-07-09, all arm64) ---
 SUPABASE_POSTGRES_IMAGE=supabase/postgres:15.8.1.135
