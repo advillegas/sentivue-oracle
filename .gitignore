@@ -16,6 +16,7 @@ incoming/
 
 # rendered / machine-specific configs and installer state
 serving/llama-swap.rendered.yaml
+serving/llama-swap.rendered.win.yaml
 serving/model-paths.env
 serving/models.profile
 serving/tiers.env

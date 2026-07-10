@@ -19,10 +19,13 @@ OPENCODE_NPM_VERSION=1.17.16            # npm: opencode-ai
 ECC_REPO=https://github.com/affaan-m/ECC
 ECC_PIN=v2.0.0                          # tag; curated subset only (see harness/ecc/profile.txt)
 
-# --- serving (verified on GitHub releases 2026-07-09) ---
-LLAMA_CPP_BREW_FORMULA=llama.cpp        # brew pin after install
+# --- serving (verified on GitHub releases 2026-07-09/10) ---
+LLAMA_CPP_BREW_FORMULA=llama.cpp        # brew pin after install (Mac)
 LLAMA_SWAP_VERSION=v236                 # github: mostlygeek/llama-swap
-                                        # asset: llama-swap_<tag-without-v>_darwin_arm64.tar.gz
+                                        # assets: ..._darwin_arm64.tar.gz / ..._windows_amd64.zip
+LLAMA_CPP_WIN_TAG=b9948                 # github: ggml-org/llama.cpp
+                                        # asset: llama-b9948-bin-win-vulkan-x64.zip (AMD/Intel/NVIDIA)
+                                        # (serve-windows.ps1 carries these two pins)
 
 # --- tooling ---
 NODE_MAJOR=22

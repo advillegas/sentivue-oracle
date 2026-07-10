@@ -57,30 +57,36 @@ else ok "bootstrap already done"; fi
 
 # ---------------------------------------------------------------- profile
 if ! phase_done profile; then
-  say "Model profile"
+  say "Model profile (hardware-adaptive)"
+  mem_gb=$(( $(sysctl -n hw.memsize) / 1073741824 ))
+  budget=$(( mem_gb * 85 / 100 ))     # leave headroom for the OS
+  SUGGEST="micro"
+  while IFS='|' read -r name min models o s h dl; do
+    name="$(echo "$name" | xargs)"; min="$(echo "$min" | xargs)"
+    [[ -z "$name" || "$name" == \#* ]] && continue
+    [[ $budget -ge $min ]] && { SUGGEST="$name"; break; }
+  done < <(grep -Ev '^\s*#' serving/profiles.conf)
   if [[ -z "$PROFILE" ]]; then
-    if [[ $YES -eq 1 ]]; then PROFILE=full; else
-      cat <<'EOF'
-  1) full     ~700 GB  Qwen3-Coder-480B + Kimi-K2-Thinking + DeepSeek-V3.2 + fast lane   (the design target)
-  2) coder    ~315 GB  Qwen3-Coder-480B + fast lane                    (no opus-class reasoner)
-  3) minimal   ~40 GB  fast lane only                                  (smoke-test the plumbing first)
-EOF
-      read -rp "  choose [1/2/3, default 1]: " ans
-      case "${ans:-1}" in 2) PROFILE=coder ;; 3) PROFILE=minimal ;; *) PROFILE=full ;; esac
+    if [[ $YES -eq 1 ]]; then PROFILE="$SUGGEST"; else
+      echo "  detected ${mem_gb} GB unified memory — suggested profile: $SUGGEST"
+      echo
+      grep -Ev '^\s*#' serving/profiles.conf | while IFS='|' read -r name min models o s h dl; do
+        printf "    %-6s needs >= %3s GB   download %s\n" "$(echo "$name"|xargs)" "$(echo "$min"|xargs)" "$(echo "$dl"|xargs)"
+      done
+      echo
+      read -rp "  profile [ENTER = $SUGGEST]: " ans
+      PROFILE="${ans:-$SUGGEST}"
     fi
   fi
-  case "$PROFILE" in
-    full)
-      rm -f serving/models.profile
-      OPUS=kimi-k2-thinking; SONNET=qwen3-coder-480b; HAIKU=qwen3-coder-30b ;;
-    coder)
-      printf '%s\n' qwen3-coder-480b qwen3-coder-30b qwen3-embedding-4b > serving/models.profile
-      OPUS=qwen3-coder-480b; SONNET=qwen3-coder-480b; HAIKU=qwen3-coder-30b ;;
-    minimal)
-      printf '%s\n' qwen3-coder-30b qwen3-embedding-4b > serving/models.profile
-      OPUS=qwen3-coder-30b; SONNET=qwen3-coder-30b; HAIKU=qwen3-coder-30b ;;
-    *) die "unknown profile '$PROFILE' (full|coder|minimal)" ;;
-  esac
+  LINE="$(grep -Ev '^\s*#' serving/profiles.conf | awk -F'|' -v p="$PROFILE" '$1 ~ p"[ ]*$" || $1 == p {print; exit}')"
+  [[ -n "$LINE" ]] || LINE="$(grep -Ev '^\s*#' serving/profiles.conf | grep -E "^${PROFILE}[[:space:]]*\|" | head -1)"
+  [[ -n "$LINE" ]] || die "unknown profile '$PROFILE' (see serving/profiles.conf)"
+  MODELS="$(echo "$LINE" | cut -d'|' -f3 | xargs)"
+  OPUS="$(echo "$LINE" | cut -d'|' -f4 | xargs)"
+  SONNET="$(echo "$LINE" | cut -d'|' -f5 | xargs)"
+  HAIKU="$(echo "$LINE" | cut -d'|' -f6 | xargs)"
+  if [[ "$PROFILE" == "full" ]]; then rm -f serving/models.profile
+  else echo "$MODELS" | tr ',' '\n' > serving/models.profile; fi
   printf 'OPUS_MODEL=%s\nSONNET_MODEL=%s\nHAIKU_MODEL=%s\n' "$OPUS" "$SONNET" "$HAIKU" > serving/tiers.env
 
   # Point every tier reference at models that actually exist in this profile.
@@ -104,7 +110,8 @@ if [[ $NO_MODELS -eq 0 ]] && ! phase_done models; then
   case "$(head -1 serving/tiers.env)" in
     OPUS_MODEL=kimi*) need=800 ;;
     OPUS_MODEL=qwen3-coder-480b) need=400 ;;
-    *) need=60 ;;
+    OPUS_MODEL=qwen3-coder-30b) need=60 ;;
+    *) need=35 ;;
   esac
   [[ $free_gb -lt $need ]] && die "Only ${free_gb} GB free; this profile needs ~${need} GB. Free space and re-run."
   bash bootstrap/download-models.sh

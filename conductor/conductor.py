@@ -63,15 +63,23 @@ def now() -> str:
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+IS_WIN = os.name == "nt"
+
+
 def sh(args: list[str], cwd: Path | None = None, timeout: int | None = None,
        env: dict | None = None, stall_timeout: int | None = None) -> subprocess.CompletedProcess:
-    """Run a command in its own session with a total timeout AND an optional
-    output-stall timeout (kill when the process goes silent for too long —
+    """Run a command in its own session/process-group with a total timeout AND an
+    optional output-stall timeout (kill when the process goes silent for too long —
     catches hung runs long before the total budget is burned)."""
     full_env = {**os.environ, **(env or {})}
+    kwargs: dict = {}
+    if IS_WIN:
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
     p = subprocess.Popen(args, cwd=cwd, env=full_env, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                         errors="replace", start_new_session=True)
+                         errors="replace", **kwargs)
     chunks: list[str] = []
     last_activity = time.monotonic()
 
@@ -97,8 +105,12 @@ def sh(args: list[str], cwd: Path | None = None, timeout: int | None = None,
         time.sleep(1)
     if killed:
         try:
-            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+            if IS_WIN:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                               capture_output=True)
+            else:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
             pass
     try:
         p.wait(timeout=30)
@@ -196,15 +208,31 @@ class Mission:
 
 # ---------------------------------------------------------------- engines
 
+def launcher(engine: str) -> list[str]:
+    """Cross-platform engine launcher argv prefix (bash on macOS, PS twin on Windows)."""
+    name = "claude-code" if engine == "claude" else "opencode"
+    if IS_WIN:
+        return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(ROOT / f"engines/{name}/launch.ps1")]
+    return ["bash", str(ROOT / f"engines/{name}/launch.sh")]
+
+
+def shell_check(cmd: str) -> list[str]:
+    """Argv for one deterministic check command."""
+    if IS_WIN:
+        return ["powershell", "-NoProfile", "-Command", cmd]
+    return ["bash", "-lc", cmd]
+
+
 def engine_cmd(engine: str, prompt: str, tier: str) -> tuple[list[str], dict]:
     """argv + extra env for one headless engine run (full autonomy: dedicated box).
     Claude Code uses stream-json so the stall detector sees per-event activity."""
     if engine == "claude":
-        return (["bash", str(ROOT / "engines/claude-code/launch.sh"), "-p", prompt,
+        return (launcher("claude") + ["-p", prompt,
                  "--model", tier, "--output-format", "stream-json", "--verbose",
                  "--dangerously-skip-permissions"], {})
     if engine == "opencode":
-        return (["bash", str(ROOT / "engines/opencode/launch.sh"), "run",
+        return (launcher("opencode") + ["run",
                  "-m", f"oracle/{TIER_MODEL[tier]}", prompt],
                 {"OPENCODE_PERMISSION": json.dumps(
                     {"edit": "allow", "bash": "allow", "webfetch": "deny"})})
@@ -353,7 +381,11 @@ class Conductor:
                     return
             except Exception:
                 self.ledger("SELF-HEAL", f"llama-swap unhealthy — restart attempt {attempt + 1}")
-                sh(["bash", str(ROOT / "serving/service.sh"), "restart"], timeout=120)
+                if IS_WIN:
+                    sh(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                        str(ROOT / "serving/serve-windows.ps1"), "start"], timeout=180)
+                else:
+                    sh(["bash", str(ROOT / "serving/service.sh"), "restart"], timeout=120)
                 time.sleep(30)
         self.ledger("SELF-HEAL FAILED", "llama-swap did not recover; continuing (runs will fail fast)")
 
@@ -554,7 +586,7 @@ class Conductor:
             return True, ""
         fails = []
         for c in t.checks:
-            r = sh(["bash", "-lc", c], cwd=wt, timeout=900)
+            r = sh(shell_check(c), cwd=wt, timeout=900)
             status = "OK" if r.returncode == 0 else f"EXIT {r.returncode}"
             self.ledger(f"CHECK {t.id}", f"[{status}] $ {c}")
             if r.returncode != 0:
@@ -768,7 +800,7 @@ class Conductor:
             reopened = []
             for x in prior:
                 for c in x.checks:
-                    r = sh(["bash", "-lc", c], cwd=wt, timeout=900)
+                    r = sh(shell_check(c), cwd=wt, timeout=900)
                     if r.returncode != 0:
                         with self.lock:
                             x.status = "pending"

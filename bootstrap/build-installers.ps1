@@ -117,20 +117,50 @@ try {
         $lnk.Save()
         Write-Host "==> desktop shortcut created: SentiVue Oracle"
     } catch { Write-Host "==> desktop shortcut skipped ($($_.Exception.Message))" }
+    # ---- hardware-adaptive model profile (any machine installs properly) ----
+    $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+    $vram = 0
+    if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+        try { $vram = [math]::Round(((& nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits) | Measure-Object -Sum).Sum / 1024) } catch {}
+    }
+    $budget = [math]::Max($ram - 8, $vram)
+    $profiles = Get-Content (Join-Path $dest "serving\profiles.conf") |
+        Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") } | ForEach-Object {
+            $f = $_ -split "\|"
+            [pscustomobject]@{ Name = $f[0].Trim(); Min = [int]$f[1].Trim(); Models = $f[2].Trim()
+                               Opus = $f[3].Trim(); Sonnet = $f[4].Trim(); Haiku = $f[5].Trim(); Dl = $f[6].Trim() }
+        }
+    $suggest = $profiles | Where-Object { $budget -ge $_.Min } | Select-Object -First 1
+    if (-not $suggest) { $suggest = $profiles[$profiles.Count - 1] }
     Write-Host ""
-    Write-Host "Optional: pre-download models now (for the Mac; resumable any time later):"
-    Write-Host "  1) full ~700 GB    2) coder ~315 GB    3) minimal ~40 GB    ENTER) skip"
-    $m = Read-Host "choose"
-    $names = @{ "2" = @("qwen3-coder-480b","qwen3-coder-30b","qwen3-embedding-4b"); "3" = @("qwen3-coder-30b","qwen3-embedding-4b") }
-    if ($m -eq "1" -or $m -eq "2" -or $m -eq "3") {
-        if ($names.ContainsKey($m)) { Set-Content -Path (Join-Path $dest "serving\models.profile") -Value ($names[$m] -join "`n") }
+    $gputxt = ""
+    if ($vram -gt 0) { $gputxt = ", $vram GB VRAM" }
+    Write-Host "Hardware detected: $ram GB RAM$gputxt  ->  suggested profile: $($suggest.Name) ($($suggest.Dl))"
+    foreach ($p in $profiles) {
+        $mark = "  "; if ($p.Name -eq $suggest.Name) { $mark = "->" }
+        Write-Host (" $mark {0,-6} needs >= {1,3} GB memory   download {2}" -f $p.Name, $p.Min, $p.Dl)
+    }
+    $chosen = Read-Host "profile [ENTER = $($suggest.Name)]"
+    $sel = $profiles | Where-Object { $_.Name -eq $chosen } | Select-Object -First 1
+    if (-not $sel) { $sel = $suggest }
+    if ($sel.Name -eq "full") { Remove-Item (Join-Path $dest "serving\models.profile") -ErrorAction SilentlyContinue }
+    else { Set-Content -Path (Join-Path $dest "serving\models.profile") -Value (($sel.Models -split ",") -join "`n") }
+    Set-Content -Path (Join-Path $dest "serving\tiers.env") -Value @("OPUS_MODEL=$($sel.Opus)", "SONNET_MODEL=$($sel.Sonnet)", "HAIKU_MODEL=$($sel.Haiku)")
+    Write-Host "==> profile '$($sel.Name)' configured (model tiers remapped to fit this machine)"
+    Write-Host ""
+    $dl = Read-Host "Download the models now (resumable any time)? [Y/n]"
+    if ($dl -notmatch "^[Nn]") {
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\download-models.ps1")
+    }
+    $fp = Read-Host "Install the full platform now (engines + local model serving)? [Y/n]"
+    if ($fp -notmatch "^[Nn]") {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bin\oracle.ps1") setup
+        Write-Host "==> start serving + chat any time: desktop shortcut -> or bin\oracle.ps1 serve / claude / desk"
     }
     Write-Host ""
     Write-Host "=============================================================="
-    Write-Host " Setup complete."
-    Write-Host "   Windows tools:   $dest\bin\oracle.ps1  (vault / models / finish)"
-    Write-Host "   Mac appliance:   run SentiVue-Oracle-Installer-*.command there"
+    Write-Host " Setup complete - this machine now runs the full platform."
+    Write-Host "   Desktop shortcut 'SentiVue Oracle' -> menu (serve, chat, desk, vault)"
     Write-Host "=============================================================="
     Read-Host "Press Enter to close"
     exit 0

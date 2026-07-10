@@ -53,10 +53,22 @@ pub fn send(root: PathBuf, kind: EngineKind, session_id: Option<String>, prompt:
     let slot = child_slot.clone();
 
     thread::spawn(move || {
-        let mut cmd = Command::new("bash");
+        // Same launchers on every node: bash scripts on macOS, PowerShell twins on Windows.
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("powershell");
+            c.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]);
+            c
+        } else {
+            Command::new("bash")
+        };
+        let (claude_launcher, opencode_launcher) = if cfg!(windows) {
+            ("engines/claude-code/launch.ps1", "engines/opencode/launch.ps1")
+        } else {
+            ("engines/claude-code/launch.sh", "engines/opencode/launch.sh")
+        };
         match kind {
             EngineKind::Claude => {
-                cmd.arg(root.join("engines/claude-code/launch.sh"))
+                cmd.arg(root.join(claude_launcher))
                     .arg("-p")
                     .arg(&prompt)
                     .args(["--output-format", "stream-json", "--verbose",
@@ -66,7 +78,7 @@ pub fn send(root: PathBuf, kind: EngineKind, session_id: Option<String>, prompt:
                 }
             }
             EngineKind::OpenCode => {
-                cmd.arg(root.join("engines/opencode/launch.sh")).arg("run");
+                cmd.arg(root.join(opencode_launcher)).arg("run");
                 if session_id.is_some() {
                     cmd.arg("--continue");
                 }

@@ -2,11 +2,15 @@
 
 A **self-contained development ecosystem**: an offline, self-governing, self-improving
 agentic workstation for quantitative research, trading-system development, and machine
-learning. The appliance runs entirely on a Mac Studio (512 GB unified memory) against
-local open-weight models; a Windows node handles authoring, model pre-downloading, and
-carries the same private git vault. Every dependency of the development loop — models,
-inference, engines, skills, data, memory, and version control — lives inside the
-ecosystem. After the one-time bootstrap, no piece of it needs the internet.
+learning. It runs the full platform on **any machine**: the installers detect your
+hardware (RAM/VRAM) and suggest the right model profile — from the 512 GB Mac Studio
+flagship (`full`, ~700 GB ensemble) down to a 16 GB laptop (`micro`, ~10 GB) — and
+remap the model tiers so everything works at every size. Windows and macOS are both
+first-class: local model serving (llama-swap + llama.cpp Vulkan/Metal), both engines,
+the desk app, the vault, and the conductor run on either. Every dependency of the
+development loop — models, inference, engines, skills, data, memory, and version
+control — lives inside the ecosystem. After the one-time bootstrap, no piece of it
+needs the internet.
 
 **Engines: Claude Code or OpenCode — your choice, same models, same skills.** Cursor is
 deliberately not part of this stack. All services bind to `127.0.0.1`, all telemetry is
