@@ -1,0 +1,27 @@
+# ECC curated subset.
+#   plain line  = exact skill name (verified to exist in the v2.0.0 tree)
+#   ~substring  = pattern; installs every skill whose name contains the substring,
+#                 resolved against the real catalog at install time on the Mac
+# Cloud-dependent operators (GitHub App, Linear, social publishing, video,
+# outreach) are deliberately excluded — this machine is offline.
+# `make ecc` prints exactly what was installed and the full catalog for tuning.
+
+# verified exact names (checked against the v2.0.0 git tree)
+continuous-learning
+mcp-server-patterns
+pytorch-patterns
+python-patterns
+rust-patterns
+security-review
+
+# pattern-resolved (concept confirmed present; exact names resolved at install)
+~worktree
+~orchestrat
+~cpp
+~typescript
+~verif
+~debug
+~memory
+~test
+~perf
+~review

@@ -1,0 +1,42 @@
+# SentiVue Oracle — pinned versions (single source of truth for bootstrap)
+# Everything here is installed exactly at these versions. Bump deliberately, one at a time,
+# and re-run `make verify` after any change.
+#
+# BEFORE FIRST BOOTSTRAP on the Mac: sanity-check that each pin still exists
+# (npm view <pkg> versions; the GitHub releases pages; docker manifest inspect).
+# If a pin was yanked or the release asset name changed, bump it here — nothing
+# else in the repo hardcodes versions.
+
+# --- engines (verified on npm 2026-07-09) ---
+# Note: npm install of Claude Code is officially deprecated in favor of the native
+# installer, but we use npm DELIBERATELY: it pins an exact version and does not
+# auto-update in the background (auto-update is wrong for an air-gapped appliance).
+# Requires Node 22+ (installed by bootstrap).
+CLAUDE_CODE_NPM_VERSION=2.1.205         # npm: @anthropic-ai/claude-code
+OPENCODE_NPM_VERSION=1.17.16            # npm: opencode-ai
+
+# --- harness ---
+ECC_REPO=https://github.com/affaan-m/ECC
+ECC_PIN=v2.0.0                          # tag; curated subset only (see harness/ecc/profile.txt)
+
+# --- serving (verified on GitHub releases 2026-07-09) ---
+LLAMA_CPP_BREW_FORMULA=llama.cpp        # brew pin after install
+LLAMA_SWAP_VERSION=v236                 # github: mostlygeek/llama-swap
+                                        # asset: llama-swap_<tag-without-v>_darwin_arm64.tar.gz
+
+# --- tooling ---
+NODE_MAJOR=22
+UV_INSTALL=brew                         # uv via homebrew
+HF_CLI=huggingface_hub[cli]             # provides `hf download`
+
+# --- supabase (docker images; verified on Docker Hub 2026-07-09, all arm64) ---
+SUPABASE_POSTGRES_IMAGE=supabase/postgres:15.8.1.135
+POSTGREST_IMAGE=postgrest/postgrest:v12.2.12
+POSTGRES_META_IMAGE=supabase/postgres-meta:v0.91.0
+SUPABASE_STUDIO_IMAGE=supabase/studio:2026.07.07-sha-a6a04f2
+
+# --- mcp servers (verified on PyPI 2026-07-09; warmed into uv caches at bootstrap) ---
+MCP_DUCKDB=mcp-server-duckdb==1.1.0     # uvx (ktanaka101)
+MCP_POSTGRES=postgres-mcp==0.3.0        # uvx (crystaldba)
+
+# --- model files: resolved SHAs are appended by download-models.sh below this line ---

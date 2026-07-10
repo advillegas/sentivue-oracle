@@ -1,0 +1,92 @@
+# Example mission — a realistic 24 h self-governing run.
+# Launch:  make mission M=conductor/missions/example.toml ENGINE=claude HOURS=24
+# (ENGINE=opencode works identically.)
+
+[mission]
+name = "momentum-baseline"
+goal = "Build and validate a leakage-free cross-sectional momentum backtest over the local equities parquet data, with an honest cost model and a research note."
+# repo = "~/projects/target-repo"   # defaults to the oracle repo itself
+engine = "claude"                   # overridable via --engine
+hours = 24
+report_minutes = 60
+
+[[tasks]]
+id = "ingest"
+title = "Load equities parquet into DuckDB lake with point-in-time schema"
+prompt = """Create data/lake.duckdb tables from data/parquet/equities/*.parquet:
+prices (date, symbol, open, high, low, close, adj_close, volume) and a
+universe table with listing/delisting dates. Add an ingestion script under
+pipelines/ingest.py plus tests with a small synthetic parquet fixture."""
+acceptance = [
+  "uv run --project env pytest pipelines/tests -q passes from clean state",
+  "prices table rejects duplicate (date,symbol) rows",
+  "universe table carries delisting dates (survivorship-bias guard)",
+]
+tier = "sonnet"
+timeout_minutes = 40
+
+[[tasks]]
+id = "signal"
+title = "12-1 momentum signal, point-in-time"
+prompt = """Implement cross-sectional 12-1 momentum (skip most recent month) in
+signals/momentum.py using only data available at formation time. Decile ranks,
+monthly rebalance. Property-based tests for the no-lookahead guarantee."""
+depends_on = ["ingest"]
+acceptance = [
+  "signal at date T uses no rows with date > T (test proves it by shifting data)",
+  "deciles are balanced within 1 name per bucket each rebalance",
+  "uv run --project env pytest signals/tests -q passes",
+]
+tier = "sonnet"
+timeout_minutes = 45
+
+[[tasks]]
+id = "backtest"
+title = "Long-short decile backtest with costs"
+prompt = """Backtest long D10 / short D1, monthly rebalance, in backtests/momentum_ls.py:
+10 bps per side + borrow on the short leg. Report CAGR, vol, Sharpe, max drawdown,
+turnover — net and gross. Persist an equity-curve parquet artifact."""
+depends_on = ["signal"]
+acceptance = [
+  "net-of-cost equity curve artifact written under artifacts/",
+  "turnover consistent with monthly decile rebalance (sanity bound asserted in a test)",
+  "results reproducible: two runs produce identical artifacts (seeded, no wall-clock deps)",
+]
+tier = "sonnet"
+timeout_minutes = 60
+adversary = true          # statistical validity gets an extra adversarial pass
+
+[[tasks]]
+id = "note"
+title = "Research note"
+prompt = """Write docs/notes/momentum-baseline.md: method, assumptions, results table,
+equity-curve plot (matplotlib PNG), leakage checklist sign-off, and known limitations.
+Numbers must come from the persisted artifacts, not re-typed by hand."""
+depends_on = ["backtest"]
+acceptance = [
+  "note embeds the metrics read programmatically from artifacts/",
+  "leakage checklist section explicitly addresses each item",
+]
+tier = "haiku"
+timeout_minutes = 25
+
+# ---- productive idle work: runs only when nothing above is dispatchable ----
+
+[[background]]
+id = "docs-index"
+title = "Embed docs/ into pgvector for retrieval"
+prompt = """Index all markdown/PDF text under docs/ into the local Postgres pgvector
+table research.doc_chunks using the local embeddings endpoint
+(http://127.0.0.1:9099/v1/embeddings, model qwen3-embedding-4b). Idempotent script
+under pipelines/index_docs.py with a --dry-run flag."""
+acceptance = ["re-running the indexer twice inserts zero duplicate chunks"]
+tier = "haiku"
+timeout_minutes = 30
+
+[[background]]
+id = "test-sweep"
+title = "Full test + lint sweep"
+prompt = "Run the entire test suite and linters across the repo; fix trivial breakages (imports, formatting); ledger any real failures without fixing them."
+acceptance = ["ledger entry lists suite status per package"]
+tier = "haiku"
+timeout_minutes = 20

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "instructions": ["{env:ORACLE_ROOT}/engines/shared/CONVENTIONS.md"],
+  "model": "oracle/qwen3-coder-480b",
+  "small_model": "oracle/qwen3-coder-30b",
+  "provider": {
+    "oracle": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Oracle (local llama-swap)",
+      "options": {
+        "baseURL": "http://127.0.0.1:9099/v1",
+        "apiKey": "oracle-local"
+      },
+      "models": {
+        "qwen3-coder-480b": {
+          "name": "Qwen3-Coder-480B (primary coder)",
+          "tool_call": true,
+          "limit": { "context": 131072, "output": 65536 }
+        },
+        "kimi-k2-thinking": {
+          "name": "Kimi-K2-Thinking (deep reasoner)",
+          "tool_call": true,
+          "reasoning": true,
+          "limit": { "context": 98304, "output": 65536 }
+        },
+        "deepseek-v3.2": {
+          "name": "DeepSeek-V3.2 (alternate reasoner)",
+          "tool_call": true,
+          "limit": { "context": 65536, "output": 32768 }
+        },
+        "qwen3-coder-30b": {
+          "name": "Qwen3-Coder-30B (fast lane)",
+          "tool_call": true,
+          "limit": { "context": 65536, "output": 32768 }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "duckdb": {
+      "type": "local",
+      "command": [
+        "uvx", "--from", "mcp-server-duckdb==0.6.2", "mcp-server-duckdb",
+        "--db-path", "{env:ORACLE_ROOT}/data/lake.duckdb"
+      ],
+      "enabled": true
+    },
+    "postgres": {
+      "type": "local",
+      "command": [
+        "uvx", "--from", "postgres-mcp==0.4.1", "postgres-mcp",
+        "--access-mode", "restricted"
+      ],
+      "environment": {
+        "DATABASE_URI": "postgresql://postgres:{env:ORACLE_PG_PASSWORD}@127.0.0.1:54322/postgres"
+      },
+      "enabled": false
+    }
+  },
+  "permission": {
+    "edit": "allow",
+    "bash": {
+      "*": "ask",
+      "uv run *": "allow",
+      "git status*": "allow", "git diff*": "allow", "git log*": "allow",
+      "git add *": "allow", "git commit *": "allow",
+      "cargo build*": "allow", "cargo test*": "allow", "cargo clippy*": "allow",
+      "pytest*": "allow", "cmake*": "allow", "make test*": "allow",
+      "curl *": "deny", "wget *": "deny"
+    },
+    "webfetch": "deny"
+  }
+}

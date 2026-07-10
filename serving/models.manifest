@@ -1,0 +1,22 @@
+# SentiVue Oracle — model ensemble manifest
+# Format (pipe-separated):
+#   name | hf_repo | include_pattern | slot | ctx | sampling_flags
+#
+# slot: big   = exclusive big slot, hot-swapped by llama-swap on demand
+#       fast  = always resident (subagents, background, haiku tier)  [required]
+#       embed = always resident (embeddings endpoint)                [required]
+#
+# serving/models.profile (written by ./install, one name per line) selects which
+# rows are active on this machine; no profile file = everything active.
+# Sampling flags follow each model's official recommendation.
+#
+# Sizes (listed Unsloth dynamic quants): 480b ~276 GB, kimi ~381 GB,
+# deepseek ~320 GB, 30b ~33 GB, embedding ~5 GB. Full ensemble ~700 GB.
+# Big slot + fast lane + embeddings must fit the GPU wired limit (448 GB default);
+# Kimi K2 (381 GB) is the tightest fit.
+
+qwen3-coder-480b   | unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF | UD-Q4_K_XL/* | big   | 131072 | --temp 0.7 --top-p 0.8 --top-k 20 --repeat-penalty 1.05
+kimi-k2-thinking   | unsloth/Kimi-K2-Thinking-GGUF               | UD-Q2_K_XL/* | big   | 98304  | --temp 1.0 --min-p 0.01
+deepseek-v3.2      | unsloth/DeepSeek-V3.2-GGUF                  | UD-Q3_K_XL/* | big   | 65536  | --temp 1.0 --top-p 0.95
+qwen3-coder-30b    | unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF   | Q8_0/*       | fast  | 65536  | --temp 0.7 --top-p 0.8 --top-k 20 --repeat-penalty 1.05
+qwen3-embedding-4b | Qwen/Qwen3-Embedding-4B-GGUF                | *Q8_0.gguf   | embed | 8192   |

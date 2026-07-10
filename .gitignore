@@ -1,0 +1,42 @@
+# runtime state (plain-text memory lives here at runtime; templates are in conductor/templates)
+memory/*
+!memory/.gitkeep
+reports/
+state/
+logs/
+.worktrees/
+
+# models and market data are huge and machine-local
+models/
+data/*
+!data/.gitkeep
+artifacts/
+
+# rendered / machine-specific configs and installer state
+serving/llama-swap.rendered.yaml
+serving/model-paths.env
+serving/models.profile
+serving/tiers.env
+.install-state
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# node
+node_modules/
+
+# secrets / local env
+.env
+connectors/supabase/.env
+
+# supabase volumes
+connectors/supabase/volumes/
+
+# macOS
+.DS_Store
+
+# vendored ECC checkout (installed, not committed)
+harness/ecc/vendor/
