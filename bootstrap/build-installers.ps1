@@ -119,31 +119,29 @@ try {
     } else {
         Write-Host "==> git not found - vault can be set up later: bin\oracle.ps1 vault init"
     }
-    # The ONE executable: place the prebuilt desk app and point the shortcut at it.
-    $deskBin = Join-Path $dest "desk\target\release\oracle-desk.exe"
-    $prebuilt = Join-Path $dest "desk\prebuilt\oracle-desk-windows-x64.exe"
-    if ((Test-Path $prebuilt) -and -not (Test-Path $deskBin)) {
-        New-Item -ItemType Directory -Force -Path (Split-Path $deskBin) | Out-Null
-        Copy-Item $prebuilt $deskBin -Force
-        Write-Host "==> oracle-desk.exe installed (the platform launcher)"
+    # The product IS your own Cursor: install the IDE and point the shortcut at it.
+    $ideAns = Read-Host "Install your own Cursor now (VSCodium + local-model AI, ~200 MB)? [Y/n]"
+    if ($ideAns -notmatch "^[Nn]") {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "connectors\ide\setup-ide.ps1") install
     }
     try {
         $ws = New-Object -ComObject WScript.Shell
         $desk = [Environment]::GetFolderPath("Desktop")
         $lnk = $ws.CreateShortcut((Join-Path $desk "SentiVue Oracle.lnk"))
-        if (Test-Path $deskBin) {
-            $lnk.TargetPath = $deskBin
-            $lnk.Arguments = ""
-            $lnk.IconLocation = "$deskBin,0"
+        $codium = "$env:LOCALAPPDATA\Programs\VSCodium\VSCodium.exe"
+        if (Test-Path $codium) {
+            $lnk.TargetPath = $codium
+            $lnk.Arguments = """$dest"""
+            $lnk.IconLocation = "$codium,0"
         } else {
             $lnk.TargetPath = "powershell.exe"
             $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -File ""$dest\bin\oracle.ps1"" menu"
             $lnk.IconLocation = "$env:SystemRoot\System32\imageres.dll,73"
         }
         $lnk.WorkingDirectory = $dest
-        $lnk.Description = "SentiVue Oracle - self-contained development ecosystem"
+        $lnk.Description = "SentiVue Oracle - your own Cursor on local models"
         $lnk.Save()
-        Write-Host "==> desktop shortcut created: SentiVue Oracle (one-click platform)"
+        Write-Host "==> desktop shortcut: SentiVue Oracle -> your IDE"
     } catch { Write-Host "==> desktop shortcut skipped ($($_.Exception.Message))" }
     # ---- hardware-adaptive model profile (any machine installs properly) ----
     $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
