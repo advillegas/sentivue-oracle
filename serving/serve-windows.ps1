@@ -82,13 +82,24 @@ switch ($Cmd) {
             $sizeGB = ($all | Measure-Object Length -Sum).Sum / 1GB
             $gpu = ""
             if ($sizeGB -gt [Math]::Max(1.0, $vramGB * 0.8)) { $gpu = " --n-gpu-layers 0" }
+            # Context floor matters more than parallelism: agentic engines need
+            # >25k tokens just to open a session, and llama-server SPLITS ctx
+            # across --parallel slots. On low-RAM boxes serve one 32k slot
+            # instead of two 8k slots that no engine can use.
             $ctx = [int]$r.Ctx
-            if ($ramGB -lt 48 -and $r.Slot -ne "embed") { $ctx = [Math]::Min($ctx, 16384) }
-            $common = "--host 127.0.0.1 --port `${PORT} --jinja$gpu"
+            $par = 2
+            $kv = ""
+            if ($ramGB -lt 48 -and $r.Slot -ne "embed") {
+                $ctx = [Math]::Min($ctx, 32768)
+                $par = 1
+                # q8 KV cache halves context memory; requires flash attention
+                $kv = " -fa on --cache-type-k q8_0 --cache-type-v q8_0"
+            }
+            $common = "--host 127.0.0.1 --port `${PORT} --jinja$gpu$kv"
             $ttl = 0
             switch ($r.Slot) {
                 "embed" { $cmdline = "$server $common -m $mp --embeddings --pooling last --ctx-size $ctx" }
-                "fast"  { $cmdline = "$server $common -m $mp --ctx-size $ctx --parallel 2 $($r.Flags)" }
+                "fast"  { $cmdline = "$server $common -m $mp --ctx-size $ctx --parallel $par $($r.Flags)" }
                 default { $cmdline = "$server $common -m $mp --ctx-size $ctx --parallel 1 $($r.Flags)" }
             }
             if ($r.InProfile -and $r.Slot -ne "big") { $resident += $r.Name }

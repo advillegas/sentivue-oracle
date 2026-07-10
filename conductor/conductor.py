@@ -678,6 +678,7 @@ class Conductor:
 
     def run_task(self, t: Task) -> None:
         feedback = ""
+        infra_strikes = 0
         while t.attempts < t.max_attempts:
             if time.monotonic() >= self.cutoff():
                 t.status, t.note = "pending", "deadline reached before dispatch"
@@ -714,6 +715,28 @@ class Conductor:
                           escalated=tier != t.tier, outcome=outcome,
                           secs=round(time.monotonic() - attempt_t0), **kw)
 
+            # Engine/API failures are INFRASTRUCTURE, not task failures: the model
+            # never got to work, so the attempt must not count against the task.
+            # Heal the serving layer, back off, and retry (bounded).
+            stripped = out.strip()
+            if (re.match(r"API Error:", stripped)
+                    or "exceeds the available context size" in stripped
+                    or (len(stripped) < 200 and re.search(r"\b(ECONNREFUSED|fetch failed)\b", stripped))):
+                infra_strikes += 1
+                t.attempts -= 1                       # refund the attempt
+                self.ledger(f"INFRA {t.id}",
+                            f"engine/API failure (strike {infra_strikes}/3): {stripped[:200]}")
+                self.log_failure(t, "infra", stripped[:400])
+                self.proc("infra", task=t.id, strike=infra_strikes, detail=stripped[:200])
+                if infra_strikes >= 3:
+                    t.status = "blocked"
+                    t.note = f"infrastructure failure x{infra_strikes}: {stripped[:200]}"
+                    self.ledger(f"BLOCKED {t.id}", "persistent engine/API failure — "
+                                "check serving context size and engine config")
+                    return
+                self.ensure_serving()
+                time.sleep(30)
+                continue
             if "[WATCHDOG] killed" in out:
                 feedback = ("The previous attempt hung (or went silent) and was killed. "
                             "The approach was likely too monolithic — decompose the work, "
