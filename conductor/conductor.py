@@ -377,6 +377,19 @@ class Conductor:
             (MEMORY / "STATE.md").write_text(state, encoding="utf-8")
 
     # ---- self-healing -------------------------------------------------------
+    def ensure_tools(self) -> None:
+        """Self-provision the toolbelt before work starts. Doctrine: a missing
+        tool is a task, not a blocker — install it (or queue a NET-REQUEST on the
+        air-gapped node) instead of failing the mission on it."""
+        script = ROOT / ("bootstrap/ensure-tools.ps1" if IS_WIN else "bootstrap/ensure-tools.sh")
+        if not script.exists():
+            return
+        argv = (["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+                if IS_WIN else ["bash", str(script)])
+        r = sh(argv, timeout=900)
+        tail = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else "(no output)"
+        self.ledger("TOOLBELT", tail[:300])
+
     def ensure_serving(self) -> None:
         for attempt in range(3):
             try:
@@ -1189,6 +1202,10 @@ class Conductor:
                     f"tasks={len(self.m.tasks)} workers={self.m.workers} repo={self.m.repo}")
         if not self.use_git:
             self.ledger("WARN", "target repo is not a git repo — running without worktree isolation")
+        try:
+            self.ensure_tools()                    # missing tools are healed, not fatal
+        except Exception as e:
+            self.ledger("TOOLBELT ERROR", str(e)[:200])
         if self.m.auto_plan and not [t for t in self.m.tasks if not t.background]:
             if not self.plan_mission():
                 self.ledger("MISSION END", "planning failed; nothing to execute")

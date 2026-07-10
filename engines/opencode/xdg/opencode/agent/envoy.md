@@ -1,7 +1,7 @@
 ---
 description: Dedicated internet agent and security layer - fetch-only network access through envoy-fetch during operator-opened windows. Fulfils memory/NET-REQUESTS.md; quarantines everything to incoming/.
 mode: primary
-model: oracle/qwen2.5-coder-7b
+model: oracle/qwen3-coder-30b-q4
 temperature: 0.2
 permission:
   edit: allow

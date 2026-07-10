@@ -1,0 +1,148 @@
+# Platform-hardening mission — the loop works on the loop.
+# Builds a real test suite around the conductor's pure logic, ports the doctor
+# to Windows, and inventories the platform. Every task has deterministic checks
+# the conductor runs itself; audits and merges follow the normal protocol.
+#
+# Launch (Windows):
+#   python conductor\conductor.py run conductor\missions\platform-hardening.toml --engine claude --hours 6
+# Launch (macOS):
+#   uv run --project env python conductor/conductor.py run conductor/missions/platform-hardening.toml --engine claude --hours 6
+#
+# NOTE: checks below use `python -m pytest`; ensure-tools provisions python+pytest
+# automatically at mission start (bootstrap/ensure-tools.ps1|.sh).
+
+[mission]
+name = "platform-hardening"
+goal = "Harden the SentiVue Oracle platform: a pytest suite over the conductor's parsing/planning logic, a Windows doctor, and a platform map - all merged only after independent audit."
+engine = "claude"
+hours = 6
+report_minutes = 60
+workers = 1                # modest box: one engine run at a time
+
+[[tasks]]
+id = "tests-parsing"
+title = "Pytest suite for conductor parsing (parse_plan, extract_result, Task.from_dict)"
+research = true            # read conductor.py first; the brief feeds the engineer
+prompt = """Create conductor/tests/__init__.py (empty) and conductor/tests/test_parsing.py
+with a pytest suite for the PURE functions in conductor/conductor.py (import via:
+import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]));
+import conductor as C).
+
+Cover, at minimum:
+- C.parse_plan: a valid ```json fenced array round-trips into Task objects; invalid JSON
+  and empty arrays return []; duplicate ids reject the block; depends_on entries pointing
+  at unknown ids or self are pruned; more than 10 tasks are truncated to 10; the LAST
+  valid json block in the text wins.
+- C.extract_result (engine='claude'): picks the text of the final {"type":"result"} event
+  from stream-json lines; falls back to the raw tail when no result event exists;
+  engine='opencode' returns raw text unchanged.
+- C.Task.from_dict: unknown keys are dropped; tier/audit_tier outside {opus,sonnet,haiku}
+  clamp to 'sonnet'; timeout_minutes clamps to <=120; background flag propagates;
+  research/requires_approval/adversary booleans parse.
+Do NOT import or execute anything that talks to git, the network, or llama-swap;
+test only pure logic. Do NOT modify conductor.py in this task."""
+acceptance = [
+  "python -m pytest conductor/tests -q passes from a clean state",
+  "parse_plan edge cases covered: invalid JSON, duplicate ids, unknown/self deps pruned, >10 tasks truncated, last-valid-block-wins",
+  "extract_result covered for stream-json result, raw fallback, and opencode passthrough",
+  "Task.from_dict clamps covered: bad tier -> sonnet, timeout <= 120",
+]
+checks = ["python -m pytest conductor/tests -q"]
+tier = "sonnet"
+timeout_minutes = 45
+
+[[tasks]]
+id = "tests-mission-load"
+title = "Pytest suite for Mission.load and plan-contract invariants"
+depends_on = ["tests-parsing"]
+prompt = """Add conductor/tests/test_mission_load.py. Using tmp_path pytest fixtures,
+write minimal mission TOML files and cover C.Mission.load:
+- name defaults to the file stem; engine/hours honor explicit arguments over TOML;
+- workers clamps into [1, 2]; report_minutes parses; auto_plan default false;
+- [[background]] tasks load with background=True;
+- duplicate task ids raise AssertionError; a dependency on an unknown id raises;
+- a mission with neither tasks nor auto_plan raises;
+- research=true on a task round-trips (Task.research is True).
+Also assert the shipped missions still load: conductor/missions/example.toml and
+conductor/missions/autonomous.toml. Do NOT modify conductor.py in this task."""
+acceptance = [
+  "python -m pytest conductor/tests -q passes from a clean state",
+  "workers clamp, duplicate-id rejection, unknown-dep rejection, and background loading each have a dedicated test",
+  "both shipped mission files are load-tested",
+]
+checks = ["python -m pytest conductor/tests -q"]
+tier = "sonnet"
+timeout_minutes = 40
+
+[[tasks]]
+id = "windows-doctor"
+title = "Port the doctor to Windows (bootstrap/doctor.ps1)"
+prompt = """Create bootstrap/doctor.ps1 - the Windows twin of bootstrap/doctor.sh.
+Read doctor.sh first for the reporting style (ok/meh lines, exit 0 unless something
+is critically broken). Check, each with a clear one-line verdict:
+- real Python (not the WindowsApps stub) and pytest importable;
+- node + repo-local engines (.tools/npm/claude.cmd, .tools/npm/opencode.cmd);
+- llama-swap health endpoint (http://127.0.0.1:9099/health) - DOWN is a warning, not a failure;
+- serving/tiers.env exists and every tier model has a .gguf under models/;
+- skills synced into both engines (engines/claude-code/home/skills non-empty, opencode twin);
+- git vault remote configured (git remote get-url vault) and reachable path;
+- free disk space on the repo drive (warn under 50 GB).
+No emoji, ASCII only, PowerShell 5.1 compatible ($ErrorActionPreference stays 'Continue')."""
+acceptance = [
+  "powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap/doctor.ps1 exits 0 on this machine",
+  "each subsystem prints exactly one verdict line",
+  "llama-swap DOWN degrades to a warning, not a non-zero exit",
+]
+checks = ["powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap/doctor.ps1; if ($LASTEXITCODE -ne 0) { exit 1 }"]
+tier = "sonnet"
+timeout_minutes = 35
+
+[[tasks]]
+id = "loop-smoke"
+title = "Offline conductor smoke test (fake engine, no models needed)"
+depends_on = ["tests-parsing", "tests-mission-load"]
+adversary = true           # this one guards the loop itself - attack it
+prompt = """Add conductor/tests/test_loop_smoke.py: an end-to-end conductor smoke test
+that runs WITHOUT llama-swap, git remotes, or real engines.
+Approach: monkeypatch conductor module internals -
+- C.engine_cmd to return a trivial argv (e.g. python -c printing a canned developer
+  transcript) OR monkeypatch Conductor.run_engine directly to return scripted outputs
+  (developer output, then 'AUDIT: PASS' for the audit call);
+- C.Conductor.ensure_serving and ensure_tools to no-ops;
+- point C.MEMORY/C.REPORTS/C.LOGS/C.WORKTREES at tmp_path subdirs;
+- build a Mission in a tmp_path git repo (git init; git config user.email/name; one
+  commit) with a single task whose checks list is empty.
+Assert: mission run() returns 0; the task ends status 'done'; LEDGER.md contains
+DISPATCH and AUDIT entries; STATE.md and FINAL-REPORT.md exist.
+Keep the whole test under 60 seconds; skip cleanly (pytest.mark.skipif) if git is
+unavailable. Do NOT modify conductor.py unless the smoke test exposes an actual bug -
+if it does, fix the bug minimally and note it in the ledger entry."""
+acceptance = [
+  "python -m pytest conductor/tests -q passes from a clean state",
+  "smoke test exercises claim -> dispatch -> audit -> merge -> report without any network or model",
+  "test completes in under 60 seconds",
+]
+checks = ["python -m pytest conductor/tests -q"]
+tier = "sonnet"
+timeout_minutes = 60
+
+# ---- productive idle work ----------------------------------------------------
+
+[[background]]
+id = "platform-map"
+title = "Generate docs/PLATFORM-MAP.md"
+prompt = """Write docs/PLATFORM-MAP.md: a maintained map of the platform for new
+operators. One section per top-level directory (bin, bootstrap, conductor, connectors,
+engines, serving, skills, memory, desk), each with: purpose in two sentences, the
+load-bearing files, and how it connects to the rest (who calls it, what it writes).
+Derive everything from the actual tree and file headers - no invention. Include a
+mermaid diagram of the mission loop (conductor -> worktree -> engine -> checks ->
+audit -> merge -> regression sweep -> report/overseer)."""
+acceptance = [
+  "docs/PLATFORM-MAP.md exists, covers every top-level directory, includes the mermaid loop diagram",
+]
+checks = ["python -c \"import pathlib,sys; p=pathlib.Path('docs/PLATFORM-MAP.md'); sys.exit(0 if p.exists() and p.stat().st_size>1500 else 1)\""]
+tier = "haiku"
+audit_tier = "haiku"
+escalate = false
+timeout_minutes = 30

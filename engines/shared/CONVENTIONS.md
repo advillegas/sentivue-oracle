@@ -54,6 +54,12 @@ Tier aliases are remapped per machine to whatever is actually installed
 
 ## Engineering standards
 
+- **A missing tool is a task, not a blocker.** Install what you need yourself, pinned
+  (pip/uv/npm/winget/brew; `VERSIONS.lock` is the source of truth for core pins), then
+  continue the actual work. `bootstrap/ensure-tools.ps1|.sh` heals the core toolbelt —
+  reach for it first when the environment looks broken. Only on the air-gapped node do
+  installs become NET-REQUESTS (the firewall is the boundary, not your permissions).
+  Never end a run with "X is not installed" as the reason.
 - Tests are not optional. Every module ships with pytest (or cargo test / ctest) coverage
   of the happy path, edge cases, and at least one failure mode.
 - Quant code additionally obeys the leakage checklist (see `quant-research` skill):

@@ -18,6 +18,9 @@ $SwapVer = "236"
 function Get-ActiveModels {
     # A model is active if the profile selects it OR it is already downloaded -
     # anything sitting in models\ was put there on purpose and should be served.
+    # InProfile drives placement: profile models keep their slot (resident for
+    # fast/embed); downloaded extras become on-demand swap models so they never
+    # bloat resident memory.
     $profileFile = Join-Path $Root "serving\models.profile"
     $active = $null
     if (Test-Path $profileFile) {
@@ -26,10 +29,11 @@ function Get-ActiveModels {
     $rows = Get-Content (Join-Path $Root "serving\models.manifest") |
         Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") } | ForEach-Object {
             $f = $_ -split "\|"
-            [pscustomobject]@{ Name = $f[0].Trim(); Slot = $f[3].Trim(); Ctx = $f[4].Trim(); Flags = $f[5].Trim() }
+            [pscustomobject]@{ Name = $f[0].Trim(); Slot = $f[3].Trim(); Ctx = $f[4].Trim(); Flags = $f[5].Trim()
+                               InProfile = ($null -eq $active) -or ($active -contains $f[0].Trim()) }
         } | Where-Object {
             $downloaded = [bool](Get-ChildItem (Join-Path $Root "models\$($_.Name)") -Recurse -Filter "*.gguf" -ErrorAction SilentlyContinue | Select-Object -First 1)
-            ($null -eq $active) -or ($active -contains $_.Name) -or $downloaded
+            $_.InProfile -or $downloaded
         }
     return $rows
 }
@@ -55,25 +59,46 @@ switch ($Cmd) {
     }
     "render" {
         $server = (Join-Path $Tools "llama\llama-server.exe") -replace "\\", "/"
+        # Hardware-adaptive placement: models larger than the GPU's dedicated
+        # VRAM run pure-CPU (--n-gpu-layers 0) - on iGPU boxes Vulkan otherwise
+        # dies allocating weights or KV cache (ErrorOutOfDeviceMemory). Smaller
+        # models let llama.cpp auto-fit layers. Low-RAM boxes also cap context.
+        $vramGB = 0
+        try {
+            $vramGB = (Get-CimInstance Win32_VideoController |
+                Where-Object { $_.Name -notmatch "Virtual|Remote|Basic" } |
+                ForEach-Object { $_.AdapterRAM / 1GB } | Measure-Object -Maximum).Maximum
+        } catch {}
+        $ramGB = [Math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
         # NOTE: the listen address is a CLI flag (--listen), not a config key.
         $lines = @("healthCheckTimeout: 900", "logLevel: info", "", "models:")
         $resident = @(); $big = @(); $missing = @()
         foreach ($r in Get-ActiveModels) {
             $dir = Join-Path $Root "models\$($r.Name)"
-            $gguf = Get-ChildItem $dir -Recurse -Filter "*.gguf" -ErrorAction SilentlyContinue |
-                Sort-Object Name | Select-Object -First 1
+            $all = Get-ChildItem $dir -Recurse -Filter "*.gguf" -ErrorAction SilentlyContinue | Sort-Object Name
+            $gguf = $all | Select-Object -First 1
             if (-not $gguf) { $missing += $r.Name; continue }
             $mp = $gguf.FullName -replace "\\", "/"
-            $common = "--host 127.0.0.1 --port `${PORT} --n-gpu-layers 999 --jinja"
+            $sizeGB = ($all | Measure-Object Length -Sum).Sum / 1GB
+            $gpu = ""
+            if ($sizeGB -gt [Math]::Max(1.0, $vramGB * 0.8)) { $gpu = " --n-gpu-layers 0" }
+            $ctx = [int]$r.Ctx
+            if ($ramGB -lt 48 -and $r.Slot -ne "embed") { $ctx = [Math]::Min($ctx, 16384) }
+            $common = "--host 127.0.0.1 --port `${PORT} --jinja$gpu"
+            $ttl = 0
             switch ($r.Slot) {
-                "embed" { $cmdline = "$server $common -m $mp --embeddings --pooling last --ctx-size $($r.Ctx)"; $resident += $r.Name }
-                "fast"  { $cmdline = "$server $common -m $mp --ctx-size $($r.Ctx) --parallel 2 $($r.Flags)"; $resident += $r.Name }
-                default { $cmdline = "$server $common -m $mp --ctx-size $($r.Ctx) --parallel 1 $($r.Flags)"; $big += $r.Name }
+                "embed" { $cmdline = "$server $common -m $mp --embeddings --pooling last --ctx-size $ctx" }
+                "fast"  { $cmdline = "$server $common -m $mp --ctx-size $ctx --parallel 2 $($r.Flags)" }
+                default { $cmdline = "$server $common -m $mp --ctx-size $ctx --parallel 1 $($r.Flags)" }
             }
+            if ($r.InProfile -and $r.Slot -ne "big") { $resident += $r.Name }
+            else { $big += $r.Name; $ttl = 600 }   # extras: on-demand, evicted after idle
             $lines += "  `"$($r.Name)`":"
             $lines += "    cmd: $cmdline"
-            $lines += "    ttl: 0"
+            $lines += "    ttl: $ttl"
         }
+        Write-Host ("hardware: {0} GB RAM, {1:N1} GB VRAM -> big-model placement {2}" -f `
+            $ramGB, $vramGB, $(if ($vramGB -lt 8) { "CPU" } else { "GPU auto-fit" }))
         if ($missing) { Write-Host "NOTE: not downloaded yet (skipped): $($missing -join ', ')" }
         if (-not $resident) { Write-Host "ERROR: no resident (fast/embed) models downloaded - run the downloader first"; exit 1 }
         $lines += ""
