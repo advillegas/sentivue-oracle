@@ -44,6 +44,7 @@ engines/claude-code/home/statsig/
 engines/claude-code/home/shell-snapshots/
 engines/claude-code/home/history.jsonl
 engines/claude-code/home/.claude.json*
+engines/claude-code/home/.last-cleanup
 engines/claude-code/home/skills/
 engines/opencode/xdg/opencode/skill/
 
