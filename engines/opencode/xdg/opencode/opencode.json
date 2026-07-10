@@ -2,7 +2,10 @@
   "$schema": "https://opencode.ai/config.json",
   "autoupdate": false,
   "share": "disabled",
-  "instructions": ["{env:ORACLE_ROOT}/engines/shared/CONVENTIONS.md"],
+  "instructions": [
+    "{env:ORACLE_ROOT}/engines/shared/CONVENTIONS.md",
+    "{env:ORACLE_ROOT}/engines/shared/AUTONOMY.md"
+  ],
   "model": "oracle/qwen3-coder-480b",
   "small_model": "oracle/qwen3-coder-30b",
   "provider": {

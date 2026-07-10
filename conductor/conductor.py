@@ -177,6 +177,18 @@ class Conductor:
                 f.write(line + "\n")
         print(line, flush=True)
 
+    def log_failure(self, t: Task, kind: str, detail: str) -> None:
+        """Failure memory: future runs grep this before attempting anything —
+        the cheapest way to stop a 24 h mission from re-running dead ends."""
+        p = MEMORY / "FAILURES.md"
+        with self.lock:
+            if not p.exists():
+                p.write_text("# Failure memory — what did not work and why. "
+                             "Search this before any risky attempt.\n\n", encoding="utf-8")
+            with p.open("a", encoding="utf-8") as f:
+                f.write(f"## {now()} · {self.m.name}/{t.id} · attempt {t.attempts} · {kind}\n"
+                        f"{detail.strip()[:600]}\n\n")
+
     def write_state(self) -> None:
         rows = "\n".join(
             f"| {t.id} | {t.status} | {t.attempts}/{t.max_attempts} | {t.tier} | {t.title} |"
@@ -254,13 +266,30 @@ class Conductor:
 
     def developer_prompt(self, t: Task, feedback: str) -> str:
         acc = "\n".join(f"  {i+1}. {a}" for i, a in enumerate(t.acceptance)) or "  (none listed)"
-        fb = f"\n\nPREVIOUS ATTEMPT FAILED AUDIT — fix these first:\n{feedback}\n" if feedback else ""
+        fb = ""
+        if feedback:
+            fb = (f"\n\nATTEMPT {t.attempts} — THE PREVIOUS ATTEMPT FAILED:\n{feedback}\n"
+                  "Do NOT re-run the failed approach harder. First write the DIAGNOSIS block in "
+                  "TASKPLAN.md (root cause, not symptom — 5 lines), then execute a changed plan. "
+                  "Repeating a logged failure wastes the mission's budget.")
         return (
             f"MISSION: {self.m.goal}\nTASK [{t.id}]: {t.title}\n\n{t.prompt}\n\n"
             f"ACCEPTANCE CRITERIA (audited independently — all must demonstrably hold):\n{acc}{fb}\n\n"
-            "Rules: work only in the current directory; write tests that encode the criteria; "
-            "run the full test suite and show passing output; commit your work; append an entry "
-            f"to {MEMORY / 'LEDGER.md'}. If truly blocked, end with 'BLOCKED: <reason>'."
+            "You operate under the Long-Horizon Autonomy Protocol (in your loaded instructions). "
+            "Non-negotiables for this run:\n"
+            f"1. START RITUAL before any edit: read {MEMORY / 'STATE.md'}, the tail of "
+            f"{MEMORY / 'LEDGER.md'}, and {MEMORY / 'FAILURES.md'} (search '{t.id}'); "
+            "run `git log --oneline -10` and `git status` here; read TASKPLAN.md if present.\n"
+            "2. Write TASKPLAN.md (GOAL / 3-7 STEPS each with a CHECK / NOT-DOING) before "
+            "touching code; keep it updated — it is your anchor against drift.\n"
+            "3. Work the ratchet: one step, run its CHECK, commit, next step. Never end a "
+            "step with a broken tree.\n"
+            "4. Evidence standard: a criterion counts only with the command AND its fresh output.\n"
+            "5. Re-anchor every ~10 actions: re-read the criteria and your current step.\n"
+            f"6. Finish: full test suite from clean state, commit, ledger entry to "
+            f"{MEMORY / 'LEDGER.md'} (what/why/files/next).\n"
+            "If two genuinely different strategies fail, end with 'BLOCKED: <what you know, "
+            "what you ruled out, what you would try next>'."
         )
 
     def audit(self, t: Task, wt: Path) -> tuple[bool, str]:
@@ -276,6 +305,8 @@ class Conductor:
             f"You are the AUDITOR. Verify task [{t.id}] '{t.title}' in the current directory.\n"
             f"ACCEPTANCE CRITERIA:\n{acc}\n\nCHANGE SUMMARY:\n{diff}\n\n"
             "Run the tests yourself. Inspect the actual changes. Do NOT fix anything.\n"
+            "Also flag scope drift (changed files the task did not require) and any test that "
+            "was weakened or deleted to force a pass — both are FAIL reasons.\n"
             "Finish with exactly one line: 'AUDIT: PASS' or 'AUDIT: FAIL: <reasons>'."
         )
         out = self.run_engine(prompt, "haiku", wt, 20, f"{t.id}-audit{t.attempts}")
@@ -315,10 +346,14 @@ class Conductor:
             if "[WATCHDOG] killed" in out:
                 feedback = "Previous attempt hung and was killed. Decompose the work; commit incrementally."
                 self.ledger(f"WATCHDOG {t.id}", "stalled run killed — retrying")
+                self.log_failure(t, "watchdog-kill",
+                                 "run exceeded its time box and was killed; the approach was "
+                                 "likely too monolithic — decompose and commit incrementally")
                 continue
             if re.search(r"^BLOCKED:", out.strip().splitlines()[-1] if out.strip() else "", re.M):
                 t.status, t.note = "blocked", out.strip().splitlines()[-1][:300]
                 self.ledger(f"BLOCKED {t.id}", t.note)
+                self.log_failure(t, "blocked", t.note)
                 return
             ok, verdict = self.audit(t, wt)
             self.ledger(f"AUDIT {t.id}", verdict[:300])
@@ -328,9 +363,11 @@ class Conductor:
                 if self.merge_task(t, wt):
                     t.status = "done"
                 return
+            self.log_failure(t, "audit-fail", verdict)
             feedback = verdict
         t.status, t.note = "failed", f"failed audit {t.max_attempts} times: {feedback[:200]}"
         self.ledger(f"FAILED {t.id}", t.note)
+        self.log_failure(t, "exhausted", t.note)
 
     def dispatchable(self, background: bool) -> Task | None:
         done = {t.id for t in self.m.tasks if t.status == "done"}

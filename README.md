@@ -173,16 +173,24 @@ permanently resident. Default GPU wired limit is raised to 448 GB by the install
 - **Connectors** — MCP: DuckDB data lake, Postgres/Supabase (self-hosted), filesystem, git.
 - **Subagents** — `researcher`, `developer`, `auditor`, `adversary` for both engines;
   every task result is audited before merge; the adversary reviews time-efficiency.
-- **Memory** — append-only `memory/LEDGER.md` + `memory/STATE.md` snapshot, plain text,
-  the single source of truth across runs.
+- **Memory** — append-only `memory/LEDGER.md` + `memory/STATE.md` snapshot +
+  `memory/FAILURES.md` (approaches that failed and why — read before every attempt),
+  plain text, the single source of truth across runs.
 - **Self-healing** — llama-swap health checks with automatic service restart, stall
   watchdogs (kill + retry with feedback), bounded retries, idle-time work queue,
   hourly `REPORT-*.md`, and a `FINAL-REPORT.md` at mission end.
+- **Long-horizon protocol** — `engines/shared/AUTONOMY.md`, loaded globally by both
+  engines and enforced by the conductor's task prompts: session-start recovery ritual,
+  plan-first (`TASKPLAN.md` with per-step checks and a NOT-DOING list), ratchet commits,
+  evidence-or-it-didn't-happen, a two-strike stuck protocol that forces strategy changes,
+  context-rot detection with clean checkpointing, and failure-memory discipline.
 
 ## Honest expectations
 
 A 512 GB Mac Studio running Kimi K2 / Qwen3-Coder-480B is roughly frontier-minus-one:
 excellent on well-specified engineering tasks, weaker on very long autonomous horizons.
-The harness (skills, auditors, acceptance criteria, ledger) exists precisely to close
-that gap. Prompt prefill is the bottleneck on Apple Silicon — keep contexts tight and
-let the fast lane absorb background traffic.
+The harness exists precisely to close that gap: long-horizon failures are mostly
+process failures (goal drift, context rot, repeated dead ends, false completion), so
+the protocol + auditors + failure memory attack them mechanically rather than hoping
+the model stays sharp for 24 hours. Prompt prefill is the bottleneck on Apple Silicon —
+keep contexts tight and let the fast lane absorb background traffic.

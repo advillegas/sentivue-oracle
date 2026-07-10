@@ -1,6 +1,7 @@
 # SentiVue Oracle — global memory (Claude Code engine)
 
 @../../shared/CONVENTIONS.md
+@../../shared/AUTONOMY.md
 
 Engine note: you are Claude Code running against local models via llama-swap
 (`127.0.0.1:9099`). Tier aliases opus/sonnet/haiku map to kimi-k2-thinking /
