@@ -1,0 +1,7 @@
+{
+  "workbench.startupEditor": "none",
+  "workbench.colorTheme": "Default Dark Modern",
+  "continue.enableTabAutocomplete": true,
+  "editor.inlineSuggest.enabled": true,
+  "extensions.ignoreRecommendations": false
+}
