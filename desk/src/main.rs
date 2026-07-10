@@ -549,28 +549,36 @@ impl eframe::App for DeskApp {
         }
         ctx.request_repaint_after(Duration::from_millis(250));
 
-        egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.colored_label(theme::CORAL, egui::RichText::new("✻").heading());
-                ui.heading(egui::RichText::new("✻ SentiVue Oracle").color(theme::ORANGE));
-                ui.separator();
-                ui.selectable_value(&mut self.tab, Tab::Launch, "Launch");
-                ui.selectable_value(&mut self.tab, Tab::Assistant, "Assistant");
-                ui.selectable_value(&mut self.tab, Tab::Code, "Code");
-                ui.selectable_value(&mut self.tab, Tab::Missions, "Missions");
-                ui.selectable_value(&mut self.tab, Tab::Models, "Models");
-                ui.selectable_value(&mut self.tab, Tab::Vault, "Vault");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(self.root.display().to_string())
-                            .small()
-                            .color(theme::DIM),
-                    );
+        egui::SidePanel::left("nav")
+            .exact_width(172.0)
+            .frame(egui::Frame::default()
+                .fill(theme::BG_DEEP)
+                .inner_margin(egui::Margin::symmetric(10.0, 12.0)))
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new("SENTIVUE ORACLE").small().strong().color(theme::DIM));
+                ui.add_space(10.0);
+                for (t, label) in [
+                    (Tab::Launch, "Launch"),
+                    (Tab::Assistant, "Assistant"),
+                    (Tab::Code, "Code"),
+                    (Tab::Missions, "Missions"),
+                    (Tab::Models, "Models"),
+                    (Tab::Vault, "Vault"),
+                ] {
+                    let selected = self.tab == t;
+                    let text = if selected {
+                        egui::RichText::new(label).color(theme::TEXT)
+                    } else {
+                        egui::RichText::new(label).color(theme::DIM)
+                    };
+                    if ui.add_sized([150.0, 26.0], egui::SelectableLabel::new(selected, text)).clicked() {
+                        self.tab = t;
+                    }
+                }
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.label(egui::RichText::new(self.root.display().to_string()).small().color(theme::DIM));
                 });
             });
-            ui.add_space(2.0);
-        });
 
         egui::TopBottomPanel::bottom("statusline").show(ctx, |ui| {
             ui.horizontal(|ui| {
