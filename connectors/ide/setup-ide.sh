@@ -32,6 +32,20 @@ fetch_vsix() {  # fetch_vsix <namespace> <name> [target-platform]
   echo "$VSIX_DIR/$1.$2-$ver.vsix"
 }
 
+install_oracle_agents_extension() {
+  # The agents sidebar (view container + mission tree + session journals) is a
+  # local extension shipped with the repo - copied in place, no marketplace.
+  local src="$ROOT/connectors/ide/oracle-agents"
+  [[ -f "$src/package.json" ]] || return 0
+  local ver
+  ver="$(jq -r .version "$src/package.json" 2>/dev/null || echo 0.1.0)"
+  local extroot="$HOME/.vscode-oss/extensions"
+  mkdir -p "$extroot"
+  rm -rf "$extroot"/sentivue.oracle-agents-*
+  cp -R "$src" "$extroot/sentivue.oracle-agents-$ver"
+  echo "==> installed agents sidebar extension (sentivue.oracle-agents-$ver)"
+}
+
 graft_ripgrep() {
   # Open VSX builds of Continue ship without the ripgrep binary and die on
   # activation with "Could not find ripgrep binary" - graft VSCodium's own rg in.
@@ -94,23 +108,29 @@ update_user_config() {
 
   # Keybindings for new agent tabs (created only if the user has none yet)
   local keys="$dir/keybindings.json"
+  if [[ -f "$keys" ]] && grep -q "Oracle Agent: Claude Code" "$keys" && grep -q '"location": "editor"' "$keys"; then
+    # migrate our own earlier default (editor tabs) to the secondary side bar
+    sed -i '' 's/"location": "editor"/"location": "view"/g' "$keys" 2>/dev/null || \
+      sed -i 's/"location": "editor"/"location": "view"/g' "$keys"
+    echo "==> keybindings migrated: agent tabs now open in the secondary side bar"
+  fi
   if [[ ! -f "$keys" ]]; then
     cat > "$keys" <<'EOF'
 [
   {
     "key": "cmd+shift+a",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: Claude Code", "location": "editor" }
+    "args": { "profileName": "Oracle Agent: Claude Code", "location": "view" }
   },
   {
     "key": "cmd+shift+alt+a",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: Claude Code (worktree)", "location": "editor" }
+    "args": { "profileName": "Oracle Agent: Claude Code (worktree)", "location": "view" }
   },
   {
     "key": "cmd+alt+o",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: OpenCode", "location": "editor" }
+    "args": { "profileName": "Oracle Agent: OpenCode", "location": "view" }
   }
 ]
 EOF
@@ -129,6 +149,7 @@ case "${1:-launch}" in
     kilo="$(fetch_vsix kilocode kilo-code "$arch")"
     codium --install-extension "$cont" --force
     codium --install-extension "$kilo" --force
+    install_oracle_agents_extension
     graft_ripgrep
     bash "$ROOT/connectors/ide/sync-models.sh"
     update_user_config

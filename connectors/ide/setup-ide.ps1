@@ -24,6 +24,21 @@ function Find-Codium {
     return $null
 }
 
+function Install-OracleAgentsExtension {
+    # The agents sidebar (view container + mission tree + session journals) is a
+    # local extension shipped with the repo - copied in place, no marketplace.
+    $src = Join-Path $PSScriptRoot "oracle-agents"
+    if (-not (Test-Path (Join-Path $src "package.json"))) { return }
+    $ver = (Get-Content (Join-Path $src "package.json") -Raw | ConvertFrom-Json).version
+    $extRoot = Join-Path $env:USERPROFILE ".vscode-oss\extensions"
+    New-Item -ItemType Directory -Force -Path $extRoot | Out-Null
+    Get-ChildItem $extRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object Name -like "sentivue.oracle-agents-*" | Remove-Item -Recurse -Force
+    $dest = Join-Path $extRoot "sentivue.oracle-agents-$ver"
+    Copy-Item $src $dest -Recurse -Force
+    Write-Host "==> installed agents sidebar extension (sentivue.oracle-agents-$ver)"
+}
+
 function Update-UserConfig {
     # Merge (never clobber) the Oracle keys into VSCodium user settings:
     # telemetry off, Roo auto-import path, and the agent-tab terminal profiles.
@@ -73,25 +88,35 @@ function Update-UserConfig {
     ConvertTo-Json -InputObject $settings -Depth 20 | Set-Content -Path $settingsPath
     if (-not $Quiet) { Write-Host "==> merged VSCodium user settings (agent-tab profiles, telemetry off)" }
 
-    # Keybindings for new agent tabs (created only if the user has none yet)
+    # Keybindings for new agent tabs (created only if the user has none yet).
+    # location "view" = the terminal panel, which the agents extension docks
+    # into the SECONDARY SIDE BAR on first run (Cursor-style agent tabs).
     $keysPath = Join-Path $userDir "keybindings.json"
+    if (Test-Path $keysPath) {
+        # migrate our own earlier default (editor tabs) to the secondary side bar
+        $raw = Get-Content $keysPath -Raw
+        if ($raw -match "Oracle Agent: Claude Code" -and $raw -match '"location": "editor"') {
+            $raw -replace '"location": "editor"', '"location": "view"' | Set-Content $keysPath
+            if (-not $Quiet) { Write-Host "==> keybindings migrated: agent tabs now open in the secondary side bar" }
+        }
+    }
     if (-not (Test-Path $keysPath)) {
         @'
 [
   {
     "key": "ctrl+shift+a",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: Claude Code", "location": "editor" }
+    "args": { "profileName": "Oracle Agent: Claude Code", "location": "view" }
   },
   {
     "key": "ctrl+shift+alt+a",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: Claude Code (worktree)", "location": "editor" }
+    "args": { "profileName": "Oracle Agent: Claude Code (worktree)", "location": "view" }
   },
   {
     "key": "ctrl+alt+o",
     "command": "workbench.action.terminal.newWithProfile",
-    "args": { "profileName": "Oracle Agent: OpenCode", "location": "editor" }
+    "args": { "profileName": "Oracle Agent: OpenCode", "location": "view" }
   }
 ]
 '@ | Set-Content -Path $keysPath
@@ -127,6 +152,7 @@ switch ($Cmd) {
             if (-not (Test-Path $file)) { Invoke-WebRequest -Uri $meta.files.download -OutFile $file }
             & $codium --install-extension $file --force | Out-Null
         }
+        Install-OracleAgentsExtension
         # Open VSX builds of Continue ship WITHOUT the ripgrep binary, so the
         # extension dies on activation with "Could not find ripgrep binary".
         # Graft VSCodium's own rg.exe into the extension to fix it.
