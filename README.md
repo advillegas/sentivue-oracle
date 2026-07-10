@@ -206,6 +206,13 @@ permanently resident. Default GPU wired limit is raised to 448 GB by the install
   (`bin/checkpoint`), evidence-or-it-didn't-happen, a two-strike stuck protocol that
   forces strategy changes, context-rot detection with clean checkpointing, and
   failure-memory discipline.
+- **Self-improvement** — the loop documents its own behavior (`memory/PROCESS.jsonl`
+  telemetry, transcripts, TASKPLAN decision logs, ledger `friction:` lines), and every
+  mission ends with a retrospective (`oracle retro` runs one on demand) that scores
+  prior amendments against their registered success criteria, diagnoses process
+  bottlenecks, and proposes at most 3 protocol amendments — each a pre-registered
+  experiment applied only through an operator-countersigned amendment mission and
+  reverted if its criterion comes back NOT-MET (AUTONOMY §13, Amendment Log).
 
 ## Honest expectations
 

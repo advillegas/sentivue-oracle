@@ -24,6 +24,7 @@ case "$cmd" in
     m="${1:?usage: oracle mission <mission.toml> [engine] [hours]}"
     eng="${2:-claude}"; hrs="${3:-24}"
     exec uv run --project env python conductor/conductor.py run "$m" --engine "$eng" --hours "$hrs" ;;
+  retro)      exec uv run --project env python conductor/conductor.py retro --engine "${1:-claude}" ;;
   state)      uv run --project env python conductor/conductor.py status ;;
   report)     ls -1t reports/ 2>/dev/null | head -5 || echo "no reports yet" ;;
   ledger)     tail -n "${1:-20}" memory/LEDGER.md 2>/dev/null || echo "no ledger yet" ;;
@@ -35,6 +36,7 @@ oracle — offline agentic workstation
   engines        oracle claude [...]     oracle opencode [...]
   serving        oracle serve|stop|restart|status
   missions       oracle mission <toml> [claude|opencode] [hours]
+                 oracle retro [engine]   process meta-analysis + amendment proposals
                  oracle state            oracle report        oracle ledger [n]
   health         oracle verify           oracle doctor
   privacy        oracle harden [off]

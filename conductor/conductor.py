@@ -310,6 +310,15 @@ class Conductor:
                 f.write(line + "\n")
         print(line, flush=True)
 
+    def proc(self, kind: str, **kw) -> None:
+        """Process telemetry: one JSON line per process event in memory/PROCESS.jsonl.
+        This is the dataset the retrospective meta-analyzes — the loop documents its
+        own working, auditing, and looping behavior as structured data."""
+        rec = {"ts": now(), "mission": self.m.name, "kind": kind, **kw}
+        with self.lock:
+            with (MEMORY / "PROCESS.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+
     def log_failure(self, t: Task, kind: str, detail: str) -> None:
         """Failure memory: future runs grep this before attempting anything —
         the cheapest way to stop a 24 h mission from re-running dead ends."""
@@ -517,7 +526,9 @@ class Conductor:
             "5b. Destructive or hard-to-undo operations (DB mutations, mass deletes/renames): "
             "dry-run first, show the dry-run report, only then execute. Probes are read-only.\n"
             f"6. Finish: full test suite from clean state, commit, ledger entry to "
-            f"{MEMORY / 'LEDGER.md'} (what/why/files/next).\n"
+            f"{MEMORY / 'LEDGER.md'} (what/why/files/next) INCLUDING one 'friction:' line "
+            "naming the biggest process obstacle this run (tooling, prompts, missing info) "
+            "or 'friction: none' — the retrospective mines these to evolve the loop.\n"
             "If two genuinely different strategies fail, end with 'BLOCKED: <what you know, "
             "what you ruled out, what you would try next>'."
         )
@@ -590,6 +601,7 @@ class Conductor:
             self.current = f"task {t.id} (attempt {t.attempts}, {tier})"
             self.write_state()
             self.ledger(f"DISPATCH {t.id}", f"attempt {t.attempts}/{t.max_attempts}, tier {tier}")
+            attempt_t0 = time.monotonic()
             wt = self.make_worktree(t)
             if feedback:
                 (wt / "FEEDBACK.md").write_text(
@@ -600,6 +612,11 @@ class Conductor:
             out = self.run_engine(self.developer_prompt(t, feedback), tier, wt,
                                   t.timeout_minutes, f"{t.id}-dev{t.attempts}",
                                   stall_min=stall)
+            def attempt_end(outcome: str, **kw) -> None:
+                self.proc("attempt", task=t.id, attempt=t.attempts, tier=tier,
+                          escalated=tier != t.tier, outcome=outcome,
+                          secs=round(time.monotonic() - attempt_t0), **kw)
+
             if "[WATCHDOG] killed" in out:
                 feedback = ("The previous attempt hung (or went silent) and was killed. "
                             "The approach was likely too monolithic — decompose the work, "
@@ -607,19 +624,23 @@ class Conductor:
                 self.ledger(f"WATCHDOG {t.id}", "stalled run killed — retrying")
                 self.log_failure(t, "watchdog-kill",
                                  "run exceeded its time box or went silent and was killed")
+                attempt_end("watchdog")
                 continue
             last_line = out.strip().splitlines()[-1] if out.strip() else ""
             if re.search(r"^BLOCKED:", last_line, re.M):
                 t.status, t.note = "blocked", last_line[:300]
                 self.ledger(f"BLOCKED {t.id}", t.note)
                 self.log_failure(t, "blocked", t.note)
+                attempt_end("blocked")
                 return
             checks_ok, checks_out = self.run_checks(t, wt)
             if not checks_ok:
                 self.log_failure(t, "checks-fail", checks_out[:600])
                 feedback = f"Deterministic checks failed:\n{checks_out}"
+                attempt_end("checks-fail")
                 continue
             ok, verdict = self.audit(t, wt)
+            tiebreak = False
             if (not ok and t.checks
                     and TIER_MODEL["opus"] != TIER_MODEL[t.audit_tier]):
                 # Checks passed but the auditor disagrees — tiebreak with the
@@ -628,15 +649,20 @@ class Conductor:
                 ok2, verdict2 = self.audit(t, wt, tier="opus", tag="-tiebreak")
                 if ok2:
                     ok, verdict = True, verdict2 + " [opus tiebreak overrode initial FAIL]"
+                    tiebreak = True
             self.ledger(f"AUDIT {t.id}", verdict[:300])
             if ok:
                 if t.adversary:
                     self.adversary_pass(t, wt)
                 if self.merge_task(t, wt):
                     t.status = "done"
+                    attempt_end("done", tiebreak=tiebreak)
                     self.regression_sweep()
+                else:
+                    attempt_end("merge-conflict")
                 return
             self.log_failure(t, "audit-fail", verdict)
+            attempt_end("audit-fail")
             feedback = verdict
         t.status, t.note = "failed", f"failed audit {t.max_attempts} times: {feedback[:200]}"
         self.ledger(f"FAILED {t.id}", t.note)
@@ -735,6 +761,7 @@ class Conductor:
                             x.attempts = min(x.attempts, x.max_attempts - 1)
                             x.note = f"REGRESSION: gate broke after a later merge: {c}"
                         self.log_failure(x, "regression", f"$ {c}\n{r.stdout[-500:]}")
+                        self.proc("regression", task=x.id, check=c)
                         reopened.append(x.id)
                         break
             if reopened:
@@ -792,6 +819,200 @@ class Conductor:
             with p.open("a", encoding="utf-8") as f:
                 f.write(f"## {now()} · mission {self.m.name}\n" + "\n".join(lines) + "\n\n")
         self.ledger("LESSONS", f"{len(lines)} lessons distilled to memory/LESSONS.md")
+
+    # ---- the evolving loop (retrospective -> amendments -> measurement) --------
+    def _mission_metrics(self) -> tuple[dict, dict]:
+        """Aggregate PROCESS.jsonl into per-mission process metrics; return
+        (current_mission_metrics, previous_mission_metrics)."""
+        path = MEMORY / "PROCESS.jsonl"
+        per: dict[str, list[dict]] = {}
+        order: list[str] = []
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                name = rec.get("mission", "?")
+                if name not in per:
+                    per[name] = []
+                    order.append(name)
+                per[name].append(rec)
+
+        def agg(recs: list[dict]) -> dict:
+            att = [r for r in recs if r.get("kind") == "attempt"]
+            outcomes = [r.get("outcome") for r in att]
+            done_tasks = {r["task"] for r in att if r.get("outcome") == "done"}
+            per_task_attempts = {}
+            for r in att:
+                per_task_attempts[r["task"]] = max(per_task_attempts.get(r["task"], 0),
+                                                   int(r.get("attempt", 1)))
+            first_try = sum(1 for tsk in done_tasks
+                            if any(r["task"] == tsk and r.get("outcome") == "done"
+                                   and int(r.get("attempt", 9)) == 1 for r in att))
+            return {
+                "attempts": len(att),
+                "tasks_done": len(done_tasks),
+                "first_attempt_pass_rate": round(first_try / len(done_tasks), 2) if done_tasks else None,
+                "mean_attempts_per_done_task": round(
+                    sum(per_task_attempts[tsk] for tsk in done_tasks) / len(done_tasks), 2)
+                    if done_tasks else None,
+                "outcome_counts": {o: outcomes.count(o) for o in set(outcomes) if o},
+                "watchdog_kills": outcomes.count("watchdog"),
+                "checks_failures": outcomes.count("checks-fail"),
+                "audit_failures": outcomes.count("audit-fail"),
+                "tiebreak_overrides": sum(1 for r in att if r.get("tiebreak")),
+                "escalated_attempts": sum(1 for r in att if r.get("escalated")),
+                "regressions_reopened": sum(1 for r in recs if r.get("kind") == "regression"),
+                "mean_attempt_secs": round(sum(int(r.get("secs", 0)) for r in att) / len(att))
+                    if att else None,
+            }
+
+        cur = agg(per.get(self.m.name, []))
+        prev_names = [n for n in order if n != self.m.name]
+        prev = agg(per[prev_names[-1]]) if prev_names else {}
+        if prev_names:
+            prev["mission"] = prev_names[-1]
+        return cur, prev
+
+    def retrospective(self) -> None:
+        """Meta-analysis of the loop's own process, producing pre-registered
+        protocol amendments. Lifecycle: PROPOSED (here) -> operator countersign ->
+        APPLIED (by an approval-gated amendment mission, verified by the normal
+        loop) -> MEASURED at the next retro against its success criterion ->
+        kept, extended, or reverted. The loop evolves itself through itself."""
+        cur, prev = self._mission_metrics()
+        if not cur.get("attempts"):
+            return
+        self.current = "retrospective: meta-analyzing this mission's process"
+        self.ledger("RETRO", "meta-analyzing process telemetry")
+
+        def tail(p: Path, n: int) -> str:
+            return p.read_text(encoding="utf-8")[-n:] if p.exists() else ""
+        friction = "\n".join(ln for ln in tail(MEMORY / "LEDGER.md", 8000).splitlines()
+                             if "friction:" in ln.lower())[-1500:]
+        amendments = tail(MEMORY / "AMENDMENTS.md", 4000)
+        tier = "opus" if TIER_MODEL["opus"] != TIER_MODEL["sonnet"] else "sonnet"
+        date = dt.datetime.now().strftime("%Y%m%d")
+        prompt = (
+            "You are the PROCESS META-ANALYST for an autonomous engineering loop. Your "
+            "subject is the LOOP ITSELF — how it plans, works, documents, audits, retries, "
+            "and merges — not the engineering artifacts it produced.\n"
+            "You are STRICTLY READ-ONLY: edit no files, run no mutations — your entire "
+            "output is this report. Changes happen only through the governed amendment "
+            "mission after operator approval.\n\n"
+            f"PROCESS METRICS, this mission:\n{json.dumps(cur, indent=1)}\n\n"
+            f"PROCESS METRICS, previous mission (baseline):\n{json.dumps(prev, indent=1)}\n\n"
+            f"AGENT-REPORTED FRICTION (from ledger entries):\n{friction or '(none reported)'}\n\n"
+            f"FAILURE MEMORY (tail):\n{tail(MEMORY / 'FAILURES.md', 3000)}\n\n"
+            f"PRIOR AMENDMENTS AND THEIR SUCCESS CRITERIA:\n{amendments or '(none yet)'}\n\n"
+            "Produce:\n"
+            "1. METRICS READING — what moved vs baseline and what it means (be skeptical; "
+            "small samples prove little).\n"
+            "2. VERDICTS on every prior APPLIED amendment: MET / NOT-MET / "
+            "INSUFFICIENT-DATA against its registered success criterion, with the number "
+            "that decides it, and an action (keep / revert / extend).\n"
+            "3. TOP PROCESS BOTTLENECKS (max 3) with evidence from the data above.\n"
+            "4. AMENDMENT PROPOSALS (0-3; propose NOTHING if the evidence is weak — "
+            "protocol churn is itself a process failure). Each proposal targets exactly "
+            "one file among: engines/shared/AUTONOMY.md, engines/shared/CONVENTIONS.md, "
+            "skills/*/SKILL.md, or a conductor default, and must be a small, precise "
+            "change with a MEASURABLE success criterion computable from the process "
+            "metrics above at the next retro.\n\n"
+            "End with a single ```json block:\n"
+            '{"verdicts": [{"id": "AMD-...", "verdict": "MET|NOT-MET|INSUFFICIENT-DATA", '
+            '"evidence": "...", "action": "keep|revert|extend"}], '
+            '"proposals": [{"id": "AMD-' + date + '-1", "target": "<file>", '
+            '"change": "<exact, self-contained edit specification>", '
+            '"rationale": "<tied to evidence>", '
+            '"success_criterion": "<metric comparison at next retro>"}]}'
+        )
+        out = self.run_engine(prompt, tier, ROOT, 25, f"retro-{date}", stall_min=15)
+        (REPORTS / f"RETRO-{dt.datetime.now():%Y%m%d-%H%M}.md").write_text(
+            f"# Retrospective — mission `{self.m.name}`\n\n{now()}\n\n{out}\n", encoding="utf-8")
+
+        payload: dict = {}
+        for block in reversed(re.findall(r"```json\s*(.*?)```", out, re.S)):
+            try:
+                cand = json.loads(block)
+                if isinstance(cand, dict):
+                    payload = cand
+                    break
+            except ValueError:
+                continue
+        verdicts = payload.get("verdicts") or []
+        proposals = []
+        allowed = ("engines/shared/", "skills/", "conductor/", "connectors/", "bootstrap/")
+        for i, p in enumerate(payload.get("proposals") or [], start=1):
+            if not isinstance(p, dict) or not p.get("change") or not p.get("target"):
+                continue
+            p["id"] = p.get("id") if re.match(r"^AMD-[\w-]+$", str(p.get("id", ""))) \
+                else f"AMD-{date}-{i}"
+            if str(p["target"]).replace("\\", "/").startswith(allowed):
+                proposals.append(p)
+
+        ap = MEMORY / "AMENDMENTS.md"
+        with self.lock:
+            if not ap.exists():
+                ap.write_text("# Protocol amendments — PROPOSED by retrospectives, APPLIED by "
+                              "approval-gated amendment missions, MEASURED at the next retro.\n\n",
+                              encoding="utf-8")
+            with ap.open("a", encoding="utf-8") as f:
+                for v in verdicts:
+                    f.write(f"- VERDICT {now()}: {v.get('id')} -> {v.get('verdict')} "
+                            f"({v.get('evidence', '')[:200]}) action={v.get('action')}\n")
+                for p in proposals:
+                    f.write(f"\n## {p['id']} · PROPOSED · {now()}\n"
+                            f"target: {p['target']}\n"
+                            f"change: {p['change']}\n"
+                            f"rationale: {p.get('rationale', '')}\n"
+                            f"success_criterion: {p.get('success_criterion', '')}\n")
+        if proposals:
+            mission_file = self._write_amendment_mission(proposals, date)
+            self.ledger("RETRO PROPOSALS", f"{len(proposals)} amendment(s) proposed; review "
+                        f"memory/AMENDMENTS.md then run: oracle mission {mission_file} "
+                        f"(each task needs an APPROVE line first)")
+        else:
+            self.ledger("RETRO", "no amendments proposed (evidence too weak or process healthy)")
+
+    def _write_amendment_mission(self, proposals: list[dict], date: str) -> str:
+        lines = [
+            "# AUTO-GENERATED by the retrospective — protocol amendment mission.",
+            "# Specs live in memory/AMENDMENTS.md. Approve what you accept:",
+            "#   echo APPROVE <task-id> >> memory/APPROVALS.md",
+            "",
+            "[mission]",
+            f'name = "amendments-{date}"',
+            'goal = "Apply approved protocol amendments exactly as specified in memory/AMENDMENTS.md, with a dated Amendment Log entry for each."',
+            f'engine = "{self.m.engine}"',
+            "hours = 4",
+            "",
+        ]
+        amendments_abs = (MEMORY / "AMENDMENTS.md").as_posix()
+        for p in proposals:
+            tid = p["id"].lower()
+            lines += [
+                "[[tasks]]",
+                f"id = '{tid}'",
+                f"title = 'Apply {p['id']} to {p['target']}'",
+                "prompt = '''Apply protocol amendment " + p["id"] + ": read its full "
+                "specification in " + amendments_abs + " and implement it EXACTLY on its "
+                "target file - nothing beyond the spec. Then (1) append a dated entry to "
+                "the Amendment Log at the bottom of engines/shared/AUTONOMY.md (id, "
+                "one-line change, success criterion); (2) append the line "
+                + p["id"] + " APPLIED to " + amendments_abs + ".'''",
+                "acceptance = ['amendment applied verbatim to its target file', "
+                "'Amendment Log entry added', 'AMENDMENTS.md marked APPLIED']",
+                f"checks = ['grep -q {p['id']} engines/shared/AUTONOMY.md', "
+                f"'grep -q \"{p['id']} APPLIED\" {amendments_abs}']",
+                "tier = 'sonnet'",
+                "requires_approval = true",
+                "timeout_minutes = 20",
+                "",
+            ]
+        path = ROOT / "conductor" / "missions" / f"amendments-{date}.toml"
+        path.write_text("\n".join(lines), encoding="utf-8")
+        return f"conductor/missions/amendments-{date}.toml"
 
     # ---- reporting ----------------------------------------------------------
     def report(self, final: bool = False) -> Path:
@@ -882,6 +1103,10 @@ class Conductor:
                     self.distill_lessons()
                 except Exception as e:                      # lessons are best-effort
                     self.ledger("LESSONS ERROR", str(e)[:200])
+                try:
+                    self.retrospective()
+                except Exception as e:                      # retro is best-effort
+                    self.ledger("RETRO ERROR", str(e)[:200])
             self.current = "mission ended"
             self.write_state()
             p = self.report(final=True)
@@ -896,12 +1121,28 @@ def main() -> int:
     runp.add_argument("mission", type=Path)
     runp.add_argument("--engine", choices=["claude", "opencode"], default=None)
     runp.add_argument("--hours", type=float, default=None)
+    retp = sub.add_parser("retro", help="run a standalone process retrospective now")
+    retp.add_argument("--engine", choices=["claude", "opencode"], default="claude")
     sub.add_parser("status", help="print current STATE.md")
     args = ap.parse_args()
 
     if args.cmd == "status":
         state = MEMORY / "STATE.md"
         print(state.read_text(encoding="utf-8") if state.exists() else "no mission state yet")
+        return 0
+    if args.cmd == "retro":
+        # Analyze the most recent mission's telemetry without running anything new.
+        path = MEMORY / "PROCESS.jsonl"
+        last = "retro"
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                try:
+                    last = json.loads(line).get("mission", last)
+                except ValueError:
+                    pass
+        shell = Mission(name=last, goal="(standalone retrospective)", repo=ROOT,
+                        tasks=[], engine=args.engine, hours=1, auto_plan=True)
+        Conductor(shell).retrospective()
         return 0
     mission = Mission.load(args.mission, args.engine, args.hours)
     return Conductor(mission).run()

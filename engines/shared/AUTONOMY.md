@@ -44,6 +44,7 @@ STEPS (3–7, each independently verifiable):
   1. <step> — CHECK: <exact command or observable that proves it>
   2. ...
 NOT DOING: <adjacent work you are explicitly declining — your anti-drift contract>
+DECISIONS: <running log: each non-obvious choice + why, one line each>
 DIAGNOSIS (retries only): <5 lines: root cause of the previous failure, not the symptom>
 ```
 
@@ -122,7 +123,10 @@ You run on a bounded budget of time and attempts. Act like it.
 2. Full test suite from a clean state; include the output tail.
 3. Every TASKPLAN step is checked off or explicitly moved to NOT-DOING / future work.
 4. Commit with a message that says what and why.
-5. Ledger entry: what / why / files / decisions / next.
+5. Ledger entry: what / why / files / decisions / next, plus one `friction:` line —
+   the biggest process obstacle this run (tooling gap, ambiguous prompt, missing
+   context, slow verification) or `friction: none`. This is telemetry for the
+   retrospective, not a complaint box: name what would have made THIS run faster.
 6. Ask the adversary's question — "what input breaks this? what did I not test?" —
    and if the answer worries you, test it now instead of hoping.
 
@@ -164,3 +168,52 @@ produced a real incident.
   each later merge (regression sweep) and reopens what broke. Design your checks
   knowing they will be re-run against future states of the tree: make them
   deterministic, self-contained, and fast.
+
+## 13. The evolving loop (how this protocol improves itself)
+
+This protocol is not fixed. The loop documents its own behavior, meta-analyzes it,
+and amends itself — under governance, so evolution cannot become drift.
+
+**Documentation layer (always on).** Everything the loop does leaves a record:
+`memory/PROCESS.jsonl` (structured telemetry: every attempt, outcome, tier,
+duration, escalation, tiebreak, regression), full run transcripts under `logs/`,
+TASKPLAN DECISIONS logs, ledger `friction:` lines, FAILURES.md, LESSONS.md. If a
+process behavior isn't recorded, it can't be improved — write it down.
+
+**Meta-analysis layer (every mission end, or `oracle retro`).** The retrospective
+reads the telemetry, compares against the previous mission's baseline, scores every
+previously APPLIED amendment against its registered success criterion (MET /
+NOT-MET / INSUFFICIENT-DATA — verdicts recorded regardless of sign), names the top
+process bottlenecks with evidence, and proposes at most 3 amendments. Proposing
+nothing is a valid, respected outcome: protocol churn is itself a process failure.
+
+**Evolution layer (governed).** Amendment lifecycle:
+
+```
+PROPOSED   retro writes spec + rationale + measurable success criterion
+           to memory/AMENDMENTS.md and generates an amendment mission
+APPROVED   operator countersigns (APPROVE <task-id> in memory/APPROVALS.md)
+APPLIED    the normal verified loop executes it: developer applies the spec
+           exactly, appends a dated entry to the Amendment Log below, auditor
+           and checks verify; merged like any other work
+MEASURED   next retro scores it against its criterion
+KEPT / REVERTED / EXTENDED per the verdict — reverts are proposals too
+```
+
+Rules that keep self-modification safe: every amendment is an experiment with a
+pre-registered, measurable success criterion; one file per amendment; the Amendment
+Log below is append-only history (dated addenda, never silent edits); the operator
+countersign is mandatory for anything that changes doctrine, skills, or the
+conductor; and an amendment whose criterion comes back NOT-MET is reverted, not
+defended.
+
+---
+
+## Amendment Log
+
+Append-only. Every applied amendment gets a dated entry: id, one-line change,
+success criterion. The current protocol is the baseline plus these entries.
+
+- **v1.0 (2026-07-09)** — baseline protocol as committed; derived from first
+  principles plus the frontier-loop meta-analysis
+  (`docs/meta-analysis-frontier-loops.md`).
