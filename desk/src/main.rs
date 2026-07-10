@@ -6,6 +6,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod assistant;
 mod data;
 mod engine;
 mod launchpad;
@@ -21,7 +22,8 @@ use engine::{EngineKind, Event, RunHandle};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Launch,
-    Chat,
+    Assistant,
+    Code,
     Missions,
     Models,
     Vault,
@@ -38,7 +40,13 @@ struct DeskApp {
     install_dest: String,
     install_msg: Option<String>,
     tab: Tab,
-    // chat
+    // assistant (direct local-LLM chat, Claude-app style)
+    a_input: String,
+    a_msgs: Vec<(String, String)>,
+    a_rx: Option<std::sync::mpsc::Receiver<assistant::Event>>,
+    a_streaming: String,
+    a_smart: bool,
+    // code (agentic engine chat)
     engine_kind: EngineKind,
     input: String,
     messages: Vec<ChatMsg>,
@@ -68,6 +76,11 @@ impl DeskApp {
             installed,
             root,
             tab: Tab::Launch,
+            a_input: String::new(),
+            a_msgs: Vec::new(),
+            a_rx: None,
+            a_streaming: String::new(),
+            a_smart: false,
             engine_kind: EngineKind::Claude,
             input: String::new(),
             messages: vec![ChatMsg {
@@ -184,6 +197,118 @@ impl DeskApp {
             self.session_id.clone(),
             prompt,
         ));
+    }
+
+    // ---------------- assistant (functional LLM) ----------------
+
+    fn pump_assistant(&mut self) {
+        let Some(rx) = &self.a_rx else { return };
+        let mut done = false;
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                assistant::Event::Delta(t) => self.a_streaming.push_str(&t),
+                assistant::Event::Done => done = true,
+                assistant::Event::Fail(msg) => {
+                    self.a_msgs.push(("system".into(), msg));
+                    done = true;
+                }
+            }
+        }
+        if done {
+            if !self.a_streaming.is_empty() {
+                self.a_msgs.push(("assistant".into(), std::mem::take(&mut self.a_streaming)));
+            }
+            self.a_rx = None;
+        }
+    }
+
+    fn send_assistant(&mut self) {
+        let prompt = self.a_input.trim().to_string();
+        if prompt.is_empty() || self.a_rx.is_some() {
+            return;
+        }
+        self.a_input.clear();
+        self.a_msgs.push(("user".into(), prompt));
+        let (fast, smart) = data::tier_models(&self.root);
+        let model = if self.a_smart { smart } else { fast };
+        let mut messages = vec![("system".to_string(), assistant::SYSTEM.to_string())];
+        for (r, c) in &self.a_msgs {
+            if r == "user" || r == "assistant" {
+                messages.push((r.clone(), c.clone()));
+            }
+        }
+        self.a_rx = Some(assistant::send(model, messages));
+    }
+
+    fn assistant_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("model:");
+            ui.selectable_value(&mut self.a_smart, false, "fast");
+            ui.selectable_value(&mut self.a_smart, true, "smart (big slot)");
+            if !self.a_msgs.is_empty() && ui.button("new conversation").clicked() {
+                self.a_msgs.clear();
+                self.a_streaming.clear();
+            }
+            if self.a_rx.is_some() {
+                ui.spinner();
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new("general assistant · 100% local").small().color(theme::DIM));
+            });
+        });
+        ui.separator();
+        let avail = ui.available_height() - 70.0;
+        egui::ScrollArea::vertical()
+            .id_salt("assistant_scroll")
+            .max_height(avail)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                if self.a_msgs.is_empty() && self.a_streaming.is_empty() {
+                    ui.add_space(24.0);
+                    ui.vertical_centered(|ui| {
+                        ui.colored_label(theme::ORANGE, "✻");
+                        ui.label("Ask anything. Runs on your models, on this machine, and nowhere else.");
+                    });
+                }
+                for (role, text) in &self.a_msgs {
+                    match role.as_str() {
+                        "user" => {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.colored_label(theme::CORAL, "❯");
+                                ui.label(text.as_str());
+                            });
+                        }
+                        "assistant" => {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.colored_label(theme::ORANGE, "✻");
+                                ui.label(text.as_str());
+                            });
+                        }
+                        _ => {
+                            ui.colored_label(theme::DIM, text.as_str());
+                        }
+                    }
+                    ui.add_space(6.0);
+                }
+                if !self.a_streaming.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(theme::ORANGE, "✻");
+                        ui.label(self.a_streaming.as_str());
+                    });
+                }
+            });
+        ui.separator();
+        ui.horizontal(|ui| {
+            let editor = egui::TextEdit::singleline(&mut self.a_input)
+                .hint_text("message the oracle…")
+                .desired_width(ui.available_width() - 70.0);
+            let resp = ui.add(editor);
+            let send_clicked = ui.button("send").clicked();
+            if send_clicked || (resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                self.send_assistant();
+                resp.request_focus();
+            }
+        });
     }
 
     // ---------------- panels ----------------
@@ -418,6 +543,7 @@ impl eframe::App for DeskApp {
             return;
         }
         self.pump_engine();
+        self.pump_assistant();
         if self.last_refresh.elapsed() > Duration::from_secs(3) {
             self.refresh();
         }
@@ -430,7 +556,8 @@ impl eframe::App for DeskApp {
                 ui.heading(egui::RichText::new("✻ SentiVue Oracle").color(theme::ORANGE));
                 ui.separator();
                 ui.selectable_value(&mut self.tab, Tab::Launch, "Launch");
-                ui.selectable_value(&mut self.tab, Tab::Chat, "Chat");
+                ui.selectable_value(&mut self.tab, Tab::Assistant, "Assistant");
+                ui.selectable_value(&mut self.tab, Tab::Code, "Code");
                 ui.selectable_value(&mut self.tab, Tab::Missions, "Missions");
                 ui.selectable_value(&mut self.tab, Tab::Models, "Models");
                 ui.selectable_value(&mut self.tab, Tab::Vault, "Vault");
@@ -463,7 +590,8 @@ impl eframe::App for DeskApp {
 
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Launch => self.launch_ui(ui),
-            Tab::Chat => self.chat_ui(ui),
+            Tab::Assistant => self.assistant_ui(ui),
+            Tab::Code => self.chat_ui(ui),
             Tab::Missions => self.missions_ui(ui),
             Tab::Models => self.models_ui(ui),
             Tab::Vault => self.vault_ui(ui),

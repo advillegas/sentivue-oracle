@@ -29,6 +29,23 @@ pub fn find_root() -> Option<PathBuf> {
     None
 }
 
+/// (fast, smart) chat models for this machine's profile, from serving/tiers.env.
+pub fn tier_models(root: &Path) -> (String, String) {
+    let mut fast = "qwen3-coder-30b".to_string();
+    let mut smart = "qwen3-coder-480b".to_string();
+    if let Ok(body) = std::fs::read_to_string(root.join("serving/tiers.env")) {
+        for line in body.lines() {
+            if let Some(v) = line.strip_prefix("HAIKU_MODEL=") {
+                fast = v.trim().to_string();
+            }
+            if let Some(v) = line.strip_prefix("SONNET_MODEL=") {
+                smart = v.trim().to_string();
+            }
+        }
+    }
+    (fast, smart)
+}
+
 pub fn default_install_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
