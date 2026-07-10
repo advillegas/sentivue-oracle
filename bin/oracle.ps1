@@ -18,6 +18,29 @@ function Find-CodiumInstalled {
            (Test-Path "$env:ProgramFiles\VSCodium\bin\codium.cmd")
 }
 
+function Find-RealPython {
+    $cmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -notmatch "WindowsApps") { return $cmd.Source }
+    $c = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
+        Sort-Object FullName -Descending | Select-Object -First 1
+    if ($c) { return $c.FullName }
+    return $null
+}
+
+function Invoke-Conductor {
+    param([string[]]$CondArgs)
+    $python = Find-RealPython
+    if (-not $python) {
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\ensure-tools.ps1")
+        $python = Find-RealPython
+        if (-not $python) { Write-Host "ERROR: no Python and self-provisioning failed"; exit 1 }
+    }
+    $pyDir = Split-Path -Parent $python
+    $env:PATH = "$pyDir;$pyDir\Scripts;$env:PATH"
+    & $python (Join-Path $Root "conductor\conductor.py") @CondArgs
+    exit $LASTEXITCODE
+}
+
 switch ($Cmd) {
     "vault"  { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\vault.ps1") @Rest }
     "models" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\download-models.ps1") @Rest }
@@ -40,6 +63,15 @@ switch ($Cmd) {
     "status" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") status }
     "claude"   { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\claude-code\launch.ps1") @Rest }
     "opencode" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\opencode\launch.ps1") @Rest }
+    "mission" {
+        # oracle.ps1 mission <mission.toml> [claude|opencode] [hours]
+        if ($Rest.Count -lt 1) { Write-Host "usage: oracle.ps1 mission <mission.toml> [claude|opencode] [hours]"; exit 1 }
+        $engine = if ($Rest.Count -ge 2) { $Rest[1] } else { "claude" }
+        $hours = if ($Rest.Count -ge 3) { $Rest[2] } else { "24" }
+        Invoke-Conductor @("run", $Rest[0], "--engine", $engine, "--hours", $hours)
+    }
+    "retro" { Invoke-Conductor @("retro", "--engine", $(if ($Rest.Count -ge 1) { $Rest[0] } else { "claude" })) }
+    "state" { Invoke-Conductor @("status") }
     "ide" {
         $sub = "launch"; if ($Rest.Count -gt 0) { $sub = $Rest[0] }
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "connectors\ide\setup-ide.ps1") $sub
@@ -82,6 +114,8 @@ switch ($Cmd) {
         Write-Host "  setup                                     engines (pinned) + serving toolchain (one time)"
         Write-Host "  serve | status | stop                     local model serving (llama-swap on :9099)"
         Write-Host "  claude | opencode                         engine sessions on local models"
+        Write-Host "  mission <toml> [engine] [hours]           self-governing mission (conductor loop)"
+        Write-Host "  retro | state                             process retrospective | mission state"
         Write-Host "  ide  [install|sync]                       Cursor-like IDE (agent tabs, auto-detected models)"
         Write-Host "  desk                                      native desktop app (chat/missions/models/vault)"
         Write-Host "  menu                                      interactive menu (the desktop shortcut opens this)"
