@@ -13,7 +13,10 @@ change, docs), ALWAYS finish by committing and pushing — without waiting to be
    configured (`advillegas <74381111+advillegas@users.noreply.github.com>`); never
    invent a placeholder name or email.
 3. `git push origin main`
-4. Confirm the push succeeded (`git status -sb` shows `main...origin/main` with no
+4. `git push --quiet vault main` — mirror to the local vault (the ecosystem's own
+   private remote). If the vault remote is missing, initialize it once with
+   `powershell -ExecutionPolicy Bypass -File bootstrap\vault.ps1 init`.
+5. Confirm the push succeeded (`git status -sb` shows `main...origin/main` with no
    ahead/behind) and report the commit SHA.
 
 Notes:

@@ -1,8 +1,12 @@
 # SentiVue Oracle
 
-An **offline, self-governing agentic workstation** for quantitative research, trading-system
-development, and machine learning. Runs entirely on a Mac Studio (512 GB unified memory)
-against local open-weight models. After the one-time bootstrap, the machine can be air-gapped.
+A **self-contained development ecosystem**: an offline, self-governing, self-improving
+agentic workstation for quantitative research, trading-system development, and machine
+learning. The appliance runs entirely on a Mac Studio (512 GB unified memory) against
+local open-weight models; a Windows node handles authoring, model pre-downloading, and
+carries the same private git vault. Every dependency of the development loop — models,
+inference, engines, skills, data, memory, and version control — lives inside the
+ecosystem. After the one-time bootstrap, no piece of it needs the internet.
 
 **Engines: Claude Code or OpenCode — your choice, same models, same skills.** Cursor is
 deliberately not part of this stack. All services bind to `127.0.0.1`, all telemetry is
@@ -134,28 +138,35 @@ cleanly removes services, symlinks, and — with `--purge` — the models.)
 Both engines read the same skills, subagents, conventions (`AGENTS.md`), and MCP
 connectors. Switching engines is a per-session decision, not a migration.
 
-## Local git vault (the offline "origin")
+## Local git vault (the ecosystem's own "origin" — on every node)
 
-An air-gapped machine still needs a remote: the vault is a directory of
-history-protected bare git repositories (`~/oracle-git-vault`, configurable via
-`ORACLE_VAULT`) — a private local origin with zero dependencies beyond git.
-The installer creates it and registers a `vault` remote on this repo; the
-conductor then pushes every merged mission branch to it automatically and
-everything at mission end, so autonomous work is always backed up off the
-working copy. Vault repos refuse deletes and non-fast-forward pushes by
-default (append-only history).
+A self-contained ecosystem owns its version control: the vault is a directory of
+history-protected bare git repositories (`~/oracle-git-vault` /
+`%USERPROFILE%\oracle-git-vault`, configurable via `ORACLE_VAULT`) — a private
+local origin with zero dependencies beyond git. Vault repos refuse deletes and
+non-fast-forward pushes (append-only history). It ships for **both nodes** with
+identical commands:
 
 ```bash
-oracle vault sync                 # push all branches+tags of this repo
-oracle vault new my-strategy      # bare repo for a new project
-oracle vault clone my-strategy    # clone it out anywhere on the machine
-oracle vault list                 # inventory: branches, sizes, last activity
-oracle vault backup /Volumes/usb  # tarball the whole vault for offsite rotation
+# Mac appliance (bash)                    # Windows node (PowerShell)
+oracle vault init                         bin\oracle.ps1 vault init
+oracle vault sync [repo]                  bin\oracle.ps1 vault sync [repo]
+oracle vault new my-strategy              bin\oracle.ps1 vault new my-strategy
+oracle vault clone my-strategy            bin\oracle.ps1 vault clone my-strategy
+oracle vault list                         bin\oracle.ps1 vault list
+oracle vault backup /Volumes/usb          bin\oracle.ps1 vault backup E:\
 ```
 
-`oracle doctor` reports whether the vault is current. For work on other
-projects, `oracle vault sync <path>` auto-creates that project's bare repo on
-first push.
+- **Mac:** the installer creates the vault and registers the `vault` remote; the
+  conductor auto-pushes every merged mission branch and everything at mission end —
+  autonomous work is continuously backed up off the working copy. `oracle doctor`
+  reports vault currency.
+- **Windows:** `finish-windows.ps1` mirrors every commit to the vault alongside the
+  GitHub push, and the project rule keeps them in lockstep — so even the authoring
+  node's history survives without any cloud dependency.
+- `vault sync <path>` auto-creates a bare repo for any new project on first push;
+  `vault backup` tarballs the whole vault for external/USB rotation. Moving work
+  between nodes offline is an ordinary `git fetch` from a vault backup on a drive.
 
 ## Privacy posture
 
