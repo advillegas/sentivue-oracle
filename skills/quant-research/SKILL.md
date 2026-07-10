@@ -52,6 +52,20 @@ CAGR, annualized vol, Sharpe (with SE ≈ `sqrt((1 + SR²/2)/T_years)`), Sortino
 drawdown + duration, Calmar, hit rate, turnover, capacity sketch, exposure over time,
 rolling 1y Sharpe plot. State the number of independent bets (breadth), not just years.
 
+## Pre-registration discipline (how decisions stay honest)
+
+- Any promote/reject/allocate decision gets its rule REGISTERED before results are
+  computed: metric, population, significance bar, and what each outcome implies —
+  written to the ledger/protocol doc first, dated.
+- Verdicts are recorded regardless of sign. "FAIL — bar not met, sealed data stays
+  sealed" is a first-class outcome and is written exactly as prominently as a pass.
+- Attempt counts against the same bar are tracked; each re-attempt erodes the
+  protection the bar provides and must be justified in the registration.
+- Every count reconciles down the funnel (universe → eligible → priced → selected →
+  evaluated) — a number that can't be traced through the funnel is not reported.
+- Corrections to published numbers are dated addenda that state whether the verdict
+  survives; never silent edits.
+
 ## Research note template (docs/notes/)
 
 Hypothesis (economic rationale BEFORE looking at returns) → Data (source, range, PIT

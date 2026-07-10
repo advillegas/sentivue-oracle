@@ -117,7 +117,7 @@ def git(repo: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProce
 
 TASK_FIELDS = {"id", "title", "prompt", "depends_on", "acceptance", "checks", "tier",
                "audit_tier", "timeout_minutes", "stall_minutes", "max_attempts",
-               "adversary", "escalate", "background"}
+               "adversary", "escalate", "background", "requires_approval"}
 
 
 @dataclass
@@ -136,6 +136,7 @@ class Task:
     adversary: bool = False          # extra adversarial pass after audit
     escalate: bool = True            # final attempt auto-escalates to opus tier
     background: bool = False         # only runs when nothing else is dispatchable
+    requires_approval: bool = False  # waits until memory/APPROVALS.md has 'APPROVE <id>'
     # runtime state
     status: str = "pending"          # pending|claimed|running|auditing|done|failed|blocked|merge-conflict
     attempts: int = 0
@@ -235,11 +236,19 @@ PLAN_CONTRACT = """Respond with STRICT JSON inside a single ```json fenced block
 instructions for an engineer with NO memory of this conversation>",
  "depends_on": ["<ids>"], "acceptance": ["<criterion>", ...],
  "checks": ["<shell command that exits 0 iff the criterion holds>", ...],
- "tier": "sonnet"|"haiku"|"opus", "timeout_minutes": <int, <=90>, "adversary": <bool>}
+ "tier": "sonnet"|"haiku"|"opus", "timeout_minutes": <int, <=90>, "adversary": <bool>,
+ "requires_approval": <bool>}
 Rules: ids unique; depends_on must form a DAG over these ids; every task must be
 independently verifiable; put the mechanical proof of every acceptance criterion into
 checks wherever a shell command can express it; use tier "haiku" for grunt work,
-"opus" only where deep reasoning is essential; adversary=true for risk-bearing tasks."""
+"opus" only where deep reasoning is essential; adversary=true for risk-bearing tasks.
+Destructive or irreversible operations (database mutations, mass deletes/merges,
+schema changes, anything hard to undo) MUST be split into two tasks: a read-only
+DRY-RUN task that produces a reviewable report, and an EXECUTE task that depends on
+it and carries requires_approval=true. Long-running jobs (big backfills, full
+walk-forwards) MUST be split into a launch task that starts a RESUMABLE,
+checkpointed background job and a separate later verification task — never hold a
+task open waiting on a long job."""
 
 
 def parse_plan(text: str) -> list[Task]:
@@ -275,6 +284,8 @@ class Conductor:
         self.lock = threading.Lock()        # task state + memory files
         self.gitlock = threading.Lock()     # worktree add / merge / branch ops
         self.biglock = threading.Lock()     # big-slot serialization (prevents swap thrash)
+        self.sweeplock = threading.Lock()   # one regression sweep at a time
+        self.interrupted = False
         self.current: str = "starting up"
         self.stopping = threading.Event()
         self.replanned = False
@@ -493,7 +504,8 @@ class Conductor:
             "You operate under the Long-Horizon Autonomy Protocol (in your loaded instructions). "
             "Non-negotiables for this run:\n"
             f"1. START RITUAL before any edit: read {MEMORY / 'STATE.md'}, the tail of "
-            f"{MEMORY / 'LEDGER.md'}, and {MEMORY / 'FAILURES.md'} (search '{t.id}'); "
+            f"{MEMORY / 'LEDGER.md'}, {MEMORY / 'LESSONS.md'} (hard-won knowledge — do not "
+            f"relearn it), and {MEMORY / 'FAILURES.md'} (search '{t.id}'); "
             "run `git log --oneline -10` and `git status` here; read TASKPLAN.md if present.\n"
             "2. Write TASKPLAN.md (GOAL / 3-7 STEPS each with a CHECK / NOT-DOING) before "
             "touching code; keep it updated — it is your anchor against drift.\n"
@@ -502,6 +514,8 @@ class Conductor:
             "next step. Never end a step with a broken tree.\n"
             "4. Evidence standard: a criterion counts only with the command AND its fresh output.\n"
             "5. Re-anchor every ~10 actions: re-read the criteria and your current step.\n"
+            "5b. Destructive or hard-to-undo operations (DB mutations, mass deletes/renames): "
+            "dry-run first, show the dry-run report, only then execute. Probes are read-only.\n"
             f"6. Finish: full test suite from clean state, commit, ledger entry to "
             f"{MEMORY / 'LEDGER.md'} (what/why/files/next).\n"
             "If two genuinely different strategies fail, end with 'BLOCKED: <what you know, "
@@ -620,6 +634,7 @@ class Conductor:
                     self.adversary_pass(t, wt)
                 if self.merge_task(t, wt):
                     t.status = "done"
+                    self.regression_sweep()
                 return
             self.log_failure(t, "audit-fail", verdict)
             feedback = verdict
@@ -627,9 +642,36 @@ class Conductor:
         self.ledger(f"FAILED {t.id}", t.note)
         self.log_failure(t, "exhausted", t.note)
 
+    # ---- approvals (guardian countersign for irreversible work) ---------------
+    def approved(self, t: Task) -> bool:
+        """Irreversible tasks wait for the operator to write 'APPROVE <id>' into
+        memory/APPROVALS.md — a guardian countersign, not a rubber stamp."""
+        if not t.requires_approval:
+            return True
+        ap = MEMORY / "APPROVALS.md"
+        if not ap.exists():
+            ap.write_text("# Operator approvals — write 'APPROVE <task-id>' on its own "
+                          "line to release an irreversible task.\n\n", encoding="utf-8")
+            return False
+        return re.search(rf"^APPROVE\s+{re.escape(t.id)}\s*$",
+                         ap.read_text(encoding="utf-8"), re.M) is not None
+
+    def awaiting_approval(self) -> list[Task]:
+        done = {t.id for t in self.m.tasks if t.status == "done"}
+        out = []
+        for t in self.m.tasks:
+            if (t.status == "pending" and t.requires_approval and not self.approved(t)
+                    and all(d in done for d in t.depends_on)):
+                out.append(t)
+        return out
+
     # ---- scheduling -----------------------------------------------------------
     def claim(self, background: bool, fast_only: bool = False) -> Task | None:
-        """Atomically pick a dispatchable task and mark it claimed."""
+        """Atomically pick a dispatchable task and mark it claimed.
+        NB: ledger() takes self.lock too, so ledger events are emitted only after
+        the lock is released (self.lock is not reentrant)."""
+        approval_events: list[tuple[str, str]] = []
+        picked: Task | None = None
         with self.lock:
             done = {t.id for t in self.m.tasks if t.status == "done"}
             for t in self.m.tasks:
@@ -637,10 +679,20 @@ class Conductor:
                     continue
                 if fast_only and t.tier != "haiku":
                     continue
-                if all(d in done for d in t.depends_on):
-                    t.status = "claimed"
-                    return t
-        return None
+                if not all(d in done for d in t.depends_on):
+                    continue
+                if not self.approved(t):
+                    if "awaiting operator approval" not in t.note:
+                        t.note = ("awaiting operator approval (memory/APPROVALS.md: "
+                                  f"'APPROVE {t.id}')")
+                        approval_events.append((t.id, t.note))
+                    continue
+                t.status = "claimed"
+                picked = t
+                break
+        for tid, note in approval_events:
+            self.ledger(f"APPROVAL NEEDED {tid}", note)
+        return picked
 
     def dispatchable(self, background: bool) -> Task | None:
         """Read-only view (used by reports)."""
@@ -650,6 +702,47 @@ class Conductor:
                     and all(d in done for d in t.depends_on)):
                 return t
         return None
+
+    def regression_sweep(self) -> None:
+        """After every merge, re-run the checks of ALL previously-done tasks against
+        the advanced mission branch. A later merge that breaks an earlier gate
+        REOPENS that task (with one repair attempt). This is what keeps 'done'
+        meaning done for the whole mission, not just at the moment of merge."""
+        if not self.use_git:
+            return
+        prior = [x for x in self.m.tasks if x.status == "done" and x.checks]
+        if not prior:
+            return
+        if not self.sweeplock.acquire(blocking=False):
+            return                       # a sweep is already running; next merge re-sweeps
+        try:
+            wt = WORKTREES / f"{self.m.name}-gates"
+            with self.gitlock:
+                if not wt.exists():
+                    r = git(self.m.repo, "worktree", "add", "--detach", str(wt), self.branch)
+                    if r.returncode != 0:
+                        self.ledger("GATES ERROR", r.stdout[-300:])
+                        return
+                else:
+                    git(wt, "checkout", "--force", "--detach", self.branch)
+            reopened = []
+            for x in prior:
+                for c in x.checks:
+                    r = sh(["bash", "-lc", c], cwd=wt, timeout=900)
+                    if r.returncode != 0:
+                        with self.lock:
+                            x.status = "pending"
+                            x.attempts = min(x.attempts, x.max_attempts - 1)
+                            x.note = f"REGRESSION: gate broke after a later merge: {c}"
+                        self.log_failure(x, "regression", f"$ {c}\n{r.stdout[-500:]}")
+                        reopened.append(x.id)
+                        break
+            if reopened:
+                self.ledger("REGRESSION", "reopened: " + ", ".join(reopened))
+            else:
+                self.ledger("GATES", f"regression sweep clean ({len(prior)} prior tasks)")
+        finally:
+            self.sweeplock.release()
 
     def all_terminal(self) -> bool:
         return all(t.status in ("done", "failed", "blocked", "merge-conflict")
@@ -669,6 +762,37 @@ class Conductor:
             self.ledger(f"FAST-LANE {t.id}", "picked up by the parallel fast worker")
             self.run_task(t)
 
+    # ---- compounding memory ---------------------------------------------------
+    def distill_lessons(self) -> None:
+        """End-of-mission: distill the ledger + failure memory into a few reusable
+        lessons in memory/LESSONS.md — the mechanism that makes mission N+1 start
+        smarter than mission N (the 'do not relearn these' file)."""
+        if not any(t.attempts for t in self.m.tasks):
+            return
+        def tail(p: Path, n: int) -> str:
+            return p.read_text(encoding="utf-8")[-n:] if p.exists() else ""
+        prompt = (
+            "You are the mission historian. From the records below, distill 3-8 numbered "
+            "LESSONS for future missions in this repository: reusable facts, gotchas, "
+            "commands that work, approaches that are proven dead. One line each, "
+            "imperative, general (no mission-specific trivia). Respond with ONLY the "
+            f"numbered list.\n\nLEDGER (tail):\n{tail(MEMORY / 'LEDGER.md', 6000)}\n\n"
+            f"FAILURE MEMORY (tail):\n{tail(MEMORY / 'FAILURES.md', 4000)}"
+        )
+        out = self.run_engine(prompt, "haiku", self.m.repo, 10, "lessons", stall_min=8).strip()
+        lines = [ln.strip() for ln in out.splitlines()
+                 if re.match(r"^\d+[.)]\s+\S", ln.strip())][:8]
+        if not lines:
+            return
+        p = MEMORY / "LESSONS.md"
+        with self.lock:
+            if not p.exists():
+                p.write_text("# Lessons — distilled at mission end. Read during the start "
+                             "ritual; do not relearn these.\n\n", encoding="utf-8")
+            with p.open("a", encoding="utf-8") as f:
+                f.write(f"## {now()} · mission {self.m.name}\n" + "\n".join(lines) + "\n\n")
+        self.ledger("LESSONS", f"{len(lines)} lessons distilled to memory/LESSONS.md")
+
     # ---- reporting ----------------------------------------------------------
     def report(self, final: bool = False) -> Path:
         counts: dict[str, int] = {}
@@ -684,6 +808,10 @@ class Conductor:
             "\n## Tasks\n| id | status | attempts | note |\n|---|---|---|---|",
         ]
         lines += [f"| {t.id} | {t.status} | {t.attempts} | {t.note} |" for t in self.m.tasks]
+        waiting = self.awaiting_approval()
+        if waiting:
+            lines += ["\n**AWAITING OPERATOR APPROVAL** (write `APPROVE <id>` into "
+                      "`memory/APPROVALS.md`): " + ", ".join(t.id for t in waiting)]
         nxt = self.dispatchable(False)
         lines += [f"\n**Planned next:** {nxt.id + ' — ' + nxt.title if nxt else 'nothing pending'}"]
         try:
@@ -727,6 +855,14 @@ class Conductor:
                 if self.all_terminal():
                     self.ledger("MISSION COMPLETE", "no pending tasks remain")
                     break
+                # Dispatchable-but-unapproved tasks: hold the mission open for the
+                # operator's countersign instead of treating it as a stall.
+                waiting = self.awaiting_approval()
+                if waiting:
+                    self.current = ("waiting for operator approval: "
+                                    + ", ".join(t.id for t in waiting))
+                    time.sleep(60)
+                    continue
                 # Pending tasks exist but none are dispatchable: dependencies failed.
                 if self.m.auto_plan and not self.replanned:
                     self.replanned = True
@@ -737,9 +873,15 @@ class Conductor:
                 self.ledger("STALLED", self.current + " — ending early rather than idling")
                 break
         except KeyboardInterrupt:
+            self.interrupted = True
             self.ledger("INTERRUPTED", "operator stopped the mission")
         finally:
             self.stopping.set()
+            if not self.interrupted:
+                try:
+                    self.distill_lessons()
+                except Exception as e:                      # lessons are best-effort
+                    self.ledger("LESSONS ERROR", str(e)[:200])
             self.current = "mission ended"
             self.write_state()
             p = self.report(final=True)

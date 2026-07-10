@@ -189,8 +189,15 @@ permanently resident. Default GPU wired limit is raised to 448 GB by the install
 - **Connectors** — MCP: DuckDB data lake, Postgres/Supabase (self-hosted), filesystem, git.
 - **Subagents** — `researcher`, `developer`, `auditor`, `adversary` for both engines.
 - **Memory** — append-only `memory/LEDGER.md` + `memory/STATE.md` snapshot +
-  `memory/FAILURES.md` (approaches that failed and why — read before every attempt),
-  plain text, the single source of truth across runs.
+  `memory/FAILURES.md` (approaches that failed and why — read before every attempt) +
+  `memory/LESSONS.md` (distilled at mission end, read at every start — mission N+1
+  starts smarter than mission N), plain text, the single source of truth across runs.
+- **Regression sweeps** — after every merge, ALL previously-done tasks' checks re-run
+  against the advanced mission branch; a later merge that breaks an earlier gate
+  reopens that task. Done stays done.
+- **Operator countersign** — tasks marked `requires_approval` (the planner assigns it
+  to irreversible work, which is always split dry-run → execute) hold until the
+  operator writes `APPROVE <id>` into `memory/APPROVALS.md`; reports surface the queue.
 - **Self-healing** — llama-swap health checks with automatic service restart, bounded
   retries, idle-time work queue, hourly `REPORT-*.md`, and a `FINAL-REPORT.md`.
 - **Long-horizon protocol** — `engines/shared/AUTONOMY.md`, loaded globally by both

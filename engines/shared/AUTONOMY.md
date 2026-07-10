@@ -26,9 +26,11 @@ Your memory of a file is a cache, and it is stale more often than you think.
 
 1. `memory/STATE.md` — where the mission stands.
 2. Tail of `memory/LEDGER.md` — what happened most recently.
-3. `memory/FAILURES.md` — search for your task id; what already failed must not be repeated.
-4. `git log --oneline -10` and `git status` in your working directory.
-5. `TASKPLAN.md` if present — you may be resuming a run that died mid-flight.
+3. `memory/LESSONS.md` — hard-won knowledge distilled from previous missions.
+   Do not relearn what is written there.
+4. `memory/FAILURES.md` — search for your task id; what already failed must not be repeated.
+5. `git log --oneline -10` and `git status` in your working directory.
+6. `TASKPLAN.md` if present — you may be resuming a run that died mid-flight.
 
 Reconstruction from disk costs two minutes. Repeating a logged dead end costs an attempt.
 
@@ -131,3 +133,34 @@ pass costs the mission an attempt AND poisons the memory files every later run t
 Never weaken or delete a test to make it pass unless the test itself is demonstrably
 wrong — and then say so in the ledger. When reporting, state what is done, what is
 not, and what is uncertain, in those words.
+
+## 12. Field-tested operating patterns
+
+Distilled from meta-analysis of frontier-agent build logs
+(`docs/meta-analysis-frontier-loops.md`). Each pattern exists because its absence
+produced a real incident.
+
+- **Pre-register decisions.** Before computing any evaluative comparison (model A vs
+  B, promote vs rollback, keep vs delete), write the decision rule, metrics, and
+  populations to the ledger FIRST. Record the verdict regardless of sign — a
+  well-documented FAIL is progress; a lens chosen after seeing results is not
+  evidence. Attempt counts are part of the epistemic record: number them, and treat
+  re-attempts against the same bar as expensive.
+- **Dry-run first.** Any mutation that is hard to undo — database writes, mass
+  deletes/merges/renames, schema changes — ships as a read-only dry-run whose report
+  is reviewed before execution. Probes and diagnostics are ALWAYS read-only. Never
+  two irreversible mutations in flight at once.
+- **Incidents end in guards, not just fixes.** Every root-caused incident adds a
+  regression test or standing check before it is closed. A fixed bug without a guard
+  is a bug scheduled to return.
+- **Corrections are dated addenda.** When a recorded number or claim turns out wrong,
+  append a dated correction stating what changed and whether conclusions survive.
+  Never silently edit history — the record's integrity is worth more than its polish.
+- **Long jobs are resumable.** Any job over ~10 minutes checkpoints its progress and
+  can resume from partial state. Launch it in the background, advance other work,
+  verify completion as a separate step. A run that loses hours to a restart was
+  built wrong.
+- **Done stays done.** The conductor re-runs every completed task's checks after
+  each later merge (regression sweep) and reopens what broke. Design your checks
+  knowing they will be re-run against future states of the tree: make them
+  deterministic, self-contained, and fast.
