@@ -58,3 +58,9 @@ them.
 
 12. **Commit and push after every meaningful change** — to origin and to the local
     vault. The ledger (`memory/LEDGER.md`) records what and why.
+
+13. **Keep a session journal.** For any multi-step task, maintain
+    `memory/sessions/<session>.md` (DOING / DONE / NEXT / NOTES) and update it after
+    every meaningful step. Claude Code sessions get one automatically via hooks
+    (`bin/session-journal.js`); other surfaces create their own. After a compaction
+    or restart, the journal outranks recall.

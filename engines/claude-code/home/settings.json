@@ -49,5 +49,37 @@
                         "defaultMode":  "acceptEdits"
                     },
     "theme":  "dark",
+    "hooks":  {
+                  "SessionStart":  [
+                                       {
+                                           "hooks":  [
+                                                         {
+                                                             "command":  "node bin/session-journal.js start",
+                                                             "type":  "command"
+                                                         }
+                                                     ]
+                                       }
+                                   ],
+                  "SessionEnd":  [
+                                     {
+                                         "hooks":  [
+                                                       {
+                                                           "command":  "node bin/session-journal.js end",
+                                                           "type":  "command"
+                                                       }
+                                                   ]
+                                     }
+                                 ],
+                  "PreCompact":  [
+                                     {
+                                         "hooks":  [
+                                                       {
+                                                           "command":  "node bin/session-journal.js compact",
+                                                           "type":  "command"
+                                                       }
+                                                   ]
+                                     }
+                                 ]
+              },
     "model":  "qwen3-coder-30b-q4"
 }

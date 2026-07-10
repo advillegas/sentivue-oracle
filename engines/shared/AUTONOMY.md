@@ -24,6 +24,11 @@ Your memory of a file is a cache, and it is stale more often than you think.
 
 ## 2. Session start ritual (always, before the first edit)
 
+0. Your **session journal** — `memory/sessions/<session>.md`. Claude Code sessions
+   get one created and re-injected automatically (start / resume / post-compaction);
+   every other surface creates its own at session start: copy the DOING / DONE /
+   NEXT / NOTES skeleton, named `<date>-<surface>-<topic>.md`. If a journal already
+   exists for this session, it outranks your recall of the conversation.
 1. `memory/STATE.md` — where the mission stands.
 2. Tail of `memory/LEDGER.md` — what happened most recently.
 3. `memory/LESSONS.md` — hard-won knowledge distilled from previous missions.
@@ -33,6 +38,13 @@ Your memory of a file is a cache, and it is stale more often than you think.
 6. `TASKPLAN.md` if present — you may be resuming a run that died mid-flight.
 
 Reconstruction from disk costs two minutes. Repeating a logged dead end costs an attempt.
+
+**Journal discipline (the anti-amnesia contract):** after every meaningful step,
+update the journal — one-line DOING, move finished items to DONE, keep NEXT
+current, record non-obvious decisions in NOTES. The journal is what makes a
+compaction or crash a non-event: the next context window reads it and continues
+as if nothing happened. A stale journal is worse than none — it is confident
+misinformation.
 
 ## 3. Plan first, and keep the plan honest
 
@@ -96,8 +108,11 @@ The same failure twice means the approach is wrong, not under-executed.
   Ask: measurably closer, or wandering?
 - Recognize context rot in yourself: contradicting your own notes, re-asking settled
   questions, forgetting the goal. The remedy is a clean checkpoint — commit, ledger
-  entry, TASKPLAN update — then finish the current step and stop. The conductor gives
-  the next run a fresh context; everything important must already be on disk.
+  entry, TASKPLAN update, session-journal update — then finish the current step and
+  stop. The conductor gives the next run a fresh context; everything important must
+  already be on disk.
+- After any compaction marker appears in your context, treat the session journal and
+  TASKPLAN.md as ground truth and your pre-compaction recall as suspect.
 
 ## 8. Failure memory
 

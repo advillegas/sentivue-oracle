@@ -43,6 +43,11 @@ Tier aliases are remapped per machine to whatever is actually installed
 - `memory/LEDGER.md` — append-only event log. After completing any meaningful unit of
   work, append: timestamp, what was done, files touched, decisions made, what's next.
   Never rewrite history; corrections are new entries.
+- `memory/sessions/<session>.md` — your **session journal**: DOING / DONE / NEXT /
+  NOTES, updated after every meaningful step. Claude Code sessions get one wired in
+  automatically (created, re-injected on start/resume/compaction via hooks); every
+  other surface maintains its own. It is the session's continuity across context
+  loss — see the Autonomy Protocol's journal discipline.
 - These files are the single source of truth across sessions, engines, and missions.
   If context and ledger disagree, the ledger wins.
 
