@@ -34,6 +34,19 @@ node_modules/
 # machine-local toolchains (engines, llama binaries) — installed, never committed
 .tools/
 
+# engine RUNTIME state (config templates stay tracked: settings.json, CLAUDE.md, agents/)
+engines/claude-code/home/plugins/
+engines/claude-code/home/projects/
+engines/claude-code/home/sessions/
+engines/claude-code/home/backups/
+engines/claude-code/home/todos/
+engines/claude-code/home/statsig/
+engines/claude-code/home/shell-snapshots/
+engines/claude-code/home/history.jsonl
+engines/claude-code/home/.claude.json*
+engines/claude-code/home/skills/
+engines/opencode/xdg/opencode/skill/
+
 # secrets / local env
 .env
 connectors/supabase/.env

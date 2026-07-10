@@ -8,6 +8,7 @@
 
 mod data;
 mod engine;
+mod launchpad;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -17,6 +18,7 @@ use engine::{EngineKind, Event, RunHandle};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
+    Launch,
     Chat,
     Missions,
     Models,
@@ -55,7 +57,7 @@ impl DeskApp {
         let root = data::find_root();
         let mut app = Self {
             root,
-            tab: Tab::Chat,
+            tab: Tab::Launch,
             engine_kind: EngineKind::Claude,
             input: String::new(),
             messages: vec![ChatMsg {
@@ -141,6 +143,64 @@ impl DeskApp {
     }
 
     // ---------------- panels ----------------
+
+    fn launch_ui(&mut self, ui: &mut egui::Ui) {
+        let healthy = self.models.as_ref().map(|m| m.healthy).unwrap_or(false);
+        let engines = launchpad::engines_ready(&self.root);
+        let serving = launchpad::serving_ready(&self.root);
+        let models = launchpad::models_present(&self.root);
+
+        ui.add_space(8.0);
+        ui.heading("SentiVue Oracle — the whole platform from here");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let dot = |ok: bool| if ok { egui::Color32::from_rgb(63, 185, 80) } else { egui::Color32::from_rgb(248, 81, 73) };
+            ui.colored_label(dot(healthy), "●"); ui.label("serving");
+            ui.separator();
+            ui.colored_label(dot(engines), "●"); ui.label("engines");
+            ui.separator();
+            ui.colored_label(dot(models), "●"); ui.label("models");
+        });
+        ui.add_space(10.0);
+
+        if !engines || !serving {
+            ui.label("First-time setup installs the engines and serving toolchain (one time):");
+            if ui.button("⚙  Run first-time setup").clicked() {
+                launchpad::first_time_setup(&self.root);
+            }
+            ui.add_space(8.0);
+            ui.separator();
+        }
+        if !models {
+            ui.label("No models downloaded yet (profile-aware, resumable):");
+            if ui.button("⇩  Download models").clicked() {
+                launchpad::download_models_window(&self.root);
+            }
+            ui.add_space(8.0);
+            ui.separator();
+        }
+
+        egui::Grid::new("launch_grid").num_columns(2).spacing([14.0, 12.0]).show(ui, |ui| {
+            if healthy {
+                if ui.button("■  Stop model serving").clicked() { launchpad::serve(&self.root, false); }
+            } else if ui.button("▶  Start model serving").clicked() {
+                launchpad::serve(&self.root, true);
+            }
+            if ui.button("⌨  IDE (Cursor-like, local models)").clicked() { launchpad::open_ide(&self.root); }
+            ui.end_row();
+            if ui.button("✦  Claude Code session").clicked() { launchpad::claude_session(&self.root); }
+            if ui.button("✦  OpenCode session").clicked() { launchpad::opencode_session(&self.root); }
+            ui.end_row();
+            if ui.button("⇄  Vault sync").clicked() { launchpad::vault_sync_window(&self.root); }
+            if ui.button("☷  Envoy / network queue").clicked() { launchpad::envoy_window(&self.root); }
+            ui.end_row();
+        });
+
+        ui.add_space(12.0);
+        ui.separator();
+        ui.label("Chat in the next tab talks to the engines directly; Missions shows the");
+        ui.label("autonomous loop with one-click approvals. Everything runs on local models.");
+    }
 
     fn chat_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -295,6 +355,7 @@ impl eframe::App for DeskApp {
             ui.horizontal(|ui| {
                 ui.heading("SentiVue Oracle");
                 ui.separator();
+                ui.selectable_value(&mut self.tab, Tab::Launch, "Launch");
                 ui.selectable_value(&mut self.tab, Tab::Chat, "Chat");
                 ui.selectable_value(&mut self.tab, Tab::Missions, "Missions");
                 ui.selectable_value(&mut self.tab, Tab::Models, "Models");
@@ -310,6 +371,7 @@ impl eframe::App for DeskApp {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
+            Tab::Launch => self.launch_ui(ui),
             Tab::Chat => self.chat_ui(ui),
             Tab::Missions => self.missions_ui(ui),
             Tab::Models => self.models_ui(ui),

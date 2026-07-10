@@ -45,6 +45,11 @@ switch ($Cmd) {
     }
     "desk" {
         $bin = Join-Path $Root "desk\target\release\oracle-desk.exe"
+        $prebuilt = Join-Path $Root "desk\prebuilt\oracle-desk-windows-x64.exe"
+        if ((-not (Test-Path $bin)) -and (Test-Path $prebuilt)) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $bin) | Out-Null
+            Copy-Item $prebuilt $bin -Force
+        }
         if (-not (Test-Path $bin)) {
             if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
                 Write-Host "==> installing rust (one time, winget)"

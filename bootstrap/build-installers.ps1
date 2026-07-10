@@ -19,6 +19,20 @@ $zipball = Join-Path $OutDir "payload.zip"
 git archive --format=tar.gz --prefix=sentivue-oracle/ -o $tarball $Version
 git archive --format=zip    --prefix=sentivue-oracle/ -o $zipball $Version
 
+# Embed the prebuilt desk exe in the Windows payload: the installer then gives the
+# user ONE executable that launches the entire platform - no build step needed.
+$deskExe = Join-Path $Root "desk\target\release\oracle-desk.exe"
+if (Test-Path $deskExe) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $z = [System.IO.Compression.ZipFile]::Open($zipball, "Update")
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+        $z, $deskExe, "sentivue-oracle/desk/prebuilt/oracle-desk-windows-x64.exe") | Out-Null
+    $z.Dispose()
+    Write-Host "==> embedded prebuilt oracle-desk.exe in the Windows payload"
+} else {
+    Write-Host "==> NOTE: no prebuilt desk exe (desk\target\release) - Windows installs will build on first run"
+}
+
 # ============================== macOS .command ==============================
 $macLines = @(
 '#!/bin/bash'
@@ -105,17 +119,31 @@ try {
     } else {
         Write-Host "==> git not found - vault can be set up later: bin\oracle.ps1 vault init"
     }
+    # The ONE executable: place the prebuilt desk app and point the shortcut at it.
+    $deskBin = Join-Path $dest "desk\target\release\oracle-desk.exe"
+    $prebuilt = Join-Path $dest "desk\prebuilt\oracle-desk-windows-x64.exe"
+    if ((Test-Path $prebuilt) -and -not (Test-Path $deskBin)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $deskBin) | Out-Null
+        Copy-Item $prebuilt $deskBin -Force
+        Write-Host "==> oracle-desk.exe installed (the platform launcher)"
+    }
     try {
         $ws = New-Object -ComObject WScript.Shell
         $desk = [Environment]::GetFolderPath("Desktop")
         $lnk = $ws.CreateShortcut((Join-Path $desk "SentiVue Oracle.lnk"))
-        $lnk.TargetPath = "powershell.exe"
-        $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -File ""$dest\bin\oracle.ps1"" menu"
+        if (Test-Path $deskBin) {
+            $lnk.TargetPath = $deskBin
+            $lnk.Arguments = ""
+            $lnk.IconLocation = "$deskBin,0"
+        } else {
+            $lnk.TargetPath = "powershell.exe"
+            $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -File ""$dest\bin\oracle.ps1"" menu"
+            $lnk.IconLocation = "$env:SystemRoot\System32\imageres.dll,73"
+        }
         $lnk.WorkingDirectory = $dest
-        $lnk.IconLocation = "$env:SystemRoot\System32\imageres.dll,73"
         $lnk.Description = "SentiVue Oracle - self-contained development ecosystem"
         $lnk.Save()
-        Write-Host "==> desktop shortcut created: SentiVue Oracle"
+        Write-Host "==> desktop shortcut created: SentiVue Oracle (one-click platform)"
     } catch { Write-Host "==> desktop shortcut skipped ($($_.Exception.Message))" }
     # ---- hardware-adaptive model profile (any machine installs properly) ----
     $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
