@@ -105,6 +105,18 @@ try {
     } else {
         Write-Host "==> git not found - vault can be set up later: bin\oracle.ps1 vault init"
     }
+    try {
+        $ws = New-Object -ComObject WScript.Shell
+        $desk = [Environment]::GetFolderPath("Desktop")
+        $lnk = $ws.CreateShortcut((Join-Path $desk "SentiVue Oracle.lnk"))
+        $lnk.TargetPath = "powershell.exe"
+        $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -File ""$dest\bin\oracle.ps1"" menu"
+        $lnk.WorkingDirectory = $dest
+        $lnk.IconLocation = "$env:SystemRoot\System32\imageres.dll,73"
+        $lnk.Description = "SentiVue Oracle - self-contained development ecosystem"
+        $lnk.Save()
+        Write-Host "==> desktop shortcut created: SentiVue Oracle"
+    } catch { Write-Host "==> desktop shortcut skipped ($($_.Exception.Message))" }
     Write-Host ""
     Write-Host "Optional: pre-download models now (for the Mac; resumable any time later):"
     Write-Host "  1) full ~700 GB    2) coder ~315 GB    3) minimal ~40 GB    ENTER) skip"

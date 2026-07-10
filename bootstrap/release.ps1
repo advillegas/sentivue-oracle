@@ -43,10 +43,13 @@ Self-contained development ecosystem - offline agentic workstation.
 
 - **Mac appliance:** ``SentiVue-Oracle-Installer-$Version.command`` - double-click;
   a Terminal wizard prompts you through location, tools, model profile, downloads,
-  and verification. First launch of a downloaded file: right-click -> Open
-  (macOS Gatekeeper), once.
+  and verification, and leaves a **SentiVue Oracle desktop shortcut** (menu: IDE,
+  console, engines, envoy, status). First launch of a downloaded file:
+  right-click -> Open (macOS Gatekeeper), once.
 - **Windows node:** ``SentiVue-Oracle-Setup-$Version.cmd`` - double-click; a console
-  wizard prompts through location, git vault setup, and optional model pre-download.
+  wizard walks through location, git vault, optional model pre-download, and leaves
+  a **SentiVue Oracle desktop shortcut** (menu: vault, models, finish). If
+  SmartScreen interposes: More info -> Run anyway (unsigned installer).
 
 ## Plain archives (for scripted installs)
 

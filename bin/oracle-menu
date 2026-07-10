@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# oracle-menu — the desktop shortcut's landing menu on the Mac appliance.
+set -uo pipefail
+SELF="${BASH_SOURCE[0]}"
+[[ -L "$SELF" ]] && SELF="$(readlink -f "$SELF")"
+ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
+cd "$ROOT"
+export PATH="$ROOT/bin:$PATH"
+
+while true; do
+  echo
+  echo "==================== SentiVue Oracle ===================="
+  echo "  appliance - $ROOT"
+  echo "========================================================="
+  echo "  1) IDE (VSCodium + local models)     2) mission console (web)"
+  echo "  3) Claude Code session               4) OpenCode session"
+  echo "  5) status                            6) doctor"
+  echo "  7) envoy (network window)            8) vault inventory"
+  echo "  q) quit"
+  read -r -p "choose: " c
+  case "${c:-}" in
+    1) bash connectors/ide/setup-ide.sh launch || true ;;
+    2) echo "console at http://127.0.0.1:8800 (Ctrl-C returns to this menu)"
+       ( sleep 2 && open "http://127.0.0.1:8800" ) >/dev/null 2>&1 &
+       uv run --project env python conductor/console.py || true ;;
+    3) bash engines/claude-code/launch.sh || true ;;
+    4) bash engines/opencode/launch.sh || true ;;
+    5) bash serving/service.sh status || true ;;
+    6) bash bootstrap/doctor.sh || true ;;
+    7) bash bootstrap/envoy.sh || true ;;
+    8) bash bootstrap/vault.sh list || true ;;
+    q|Q) exit 0 ;;
+    *) ;;
+  esac
+done

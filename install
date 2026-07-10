@@ -125,6 +125,16 @@ if [[ $NO_MODELS -eq 0 ]]; then
   bash bootstrap/verify-offline.sh || warn "verify reported failures — run 'oracle doctor' for diagnosis"
 fi
 
+# ---------------------------------------------------------------- desktop shortcut
+if [[ -d "$HOME/Desktop" ]]; then
+  cat > "$HOME/Desktop/SentiVue Oracle.command" <<EOF
+#!/bin/bash
+exec bash "$ROOT/bin/oracle-menu"
+EOF
+  chmod +x "$HOME/Desktop/SentiVue Oracle.command"
+  ok "desktop shortcut created: SentiVue Oracle"
+fi
+
 # ---------------------------------------------------------------- done
 say "Install complete"
 cat <<EOF
