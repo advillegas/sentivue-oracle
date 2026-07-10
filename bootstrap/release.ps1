@@ -29,15 +29,29 @@ git archive --format=tar.gz --prefix=sentivue-oracle/ -o $tarball $Version
 git archive --format=zip    --prefix=sentivue-oracle/ -o $zipball $Version
 Write-Host ("==> assets: {0:N1} MB tar.gz, {1:N1} MB zip" -f ((Get-Item $tarball).Length/1MB), ((Get-Item $zipball).Length/1MB))
 
+# ---- build double-clickable installers ------------------------------------------
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\build-installers.ps1") `
+    -Version $Version -OutDir $staging
+$macInstaller = Join-Path $staging "SentiVue-Oracle-Installer-$Version.command"
+$winInstaller = Join-Path $staging "SentiVue-Oracle-Setup-$Version.cmd"
+
 # ---- create (or reuse) the release ---------------------------------------------
 $body = @"
 Self-contained development ecosystem - offline agentic workstation.
 
-**Mac appliance:** download the .tar.gz, then:
-``````
-tar -xzf sentivue-oracle-$Version.tar.gz && cd sentivue-oracle && bash install
-``````
-**Windows node:** download the .zip, unpack, then ``bin\oracle.ps1`` (vault / models / finish).
+## Installers (double-click, guided - no commands needed)
+
+- **Mac appliance:** ``SentiVue-Oracle-Installer-$Version.command`` - double-click;
+  a Terminal wizard prompts you through location, tools, model profile, downloads,
+  and verification. First launch of a downloaded file: right-click -> Open
+  (macOS Gatekeeper), once.
+- **Windows node:** ``SentiVue-Oracle-Setup-$Version.cmd`` - double-click; a console
+  wizard prompts through location, git vault setup, and optional model pre-download.
+
+## Plain archives (for scripted installs)
+
+- ``sentivue-oracle-$Version.tar.gz`` (Mac): ``tar -xzf ... && cd sentivue-oracle && bash install``
+- ``sentivue-oracle-$Version.zip`` (Windows): unpack, then ``bin\oracle.ps1``
 
 Docs in README.md. Verify pins in VERSIONS.lock before first bootstrap.
 "@
@@ -55,9 +69,11 @@ if (-not $rel) {
 }
 
 # ---- upload assets --------------------------------------------------------------
-foreach ($f in @($tarball, $zipball)) {
+foreach ($f in @($macInstaller, $winInstaller, $tarball, $zipball)) {
     $name = Split-Path -Leaf $f
-    $ctype = "application/gzip"; if ($name.EndsWith(".zip")) { $ctype = "application/zip" }
+    $ctype = "application/octet-stream"
+    if ($name.EndsWith(".gz"))  { $ctype = "application/gzip" }
+    if ($name.EndsWith(".zip")) { $ctype = "application/zip" }
     $up = "https://uploads.github.com/repos/$repo/releases/$($rel.id)/assets?name=$name"
     Invoke-RestMethod -Method Post -Uri $up -Headers $headers -ContentType $ctype -InFile $f | Out-Null
     Write-Host "==> uploaded $name"

@@ -79,20 +79,24 @@ memory/         plain-text ledger + state (runtime, gitignored)
 
 ## Getting it onto the Mac (privacy-friendly)
 
-**Downloadable installers** live on the repo's [Releases page]
-(https://github.com/advillegas/sentivue-oracle/releases) — built with `git archive`
-(tracked files only, always clean):
+**Double-click installers** live on the repo's [Releases page]
+(https://github.com/advillegas/sentivue-oracle/releases) — no commands needed:
 
-```bash
-gh release download v0.1.0 -R advillegas/sentivue-oracle -p 'sentivue-oracle-*.tar.gz'
-tar -xzf sentivue-oracle-*.tar.gz && cd sentivue-oracle && bash install
-```
+- **Mac:** `SentiVue-Oracle-Installer-<ver>.command` — double-click; a Terminal
+  wizard prompts through install location → tools → model profile (full/coder/
+  minimal) → downloads → verification. Downloaded `.command` files need one
+  right-click → Open (Gatekeeper) the first time.
+- **Windows:** `SentiVue-Oracle-Setup-<ver>.cmd` — double-click; a console wizard
+  prompts through location → git vault setup → optional model pre-download.
 
-(`.zip` asset for the Windows node; the repo is private, so downloads authenticate
-via `gh` or a signed-in browser. New releases: `bootstrap/release.ps1 -Version vX.Y.Z`.)
+Both are self-extracting (the full repo rides inside, built from `git archive` so
+they're always clean) and every step is resumable. Plain `.tar.gz`/`.zip` archives
+sit alongside for scripted installs; the repo is private, so downloads authenticate
+via `gh release download` or a signed-in browser. Publishing a new version:
+`bootstrap/release.ps1 -Version vX.Y.Z`.
 
-Alternatively: `make dist` produces the same clean tarball locally for USB/AirDrop —
-no cloud required at all — or plain `git clone`.
+Fully offline alternative: `make dist` produces the tarball locally for USB/AirDrop,
+or plain `git clone` from the vault.
 
 ### Pre-downloading the models on Windows (optional, saves a night)
 
