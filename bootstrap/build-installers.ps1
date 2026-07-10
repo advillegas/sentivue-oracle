@@ -78,8 +78,11 @@ try {
     $default = Join-Path $env:USERPROFILE "sentivue-oracle"
     $dest = Read-Host "Press ENTER to install to $default (or type another path)"
     if (-not $dest) { $dest = $default }
+    $updateOnly = $false
     if (Test-Path (Join-Path $dest "README.md")) {
-        Write-Host "==> existing installation found - files will be updated in place"
+        Write-Host "==> existing installation found - updating files in place"
+        $again = Read-Host "Re-run full setup too (profile/models/IDE)? Usually not needed. [y/N]"
+        if ($again -notmatch "^[Yy]") { $updateOnly = $true }
     }
     Write-Host "==> unpacking..."
     $raw = [IO.File]::ReadAllText($env:ORACLE_SETUP_SELF)

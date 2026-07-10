@@ -1,0 +1,49 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Oracle: serve models (auto)",
+      "type": "shell",
+      "windows": { "command": "powershell -NoProfile -ExecutionPolicy Bypass -File serving/serve-windows.ps1 start" },
+      "osx": { "command": "bash serving/service.sh start" },
+      "runOptions": { "runOn": "folderOpen" },
+      "presentation": { "reveal": "silent", "panel": "dedicated" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Oracle: status",
+      "type": "shell",
+      "windows": { "command": "powershell -NoProfile -ExecutionPolicy Bypass -File serving/serve-windows.ps1 status" },
+      "osx": { "command": "bash serving/service.sh status" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Oracle: run example mission (conductor)",
+      "type": "shell",
+      "windows": { "command": "python conductor/conductor.py run conductor/missions/example.toml --engine claude --hours 24" },
+      "osx": { "command": "uv run --project env python conductor/conductor.py run conductor/missions/example.toml --engine claude --hours 24" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Oracle: envoy network window",
+      "type": "shell",
+      "windows": { "command": "notepad memory/NET-REQUESTS.md" },
+      "osx": { "command": "bash bootstrap/envoy.sh" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Oracle: vault sync",
+      "type": "shell",
+      "windows": { "command": "powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap/vault.ps1 sync" },
+      "osx": { "command": "bash bootstrap/vault.sh sync" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Oracle: download models",
+      "type": "shell",
+      "windows": { "command": "powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap/download-models.ps1" },
+      "osx": { "command": "bash bootstrap/download-models.sh" },
+      "problemMatcher": []
+    }
+  ]
+}
