@@ -12,6 +12,7 @@ while true; do
   echo "==================== SentiVue Oracle ===================="
   echo "  appliance - $ROOT"
   echo "========================================================="
+  echo "  0) desktop app (native)              d) doctor"
   echo "  1) IDE (VSCodium + local models)     2) mission console (web)"
   echo "  3) Claude Code session               4) OpenCode session"
   echo "  5) status                            6) doctor"
@@ -19,6 +20,8 @@ while true; do
   echo "  q) quit"
   read -r -p "choose: " c
   case "${c:-}" in
+    0) bash bin/oracle desk || true ;;
+    d|D) bash bootstrap/doctor.sh || true ;;
     1) bash connectors/ide/setup-ide.sh launch || true ;;
     2) echo "console at http://127.0.0.1:8800 (Ctrl-C returns to this menu)"
        ( sleep 2 && open "http://127.0.0.1:8800" ) >/dev/null 2>&1 &

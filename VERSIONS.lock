@@ -32,6 +32,8 @@ GITEA_BREW_FORMULA=gitea                # optional vault UI; brew pin after inst
 VSCODIUM_CASK=vscodium                  # IDE; Continue + Roo Code .vsix versions are
                                         # resolved at install from open-vsx (latest)
                                         # and recorded in incoming/PROVENANCE.md
+RUST_BREW_FORMULA=rust                  # builds desk/ (oracle-desk frontend); pin after install
+                                        # crate pins live in desk/Cargo.toml (eframe 0.29)
 
 # --- supabase (docker images; verified on Docker Hub 2026-07-09, all arm64) ---
 SUPABASE_POSTGRES_IMAGE=supabase/postgres:15.8.1.135

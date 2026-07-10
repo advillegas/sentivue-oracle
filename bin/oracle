@@ -26,6 +26,14 @@ case "$cmd" in
   envoy)      exec bash bootstrap/envoy.sh "$@" ;;
   console)    exec uv run --project env python conductor/console.py ;;
   ide)        exec bash connectors/ide/setup-ide.sh "${1:-launch}" ;;
+  desk)
+    BIN="desk/target/release/oracle-desk"
+    if [[ ! -x "$BIN" ]]; then
+      command -v cargo >/dev/null || { echo "==> installing rust (one time)"; brew install rust && brew pin rust; }
+      echo "==> building oracle-desk (one time, ~2 min)"
+      ( cd desk && cargo build --release )
+    fi
+    exec "$BIN" ;;
   mission)    # oracle mission <mission.toml> [claude|opencode] [hours]
     m="${1:?usage: oracle mission <mission.toml> [engine] [hours]}"
     eng="${2:-claude}"; hrs="${3:-24}"
@@ -46,7 +54,8 @@ oracle — offline agentic workstation
                  oracle state            oracle report        oracle ledger [n]
   health         oracle verify           oracle doctor
   privacy        oracle harden [off]     oracle envoy [--queue]   controlled fetch-only network window
-  ui             oracle ide [install]    Cursor-like IDE (VSCodium + Continue + Roo, local models)
+  ui             oracle desk             native desktop app (Rust, chat + missions + models + vault)
+                 oracle ide [install]    Cursor-like IDE (VSCodium + Continue + Roo, local models)
                  oracle console          mission control at http://127.0.0.1:8800
                  oracle vault ui install|start|stop|status        GitHub-like UI at http://127.0.0.1:3300
   git vault      oracle vault init|sync|new|clone|list|backup     (offline private remote)
