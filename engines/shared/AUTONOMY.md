@@ -270,6 +270,18 @@ countersign is mandatory for anything that changes doctrine, skills, or the
 conductor; and an amendment whose criterion comes back NOT-MET is reverted, not
 defended.
 
+**Founding-memory growth (M4/M5).** The memory system is layered: Layer 0 is the
+seed brain (`engines/shared/SEED-BRAIN.md` — generalized, ID-stable, portable);
+Layer 1 is `memory/LESSONS.md` (this machine's distilled experience). The
+historian tags each distilled lesson `[seed: <ID>]` when it instantiates an
+existing principle, or `[CANDIDATE-PRINCIPLE: <series>]` when it generalizes
+beyond this repository; the retrospective promotes worthy candidates into the
+seed brain's NEW PRINCIPLES section (next free ID, `[strong]`, failure kernel
+kept, specifics removed) through the same countersigned amendment flow.
+Contradictions become ERRATA entries, never edits. This is how new issues and
+their solutions become permanent, generalized principles instead of local
+folklore — the founding memory compounds from the platform's own incidents.
+
 ---
 
 ## Amendment Log

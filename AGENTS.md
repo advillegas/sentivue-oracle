@@ -52,9 +52,13 @@ them.
     next machine and confuse small local models badly. (`serving/tiers.env` is the
     truth; `sync-models` regenerates everything downstream.)
 
-11. **Incidents end in guards.** Every root-caused failure adds a mechanical check
-    (doctor line, conductor rule, pre-commit guard, test) before it is closed.
-    A fix without a guard is a bug scheduled to return.
+11. **Incidents end in guards — and generalizable ones end in principles.** Every
+    root-caused failure adds a mechanical check (doctor line, conductor rule,
+    pre-commit guard, test) before it is closed. If the lesson generalizes beyond
+    this repository, append it to `engines/shared/SEED-BRAIN.md` under NEW
+    PRINCIPLES (next free ID in its series, `[strong]`, failure kernel kept,
+    project specifics removed) — founding memory grows from incidents; a fix
+    without a guard is a bug scheduled to return.
 
 12. **Commit and push after every meaningful change** — to origin and to the local
     vault. The ledger (`memory/LEDGER.md`) records what and why.

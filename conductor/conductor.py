@@ -259,6 +259,26 @@ def extract_result(engine: str, raw: str) -> str:
     return result if result else raw[-4000:]
 
 
+def seed_brain_index() -> str:
+    """Compact ID index of the seed brain (engines/shared/SEED-BRAIN.md) —
+    one line per principle — so distillation and retrospective prompts can
+    cite and extend the founding memory without loading the whole file (C5)."""
+    p = ROOT / "engines" / "shared" / "SEED-BRAIN.md"
+    if not p.exists():
+        return ""
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"\*\*([OALCEVGM]\d+)\.\*\*\s*`\[(\w+)\]`\s*(.+)", line)
+        if m:
+            out.append(f"{m.group(1)} [{m.group(2)}]: {m.group(3)[:90]}")
+    # compress rather than truncate: dropping the tail would drop the NEWEST
+    # promoted principles, which are the ones the loop must see
+    text = "\n".join(out)
+    if len(text) > 12000:
+        text = "\n".join(f"{ln[:70]}" for ln in out)
+    return text
+
+
 PLAN_CONTRACT = """Respond with STRICT JSON inside a single ```json fenced block: an array of
 3-10 task objects, each:
 {"id": "<kebab-slug>", "title": "<short>", "prompt": "<detailed, fully self-contained
@@ -951,8 +971,14 @@ class Conductor:
             "You are the mission historian. From the records below, distill 3-8 numbered "
             "LESSONS for future missions in this repository: reusable facts, gotchas, "
             "commands that work, approaches that are proven dead. One line each, "
-            "imperative, general (no mission-specific trivia). Respond with ONLY the "
-            f"numbered list.\n\nLEDGER (tail):\n{tail(MEMORY / 'LEDGER.md', 6000)}\n\n"
+            "imperative, general (no mission-specific trivia).\n"
+            "Tag every lesson: if it instantiates a seed-brain principle from the index "
+            "below, end it with ' [seed: <ID>]'; if it GENERALIZES beyond this repository "
+            "and no existing principle covers it, end it with ' [CANDIDATE-PRINCIPLE: "
+            "<series letter O/A/L/C/E/V/G/M>]' — the retrospective promotes candidates "
+            "into the founding memory. Respond with ONLY the numbered list.\n\n"
+            f"SEED-BRAIN INDEX:\n{seed_brain_index()}\n\n"
+            f"LEDGER (tail):\n{tail(MEMORY / 'LEDGER.md', 6000)}\n\n"
             f"FAILURE MEMORY (tail):\n{tail(MEMORY / 'FAILURES.md', 4000)}"
         )
         out = self.run_engine(prompt, "haiku", self.m.repo, 10, "lessons", stall_min=8).strip()
@@ -963,8 +989,13 @@ class Conductor:
         p = MEMORY / "LESSONS.md"
         with self.lock:
             if not p.exists():
-                p.write_text("# Lessons — distilled at mission end. Read during the start "
-                             "ritual; do not relearn these.\n\n", encoding="utf-8")
+                p.write_text(
+                    "# Lessons — Layer 1 runtime memory (this machine's distilled "
+                    "experience).\n# Layer 0 (founding memory) is engines/shared/"
+                    "SEED-BRAIN.md — stable principles with IDs.\n# Read during the "
+                    "start ritual; do not relearn these. Lessons tagged "
+                    "[CANDIDATE-PRINCIPLE] are\n# promoted into the seed brain by the "
+                    "retrospective's amendment flow.\n\n", encoding="utf-8")
             with p.open("a", encoding="utf-8") as f:
                 f.write(f"## {now()} · mission {self.m.name}\n" + "\n".join(lines) + "\n\n")
         self.ledger("LESSONS", f"{len(lines)} lessons distilled to memory/LESSONS.md")
@@ -1044,6 +1075,8 @@ class Conductor:
         friction = "\n".join(ln for ln in tail(MEMORY / "LEDGER.md", 8000).splitlines()
                              if "friction:" in ln.lower())[-1500:]
         amendments = tail(MEMORY / "AMENDMENTS.md", 4000)
+        candidates = "\n".join(ln for ln in tail(MEMORY / "LESSONS.md", 6000).splitlines()
+                               if "CANDIDATE-PRINCIPLE" in ln)[-1200:]
         tier = "opus" if TIER_MODEL["opus"] != TIER_MODEL["sonnet"] else "sonnet"
         date = dt.datetime.now().strftime("%Y%m%d")
         prompt = (
@@ -1058,6 +1091,9 @@ class Conductor:
             f"AGENT-REPORTED FRICTION (from ledger entries):\n{friction or '(none reported)'}\n\n"
             f"FAILURE MEMORY (tail):\n{tail(MEMORY / 'FAILURES.md', 3000)}\n\n"
             f"PRIOR AMENDMENTS AND THEIR SUCCESS CRITERIA:\n{amendments or '(none yet)'}\n\n"
+            f"CANDIDATE PRINCIPLES flagged by the historian:\n{candidates or '(none)'}\n\n"
+            f"SEED-BRAIN INDEX (founding memory, engines/shared/SEED-BRAIN.md):\n"
+            f"{seed_brain_index()}\n\n"
             "Produce:\n"
             "1. METRICS READING — what moved vs baseline and what it means (be skeptical; "
             "small samples prove little).\n"
@@ -1068,9 +1104,17 @@ class Conductor:
             "4. AMENDMENT PROPOSALS (0-3; propose NOTHING if the evidence is weak — "
             "protocol churn is itself a process failure). Each proposal targets exactly "
             "one file among: engines/shared/AUTONOMY.md, engines/shared/CONVENTIONS.md, "
-            "skills/*/SKILL.md, or a conductor default, and must be a small, precise "
-            "change with a MEASURABLE success criterion computable from the process "
-            "metrics above at the next retro.\n\n"
+            "engines/shared/SEED-BRAIN.md, skills/*/SKILL.md, or a conductor default, and "
+            "must be a small, precise change with a MEASURABLE success criterion "
+            "computable from the process metrics above at the next retro.\n"
+            "5. PRINCIPLE PROMOTIONS (0-2): incidents from THIS mission whose lesson "
+            "GENERALIZES beyond this repository (seed brain M4/M5). Formulate each exactly "
+            "like a seed-brain principle — project specifics removed, the failure kernel "
+            "kept, one imperative rule — and emit it as a proposal whose target is "
+            "engines/shared/SEED-BRAIN.md and whose change is: append under '## NEW "
+            "PRINCIPLES' the line '**<next free ID in its series>.** `[strong]` <text> "
+            "(incident: <mission/task>, " + date + ")'. Never renumber or edit existing "
+            "principles; if an incident CONTRADICTS one, propose an ERRATA entry instead.\n\n"
             "End with a single ```json block:\n"
             '{"verdicts": [{"id": "AMD-...", "verdict": "MET|NOT-MET|INSUFFICIENT-DATA", '
             '"evidence": "...", "action": "keep|revert|extend"}], '

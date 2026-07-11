@@ -352,6 +352,42 @@ Frontier-level capability is a property of the *system*, not the model: unlimite
 
 ---
 
+## NEW PRINCIPLES (appended by the learning loop)
+
+Founding memory grows here. Generalized principles promoted from this platform's
+OWN incidents (per M4/M5): distilled at mission retrospectives, proposed as
+amendments with the next free ID in the appropriate series, operator-
+countersigned, applied by the amendment mission, and cited like any seed
+principle. Confidence starts at `[strong]` (one incident, codified) and is
+upgraded to `[proven]` on recurrence; a principle contradicted by later
+evidence gets an erratum below, never a silent edit.
+
+**E18.** `[strong]` A config value you never saw take effect is a guess: tools ignore
+unknown keys silently. After writing config, verify the OBSERVABLE effect — the bound
+address, the loaded model, the actual limit. (incident: platform-build/serving — a
+yaml `listen:` key was really a CLI flag; the server sat exposed on 0.0.0.0, 2026-07-10)
+
+**E19.** `[strong]` Classify failures before counting them: an infrastructure failure
+recorded as a work failure poisons the failure memory with false negatives and burns
+retry budget on attempts the worker never got to make. Refund infra-caused attempts;
+heal the platform; retry bounded. (incident: platform-build/conductor — API 400s
+consumed all task attempts in seconds, 2026-07-10)
+
+**V14.** `[strong]` Smoke tests must use production-shaped payloads. A serving stack
+that answers a 10-token hello can be 100% unusable for its real workload; probe with
+the size, shape, and auth of real traffic before declaring it up. (incident:
+platform-build/serving — context split across parallel slots passed hello, rejected
+every agent session, 2026-07-10)
+
+**G10.** `[strong]` Check the pulse of every third-party dependency at pin time:
+archived repo, last release date, platform-specific builds present, remote file
+layout matching your fetch pattern. Two minutes of checking beats shipping a
+dependency discontinued months earlier. (incident: platform-build/ide — an extension
+was installed fresh two months after its project shut down; a model download pattern
+matched zero files, 2026-07-10)
+
+---
+
 ## ERRATA (append-only; per M6)
 
 Corrections and amendments to the principles above. Each entry: date, principle
