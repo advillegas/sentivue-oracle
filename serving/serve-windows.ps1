@@ -97,7 +97,10 @@ switch ($Cmd) {
                 # q8 KV cache halves context memory; requires flash attention
                 $kv = " -fa on --cache-type-k q8_0 --cache-type-v q8_0"
             }
-            $common = "--host 127.0.0.1 --port `${PORT} --jinja$gpu$kv"
+            # --cache-reuse: chunked KV prefix reuse so slightly-divergent prompts
+            # (growing agent conversations) keep their cached prefix (measured
+            # 115s cold vs 2s cached prefill on this box)
+            $common = "--host 127.0.0.1 --port `${PORT} --jinja --cache-reuse 256$gpu$kv"
             $ttl = 0
             switch ($r.Slot) {
                 "embed" { $cmdline = "$server $common -m $mp --embeddings --pooling last --ctx-size $ctx" }

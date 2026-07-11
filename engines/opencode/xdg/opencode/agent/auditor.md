@@ -1,7 +1,7 @@
 ---
 description: Verifies completed work against acceptance criteria after every developer task and before any merge. Read-only plus test execution; never fixes.
 mode: subagent
-model: oracle/qwen3-coder-30b-q4
+model: oracle/qwen2.5-coder-7b
 temperature: 0.2
 tools:
   write: false

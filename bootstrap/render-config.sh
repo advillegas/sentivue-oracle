@@ -37,9 +37,12 @@ logLevel: info
 
 macros:
   # If your llama.cpp build rejects "-fa on", change to "--flash-attn".
+  # --cache-reuse: chunked KV prefix reuse - growing agent conversations keep
+  # their cached prefix instead of re-prefilling every turn.
   common: >
     --host 127.0.0.1 --port ${PORT}
     --n-gpu-layers 999 -fa on --jinja
+    --cache-reuse 256
     --cache-type-k q8_0 --cache-type-v q8_0
 
 models:

@@ -13,8 +13,8 @@
                 "ANTHROPIC_MODEL":  "qwen3-coder-30b-q4",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL":  "qwen3-coder-30b-q4",
                 "ANTHROPIC_DEFAULT_SONNET_MODEL":  "qwen3-coder-30b-q4",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "qwen3-coder-30b-q4",
-                "ANTHROPIC_SMALL_FAST_MODEL":  "qwen3-coder-30b-q4"
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "qwen2.5-coder-7b",
+                "ANTHROPIC_SMALL_FAST_MODEL":  "qwen2.5-coder-7b"
             },
     "includeCoAuthoredBy":  false,
     "permissions":  {

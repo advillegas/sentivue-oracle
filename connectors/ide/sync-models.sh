@@ -108,7 +108,23 @@ pick_tier() {  # pick_tier <wanted> <slot-pref...>
 
 sonnet="$(pick_tier "$(tier_from_env SONNET_MODEL)" fast big)"
 opus="$(pick_tier "$(tier_from_env OPUS_MODEL)" big fast)"
-haiku="$(pick_tier "$(tier_from_env HAIKU_MODEL)" fast big)"
+# haiku = the SMALLEST fast model on disk, even off-profile: background traffic
+# (overseer, audits, research) must ride a separate model process so it never
+# evicts the primary model's KV prefix cache (eviction = multi-minute re-prefills
+# that read as watchdog stalls; measured 115s cold vs 2s cached, 2026-07-11).
+haiku=""
+smallest=""
+smallest_size=0
+for m in "${chat[@]:-}"; do
+  [[ -n "$m" && "$(slot_of "$m")" == "fast" ]] || continue
+  sz="$(find "$ROOT/models/$m" -name '*.gguf' -type f -exec stat -f%z {} + 2>/dev/null | awk '{s+=$1} END {print s+0}')"
+  [[ "$sz" -gt 0 ]] || sz="$(find "$ROOT/models/$m" -name '*.gguf' -type f -exec stat -c%s {} + 2>/dev/null | awk '{s+=$1} END {print s+0}')"
+  if [[ "$sz" -gt 0 && ( -z "$smallest" || "$sz" -lt "$smallest_size" ) ]]; then
+    smallest="$m"; smallest_size="$sz"
+  fi
+done
+[[ -n "$smallest" ]] && haiku="$smallest"
+[[ -z "$haiku" ]] && haiku="$(pick_tier "$(tier_from_env HAIKU_MODEL)" fast big)"
 
 anchor="$sonnet"
 [[ -z "$anchor" ]] && anchor="${ids[0]}"

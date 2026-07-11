@@ -1,7 +1,7 @@
 ---
 description: Memory curator - reconciles STATE.md with the ledger, distills recurring failures into lessons, flips fulfilled net-request checkboxes. Append-only history; never deletes.
 mode: subagent
-model: oracle/qwen3-coder-30b-q4
+model: oracle/qwen2.5-coder-7b
 temperature: 0.2
 ---
 
