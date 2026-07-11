@@ -142,18 +142,21 @@ class ConversationPanel {
 <link rel="stylesheet" href="${css}">
 </head><body>
 <div id="header">
-  <span id="dot" class="dot"></span>
-  <span id="status">starting…</span>
+  <span class="title">Agent</span>
   <span id="model"></span>
+  <span id="dot"></span>
+  <span id="status">starting…</span>
   <span style="margin-left:auto"></span>
-  <button id="stop" class="secondary" disabled>Stop</button>
-  <button id="restart" class="secondary">Restart</button>
+  <button id="stop" class="hbtn" disabled>Stop</button>
+  <button id="restart" class="hbtn">Restart</button>
 </div>
-<div id="chat"></div>
-<div id="composer">
-  <textarea id="input" rows="1" placeholder="Ask the agent - it can read, edit, and run things here (Enter to send, Shift+Enter for newline)"></textarea>
-  <button id="send">Send</button>
-</div>
+<div id="chat"><div id="col"></div></div>
+<div id="composer-wrap"><div id="composer">
+  <div id="input-box">
+    <textarea id="input" rows="1" placeholder="Plan, build, run - the agent has full tool access here"></textarea>
+    <button id="send" title="Send (Enter)">&#8593;</button>
+  </div>
+</div></div>
 <script nonce="${nonce}" src="${js}"></script>
 </body></html>`;
   }
