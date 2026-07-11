@@ -84,12 +84,21 @@ switch ($Cmd) {
     }
     "start" {
         if (-not (Test-Path $Vendor)) { Write-Host "not installed - run: harness\agent-mcp\setup-agent-mcp.ps1 install"; exit 1 }
+        $condLock = Join-Path $StateDir "conductor.lock"
+        if (Test-Path $condLock) {
+            Write-Host "WARNING: a mission is running (state\conductor.lock). On shared-CPU"
+            Write-Host "         hardware the viewer's model calls compete with engine inference"
+            Write-Host "         and can starve the mission into watchdog kills."
+        }
         $uv = Find-Uv
         if (-not $uv) { Write-Host "ERROR: uv not found - run install first"; exit 1 }
         New-Item -ItemType Directory -Force -Path $StateDir, $LogDir | Out-Null
         Set-LocalEnv
+        # --no-index: the auto-RAG indexer floods the local embedding slot with
+        # multi-minute batches and starves engine inference on shared hardware.
+        # Index selectively via its RAG tools when you actually need retrieval.
         $p = Start-Process -FilePath $uv -ArgumentList "run", "--no-sync", "-m", "agent_mcp.cli", `
-            "--port", "$Port", "--project-dir", $Root, "--no-tui" `
+            "--port", "$Port", "--project-dir", $Root, "--no-tui", "--no-index" `
             -WorkingDirectory $Vendor -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $LogDir "agent-mcp.out.log") `
             -RedirectStandardError (Join-Path $LogDir "agent-mcp.err.log")

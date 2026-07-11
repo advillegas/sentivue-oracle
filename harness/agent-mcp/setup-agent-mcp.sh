@@ -42,9 +42,15 @@ case "${1:-status}" in
     ;;
   start)
     [[ -d "$VENDOR" ]] || { echo "not installed - run: bash harness/agent-mcp/setup-agent-mcp.sh install"; exit 1; }
+    if [[ -f "$ROOT/state/conductor.lock" ]]; then
+      echo "WARNING: a mission is running (state/conductor.lock). On shared-CPU hardware"
+      echo "         the viewer's model calls compete with engine inference."
+    fi
     mkdir -p "$ROOT/state" "$ROOT/logs"
     local_env
-    ( cd "$VENDOR" && nohup uv run --no-sync -m agent_mcp.cli --port "$PORT" --project-dir "$ROOT" --no-tui \
+    # --no-index: the auto-RAG indexer floods the local embedding slot with
+    # multi-minute batches and starves engine inference on shared hardware.
+    ( cd "$VENDOR" && nohup uv run --no-sync -m agent_mcp.cli --port "$PORT" --project-dir "$ROOT" --no-tui --no-index \
         > "$ROOT/logs/agent-mcp.out.log" 2> "$ROOT/logs/agent-mcp.err.log" & echo $! > "$SRV_PID" )
     if [[ -f "$VENDOR/agent_mcp/dashboard/package.json" ]]; then
       # bypass upstream's dev wrapper (binds 0.0.0.0); run next directly, loopback only
