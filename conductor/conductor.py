@@ -143,7 +143,8 @@ class Task:
     tier: str = "sonnet"
     audit_tier: str = "sonnet"       # verifier should be at least as strong as generator
     timeout_minutes: int = 45
-    stall_minutes: int = 12          # output-silence kill (swap+prefill can take minutes)
+    stall_minutes: int = 20          # output-silence kill; CPU prefill of a large
+                                     # context emits nothing for many minutes (L7)
     max_attempts: int = 3
     adversary: bool = False          # extra adversarial pass after audit
     escalate: bool = True            # final attempt auto-escalates to opus tier
@@ -227,10 +228,14 @@ def shell_check(cmd: str) -> list[str]:
 
 def engine_cmd(engine: str, prompt: str, tier: str) -> tuple[list[str], dict]:
     """argv + extra env for one headless engine run (full autonomy: dedicated box).
-    Claude Code uses stream-json so the stall detector sees per-event activity."""
+    Claude Code uses stream-json WITH partial messages: token deltas stream
+    continuously during generation, so the stall watchdog measures real liveness
+    instead of message-boundary silence (seed brain L7 - a healthy multi-minute
+    CPU generation must never look frozen)."""
     if engine == "claude":
         return (launcher("claude") + ["-p", prompt,
                  "--model", tier, "--output-format", "stream-json", "--verbose",
+                 "--include-partial-messages",
                  "--dangerously-skip-permissions"], {})
     if engine == "opencode":
         return (launcher("opencode") + ["run",
@@ -741,8 +746,12 @@ class Conductor:
                 except Exception as e:            # recon is best-effort, never blocks
                     self.ledger(f"RESEARCH ERROR {t.id}", str(e)[:200])
             # Thinking models emit no stream events mid-thought; give opus runs
-            # a longer silence allowance before the stall watchdog fires.
+            # a longer silence allowance before the stall watchdog fires. Retries
+            # also get progressively more slack: if attempt 1 died to the
+            # watchdog, killing attempt 2 at the same threshold just repeats the
+            # same false-positive kill (seed brain E3).
             stall = max(t.stall_minutes, 20) if tier == "opus" else t.stall_minutes
+            stall = int(stall * (1 + 0.5 * (t.attempts - 1)))
             out = self.run_engine(self.developer_prompt(t, feedback, brief), tier, wt,
                                   t.timeout_minutes, f"{t.id}-dev{t.attempts}",
                                   stall_min=stall)
@@ -1240,7 +1249,14 @@ class Conductor:
         out = self.run_engine(prompt, "haiku", self.m.repo, 8,
                               f"overseer-{dt.datetime.now():%H%M}", stall_min=6).strip()
         m = re.findall(r"OVERSEER:.*", out)
-        verdict = m[-1][:300] if m else "OVERSEER: no verdict produced"
+        if m:
+            verdict = m[-1][:300]
+        elif not out or "[WATCHDOG]" in out:
+            # single-slot boxes: the dev run can hold the model for the whole
+            # interval; a starved overseer is a capacity fact, not a concern
+            verdict = "OVERSEER: skipped (no engine capacity this interval)"
+        else:
+            verdict = "OVERSEER: no verdict produced"
         self.ledger("OVERSEER", verdict)
         self.proc("overseer", verdict=verdict)
         return out
