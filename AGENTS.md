@@ -63,7 +63,15 @@ them.
 12. **Commit and push after every meaningful change** — to origin and to the local
     vault. The ledger (`memory/LEDGER.md`) records what and why.
 
-13. **Keep a session journal.** For any multi-step task, maintain
+13. **Use the installed skill packs before inventing process.** Both engines
+    (and you) have, beyond the platform's own skills: `sp-*` (obra/superpowers
+    v6+: brainstorming, TDD red-green-refactor, four-phase systematic debugging,
+    subagent-driven development, skill authoring) and `gs-*` (garrytan/gstack:
+    23 role specialists — plan-ceo/eng/design reviews, code review, QA, ship,
+    retro, investigate). Full text under `harness/skill-packs/vendor/`. Load
+    on demand (C5); prefer their checklists over improvised methodology.
+
+14. **Keep a session journal.** For any multi-step task, maintain
     `memory/sessions/<session>.md` (DOING / DONE / NEXT / NOTES) and update it after
     every meaningful step. Claude Code sessions get one automatically via hooks
     (`bin/session-journal.js`); other surfaces create their own. After a compaction

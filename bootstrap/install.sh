@@ -64,6 +64,8 @@ bash bootstrap/sync-skills.sh
 
 echo "==> [6/8] ECC ${ECC_PIN} curated subset"
 bash harness/ecc/install-ecc.sh
+echo "==> [6b/8] Skill packs: superpowers ${SUPERPOWERS_PIN} + gstack (pinned)"
+bash harness/skill-packs/install-skill-packs.sh
 
 echo "==> [7/8] Warm OpenCode model catalog cache (offline use later)"
 export XDG_CONFIG_HOME="$ROOT/engines/opencode/xdg"
