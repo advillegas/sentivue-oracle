@@ -30,7 +30,7 @@ if ($python) {
     if ($LASTEXITCODE -eq 0) { OK "pytest importable" } else { BAD "pytest missing" "bootstrap\ensure-tools.ps1" }
 }
 if (Get-Command node -ErrorAction SilentlyContinue) { OK "node: $(node --version)" } else { BAD "node missing" "bootstrap\ensure-tools.ps1" }
-foreach ($eng in @("claude.cmd", "opencode.cmd")) {
+foreach ($eng in @("claude.cmd", "opencode.cmd", "kilo.cmd")) {
     if (Test-Path ".tools\npm\$eng") { OK "engine: $eng" } else { BAD "engine missing: $eng" "bin\oracle.ps1 setup" }
 }
 

@@ -271,7 +271,7 @@ class Mission:
 
 def launcher(engine: str) -> list[str]:
     """Cross-platform engine launcher argv prefix (bash on macOS, PS twin on Windows)."""
-    name = "claude-code" if engine == "claude" else "opencode"
+    name = {"claude": "claude-code", "opencode": "opencode", "kilo": "kilo"}[engine]
     if IS_WIN:
         return ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                 str(ROOT / f"engines/{name}/launch.ps1")]
@@ -301,7 +301,12 @@ def engine_cmd(engine: str, prompt: str, tier: str) -> tuple[list[str], dict]:
                  "-m", f"oracle/{TIER_MODEL[tier]}", prompt],
                 {"OPENCODE_PERMISSION": json.dumps(
                     {"edit": "allow", "bash": "allow", "webfetch": "deny"})})
-    raise ValueError(f"unknown engine {engine!r} (use claude|opencode)")
+    if engine == "kilo":
+        # OpenCode fork; --auto = autonomous mode, bounded by the permission
+        # block sync-models writes into ~/.config/kilo/kilo.jsonc (webfetch deny).
+        return (launcher("kilo") + ["run", "--auto",
+                 "-m", f"openai-compatible/{TIER_MODEL[tier]}", prompt], {})
+    raise ValueError(f"unknown engine {engine!r} (use claude|opencode|kilo)")
 
 
 def extract_result(engine: str, raw: str) -> str:
@@ -1544,10 +1549,10 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     runp = sub.add_parser("run", help="run a mission")
     runp.add_argument("mission", type=Path)
-    runp.add_argument("--engine", choices=["claude", "opencode"], default=None)
+    runp.add_argument("--engine", choices=["claude", "opencode", "kilo"], default=None)
     runp.add_argument("--hours", type=float, default=None)
     retp = sub.add_parser("retro", help="run a standalone process retrospective now")
-    retp.add_argument("--engine", choices=["claude", "opencode"], default="claude")
+    retp.add_argument("--engine", choices=["claude", "opencode", "kilo"], default="claude")
     sub.add_parser("status", help="print current STATE.md")
     args = ap.parse_args()
 

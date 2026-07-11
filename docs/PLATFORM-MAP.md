@@ -78,13 +78,16 @@ thinking, mission status, session journals), `pack-extension.ps1` (VSIX build).
 
 ## engines/
 
-The two agent engines, fully repo-contained. `claude-code/` (CLAUDE.md,
+The agent engines, fully repo-contained. `claude-code/` (CLAUDE.md,
 settings.json with hooks + permissions, `home/agents/` personas: researcher,
-developer, auditor, adversary, librarian) and `opencode/` (opencode.json,
-AGENTS.md, `agent/` personas incl. envoy). `shared/` is the doctrine both
-load: CONVENTIONS.md (operating rules), AUTONOMY.md (the long-horizon
-protocol + amendment log), SEED-BRAIN.md (founding memory: ~112 principles
-with stable IDs, NEW PRINCIPLES, errata), IDE-AGENT.md, ENVOY.md.
+developer, auditor, adversary, librarian), `opencode/` (opencode.json,
+AGENTS.md, `agent/` personas incl. envoy), and `kilo/` (launchers for the
+Kilo CLI — an OpenCode fork that reads the sync-models-generated
+`~/.config/kilo/kilo.jsonc`, shared with the IDE side panel). `shared/` is
+the doctrine all engines load: CONVENTIONS.md (operating rules), AUTONOMY.md
+(the long-horizon protocol + amendment log), SEED-BRAIN.md (founding memory:
+~112 principles with stable IDs, NEW PRINCIPLES, errata), IDE-AGENT.md,
+ENVOY.md.
 
 ## harness/
 

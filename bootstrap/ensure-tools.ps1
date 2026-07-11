@@ -61,7 +61,8 @@ if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
 # ---- 4. engines (pinned, repo-local npm prefix) --------------------------------
 $claudeOk = Test-Path (Join-Path $Root ".tools\npm\claude.cmd")
 $openOk = Test-Path (Join-Path $Root ".tools\npm\opencode.cmd")
-if ((-not $claudeOk -or -not $openOk) -and (Get-Command npm -ErrorAction SilentlyContinue)) {
+$kiloOk = Test-Path (Join-Path $Root ".tools\npm\kilo.cmd")
+if ((-not $claudeOk -or -not $openOk -or -not $kiloOk) -and (Get-Command npm -ErrorAction SilentlyContinue)) {
     $pins = @{}
     Get-Content (Join-Path $Root "VERSIONS.lock") | Where-Object { $_ -match "=" } | ForEach-Object {
         $kv = $_ -split "=", 2; $pins[$kv[0].Trim()] = ($kv[1] -split "#")[0].Trim()
@@ -69,7 +70,7 @@ if ((-not $claudeOk -or -not $openOk) -and (Get-Command npm -ErrorAction Silentl
     Write-Host "==> engines missing - npm install (pinned, repo-local)"
     $env:npm_config_prefix = Join-Path $Root ".tools\npm"
     New-Item -ItemType Directory -Force -Path $env:npm_config_prefix | Out-Null
-    npm install -g "@anthropic-ai/claude-code@$($pins['CLAUDE_CODE_NPM_VERSION'])" "opencode-ai@$($pins['OPENCODE_NPM_VERSION'])" | Out-Null
+    npm install -g "@anthropic-ai/claude-code@$($pins['CLAUDE_CODE_NPM_VERSION'])" "opencode-ai@$($pins['OPENCODE_NPM_VERSION'])" "@kilocode/cli@$($pins['KILO_CLI_NPM_VERSION'])" | Out-Null
     if ($LASTEXITCODE -eq 0) { $fixed += "engines" }
 }
 

@@ -86,6 +86,11 @@ function Update-UserConfig {
         args = @("-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $agentTab, "opencode")
         icon = "rocket"; color = "terminal.ansiMagenta"; overrideName = $true
     }
+    $profiles["Oracle Agent: Kilo Code"] = @{
+        path = "powershell.exe"
+        args = @("-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $agentTab, "kilo")
+        icon = "circuit-board"; color = "terminal.ansiYellow"; overrideName = $true
+    }
     $settings["terminal.integrated.profiles.windows"] = $profiles
     ConvertTo-Json -InputObject $settings -Depth 20 | Set-Content -Path $settingsPath
     if (-not $Quiet) { Write-Host "==> merged VSCodium user settings (agent-tab profiles, telemetry off)" }
@@ -179,7 +184,8 @@ switch ($Cmd) {
         Write-Host "IDE ready. Models are auto-detected on every launch; Kilo Code reads"
         Write-Host "its generated config from ~\.config\kilo\kilo.jsonc (local provider only)."
         Write-Host "Agent tabs: Ctrl+Shift+A (Claude Code), Ctrl+Shift+Alt+A (worktree),"
-        Write-Host "Ctrl+Alt+O (OpenCode) - or the terminal '+' dropdown, 'Oracle Agent' profiles."
+        Write-Host "Ctrl+Alt+O (OpenCode) - or the terminal '+' dropdown, 'Oracle Agent' profiles"
+        Write-Host "(Claude Code, OpenCode, Kilo Code)."
         Write-Host "Launch with: bin\oracle.ps1 ide"
     }
     "sync" {

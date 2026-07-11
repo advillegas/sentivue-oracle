@@ -52,8 +52,8 @@ switch ($Cmd) {
         foreach ($l in $lock) { $kv = $l -split "=", 2; $pins[$kv[0].Trim()] = ($kv[1] -split "#")[0].Trim() }
         $env:npm_config_prefix = Join-Path $Root ".tools\npm"
         New-Item -ItemType Directory -Force -Path $env:npm_config_prefix | Out-Null
-        Write-Host "==> engines: claude-code@$($pins['CLAUDE_CODE_NPM_VERSION']) + opencode@$($pins['OPENCODE_NPM_VERSION'])"
-        npm install -g "@anthropic-ai/claude-code@$($pins['CLAUDE_CODE_NPM_VERSION'])" "opencode-ai@$($pins['OPENCODE_NPM_VERSION'])"
+        Write-Host "==> engines: claude-code@$($pins['CLAUDE_CODE_NPM_VERSION']) + opencode@$($pins['OPENCODE_NPM_VERSION']) + kilo@$($pins['KILO_CLI_NPM_VERSION'])"
+        npm install -g "@anthropic-ai/claude-code@$($pins['CLAUDE_CODE_NPM_VERSION'])" "opencode-ai@$($pins['OPENCODE_NPM_VERSION'])" "@kilocode/cli@$($pins['KILO_CLI_NPM_VERSION'])"
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\sync-skills.ps1")
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "harness\skill-packs\install-skill-packs.ps1")
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") setup
@@ -64,6 +64,7 @@ switch ($Cmd) {
     "status" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") status }
     "claude"   { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\claude-code\launch.ps1") @Rest }
     "opencode" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\opencode\launch.ps1") @Rest }
+    "kilo"     { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\kilo\launch.ps1") @Rest }
     "notes" {
         # Obsidian over the repo: the operator's lens on memory/doctrine/reports
         $exe = "$env:LOCALAPPDATA\Programs\Obsidian\Obsidian.exe"
@@ -94,8 +95,8 @@ switch ($Cmd) {
         }
     }
     "mission" {
-        # oracle.ps1 mission <mission.toml> [claude|opencode] [hours]
-        if ($Rest.Count -lt 1) { Write-Host "usage: oracle.ps1 mission <mission.toml> [claude|opencode] [hours]"; exit 1 }
+        # oracle.ps1 mission <mission.toml> [claude|opencode|kilo] [hours]
+        if ($Rest.Count -lt 1) { Write-Host "usage: oracle.ps1 mission <mission.toml> [claude|opencode|kilo] [hours]"; exit 1 }
         $engine = if ($Rest.Count -ge 2) { $Rest[1] } else { "claude" }
         $hours = if ($Rest.Count -ge 3) { $Rest[2] } else { "24" }
         Invoke-Conductor @("run", $Rest[0], "--engine", $engine, "--hours", $hours)
@@ -143,7 +144,7 @@ switch ($Cmd) {
         Write-Host "oracle (Windows - full platform)"
         Write-Host "  setup                                     engines (pinned) + serving toolchain (one time)"
         Write-Host "  serve | status | stop                     local model serving (llama-swap on :9099)"
-        Write-Host "  claude | opencode                         engine sessions on local models"
+        Write-Host "  claude | opencode | kilo                  engine sessions on local models"
         Write-Host "  mission <toml> [engine] [hours]           self-governing mission (conductor loop)"
         Write-Host "  retro | state                             process retrospective | mission state"
         Write-Host "  agents-ui [install|start|stop|status]     orchestration viewer (Agent-MCP, optional)"

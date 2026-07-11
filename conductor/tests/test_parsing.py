@@ -96,6 +96,32 @@ def test_extract_result_opencode_passthrough():
     assert C.extract_result("opencode", "plain text out") == "plain text out"
 
 
+def test_extract_result_kilo_passthrough():
+    assert C.extract_result("kilo", "kilo text out") == "kilo text out"
+
+
+# ---- engine_cmd ---------------------------------------------------------------
+
+def test_engine_cmd_kilo_autonomous_local_model():
+    argv, env = C.engine_cmd("kilo", "do the thing", "sonnet")
+    joined = " ".join(argv)
+    assert "engines" in joined and "kilo" in joined       # repo launcher, not bare binary
+    assert "--auto" in argv                               # headless autonomous mode
+    mi = argv.index("-m")
+    assert argv[mi + 1] == f"openai-compatible/{C.TIER_MODEL['sonnet']}"
+    assert argv[-1] == "do the thing"
+    assert env == {}
+
+
+def test_engine_cmd_unknown_engine_raises():
+    try:
+        C.engine_cmd("roo", "x", "sonnet")
+    except ValueError as e:
+        assert "kilo" in str(e)
+    else:
+        raise AssertionError("expected ValueError for unknown engine")
+
+
 # ---- Task.from_dict -----------------------------------------------------------
 
 def test_from_dict_drops_unknown_keys():

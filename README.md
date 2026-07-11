@@ -12,9 +12,10 @@ development loop — models, inference, engines, skills, data, memory, and versi
 control — lives inside the ecosystem. After the one-time bootstrap, no piece of it
 needs the internet.
 
-**Engines: Claude Code or OpenCode — your choice, same models, same skills.** Cursor is
-deliberately not part of this stack. All services bind to `127.0.0.1`, all telemetry is
-disabled, and an optional firewall profile blocks everything else.
+**Engines: Claude Code, OpenCode, or Kilo Code — your choice, same models, same
+skills.** Cursor is deliberately not part of this stack. All services bind to
+`127.0.0.1`, all telemetry is disabled, and an optional firewall profile blocks
+everything else.
 
 ---
 
@@ -29,8 +30,9 @@ disabled, and an optional firewall profile blocks everything else.
                                            │ headless runs
         ┌──────────────────────────────────┴──────────────────────────────────┐
         │                        ENGINE (pick per session)                     │
-        │   Claude Code (offline-hardened)      OpenCode (fully open source)   │
-        │   + ECC harness subset + skills       + same skills + agents         │
+        │   Claude Code (offline-hardened) · OpenCode (open source)            │
+        │   Kilo Code (OpenCode fork, shared with the IDE panel)               │
+        │   + ECC harness subset + the same skills + agents everywhere         │
         └───────────────┬──────────────────────────────────┬──────────────────┘
                         │ Anthropic /v1/messages            │ OpenAI /v1
                         └─────────────────┬─────────────────┘
@@ -135,7 +137,8 @@ Afterwards, everything is one command:
 ```bash
 oracle claude        # interactive session, Claude Code engine
 oracle opencode      # interactive session, OpenCode engine
-oracle mission conductor/missions/example.toml claude 24
+oracle kilo          # interactive session, Kilo Code engine (TUI)
+oracle mission conductor/missions/example.toml claude 24   # engine: claude|opencode|kilo
 oracle status        # service + models + ledger tail
 oracle doctor        # full diagnostic with suggested fixes
 oracle harden        # software air gap (pf egress block); undo: oracle harden off
@@ -146,16 +149,18 @@ cleanly removes services, symlinks, and — with `--purge` — the models.)
 
 ## Engine choice
 
-| | Claude Code | OpenCode |
-|---|---|---|
-| Source | proprietary CLI, free to run against local endpoints | 100% open source |
-| Wire protocol | Anthropic `/v1/messages` → llama-swap | OpenAI `/v1` → llama-swap |
-| Offline posture | hardened via env (`DISABLE_TELEMETRY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, autoupdater off) | no account, no telemetry; models.dev cache warmed at bootstrap |
-| Harness quality | strongest agentic harness; ECC-native | very close; reads the same `AGENTS.md`, skills, MCP config |
-| Conductor support | `claude -p` headless | `opencode run` headless |
+| | Claude Code | OpenCode | Kilo Code |
+|---|---|---|---|
+| Source | proprietary CLI, free to run against local endpoints | 100% open source | open source (OpenCode fork) |
+| Wire protocol | Anthropic `/v1/messages` → llama-swap | OpenAI `/v1` → llama-swap | OpenAI `/v1` → llama-swap |
+| Offline posture | hardened via env (`DISABLE_TELEMETRY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, autoupdater off) | no account, no telemetry; models.dev cache warmed at bootstrap | no account needed for local providers; telemetry off, sharing disabled in generated config |
+| Harness quality | strongest agentic harness; ECC-native | very close; reads the same `AGENTS.md`, skills, MCP config | OpenCode harness + Kilo modes; same config surface as the IDE side panel |
+| Conductor support | `claude -p` headless | `opencode run` headless | `kilo run --auto` headless |
 
-Both engines read the same skills, subagents, conventions (`AGENTS.md`), and MCP
-connectors. Switching engines is a per-session decision, not a migration.
+All three engines read the same skills, subagents, conventions (`AGENTS.md`), and MCP
+connectors; Kilo additionally shares `~/.config/kilo/kilo.jsonc` with the IDE panel,
+so CLI, missions, and side panel always agree on models and permissions. Switching
+engines is a per-session decision, not a migration.
 
 ## Local git vault (the ecosystem's own "origin" — on every node)
 
@@ -256,8 +261,9 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
   engine session (Claude Code) as an editor tab; open as many as you want, side by
   side, like Cursor's agent tabs. `Cmd+Shift+Alt+A` opens the agent in its **own git
   worktree + branch** so parallel agents never collide — merge the branch when you
-  like the result. `Cmd+Alt+O` opens an OpenCode tab. Also available from the
-  terminal `+` dropdown ("Oracle Agent" profiles).
+  like the result. `Cmd+Alt+O` opens an OpenCode tab; the Agents sidebar also offers
+  **Kilo Code** tabs (the Kilo CLI — same models and `kilo.jsonc` as the side panel).
+  Also available from the terminal `+` dropdown ("Oracle Agent" profiles).
 - **Model auto-detection** — every IDE launch runs `sync-models`, which asks the
   serving layer (or scans `models/`) for what's actually installed, then rewires
   Continue, Kilo Code (generated `~/.config/kilo/kilo.jsonc`), the engine tier maps
@@ -293,8 +299,8 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
   face of the vault (browse, diffs, blame, search). Vault repos are added as
   local-path **mirrors**, so the vault stays the source of truth and Gitea re-syncs
   hourly. Sqlite, registration disabled, offline mode, `launchd`-supervised.
-- Terminal alternatives remain (`oracle claude` / `oracle opencode`); llama-swap's
-  built-in UI at `:9099` shows model activity.
+- Terminal alternatives remain (`oracle claude` / `oracle opencode` / `oracle kilo`);
+  llama-swap's built-in UI at `:9099` shows model activity.
 
 ## Privacy posture
 
@@ -302,7 +308,8 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
   leave the machine.
 - Every service binds `127.0.0.1` only (llama-swap, llama-server, Postgres, PostgREST,
   Studio, Gitea, the console).
-- Telemetry, error reporting, and auto-update are disabled for both engines.
+- Telemetry, error reporting, and auto-update are disabled for all engines
+  (Kilo additionally runs with sharing disabled and local providers only).
 - `make harden` installs a pf anchor that blocks ALL outbound traffic machine-wide
   except loopback — a software air gap (optional, reversible with `harden-offline.sh off`).
   `oracle envoy` opens it briefly and always restores it.

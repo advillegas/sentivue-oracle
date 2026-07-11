@@ -40,7 +40,8 @@ echo "==> [3/8] Engines (pinned, repo-local npm prefix — nothing global)"
 export npm_config_prefix="$ROOT/.tools/npm"
 mkdir -p "$npm_config_prefix"
 npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_NPM_VERSION}" \
-              "opencode-ai@${OPENCODE_NPM_VERSION}"
+              "opencode-ai@${OPENCODE_NPM_VERSION}" \
+              "@kilocode/cli@${KILO_CLI_NPM_VERSION}"
 
 echo "==> [3b/8] 'oracle' CLI on PATH"
 chmod +x bin/oracle

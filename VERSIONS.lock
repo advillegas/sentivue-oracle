@@ -14,6 +14,8 @@
 # Requires Node 22+ (installed by bootstrap).
 CLAUDE_CODE_NPM_VERSION=2.1.205         # npm: @anthropic-ai/claude-code
 OPENCODE_NPM_VERSION=1.17.16            # npm: opencode-ai
+KILO_CLI_NPM_VERSION=7.4.5              # npm: @kilocode/cli (OpenCode fork; third engine:
+                                        # agent tabs + missions; same kilo.jsonc as the IDE panel)
 
 # --- harness ---
 ECC_REPO=https://github.com/affaan-m/ECC

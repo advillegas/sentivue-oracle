@@ -227,6 +227,10 @@ if ($kiloModels.Count -gt 0) {
                 models  = $kiloModels
             }
         }
+        # platform policy (same as OpenCode): work freely on local files/shell,
+        # no direct network - envoy is the only fetch path. Required for headless
+        # `kilo run --auto`, which only auto-approves what this config allows.
+        permission          = [ordered]@{ edit = "allow"; bash = "allow"; webfetch = "deny" }
         experimental        = [ordered]@{ openTelemetry = $false }
     }
     $kiloDir = Join-Path $env:USERPROFILE ".config\kilo"

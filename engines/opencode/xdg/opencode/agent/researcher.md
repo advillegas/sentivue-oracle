@@ -1,7 +1,7 @@
 ---
 description: Read-only reconnaissance - code archaeology, data profiling, dependency mapping, reading local docs. Produces findings; never edits.
 mode: subagent
-model: oracle/qwen2.5-coder-7b
+model: oracle/qwen3-coder-30b-q4
 temperature: 0.3
 tools:
   write: false

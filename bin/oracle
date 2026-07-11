@@ -10,6 +10,7 @@ cmd="${1:-help}"; shift || true
 case "$cmd" in
   claude)     exec bash engines/claude-code/launch.sh "$@" ;;
   opencode)   exec bash engines/opencode/launch.sh "$@" ;;
+  kilo)       exec bash engines/kilo/launch.sh "$@" ;;
   serve)      bash bootstrap/render-config.sh && exec bash serving/service.sh start ;;
   stop)       exec bash serving/service.sh stop ;;
   restart)    exec bash serving/service.sh restart ;;
@@ -58,7 +59,7 @@ case "$cmd" in
       *) echo "usage: oracle loops {audit|init|cost|sync} [args]"; exit 1 ;;
     esac
     ;;
-  mission)    # oracle mission <mission.toml> [claude|opencode] [hours]
+  mission)    # oracle mission <mission.toml> [claude|opencode|kilo] [hours]
     m="${1:?usage: oracle mission <mission.toml> [engine] [hours]}"
     eng="${2:-claude}"; hrs="${3:-24}"
     exec uv run --project env python conductor/conductor.py run "$m" --engine "$eng" --hours "$hrs" ;;
@@ -71,9 +72,9 @@ case "$cmd" in
     cat <<'EOF'
 oracle — offline agentic workstation
 
-  engines        oracle claude [...]     oracle opencode [...]
+  engines        oracle claude [...]     oracle opencode [...]     oracle kilo [...]
   serving        oracle serve|stop|restart|status
-  missions       oracle mission <toml> [claude|opencode] [hours]
+  missions       oracle mission <toml> [claude|opencode|kilo] [hours]
                  oracle retro [engine]   process meta-analysis + amendment proposals
                  oracle state            oracle report        oracle ledger [n]
   health         oracle verify           oracle doctor

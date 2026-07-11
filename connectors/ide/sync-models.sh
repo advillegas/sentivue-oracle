@@ -248,6 +248,7 @@ if [[ ${#chat[@]} -gt 0 ]] && command -v jq >/dev/null; then
        provider: {"openai-compatible": {
          options: {apiKey: "oracle-local", baseURL: $base},
          models: $mm}},
+       permission: {edit: "allow", bash: "allow", webfetch: "deny"},
        experimental: {openTelemetry: false}}'
   } > "$HOME/.config/kilo/kilo.jsonc"
 fi

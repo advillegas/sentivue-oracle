@@ -36,15 +36,16 @@ if ! command -v node >/dev/null; then
   if online; then echo "==> node missing - brew install node"; brew install node && FIXED+=("node")
   else queue_request "brew:node" "engine runtime"; fi
 fi
-if command -v npm >/dev/null && { [[ ! -x "$ROOT/.tools/npm/bin/claude" ]] || [[ ! -x "$ROOT/.tools/npm/bin/opencode" ]]; }; then
+if command -v npm >/dev/null && { [[ ! -x "$ROOT/.tools/npm/bin/claude" ]] || [[ ! -x "$ROOT/.tools/npm/bin/opencode" ]] || [[ ! -x "$ROOT/.tools/npm/bin/kilo" ]]; }; then
   CC_V="$(sed -n 's/^CLAUDE_CODE_NPM_VERSION=\([^#]*\).*/\1/p' "$ROOT/VERSIONS.lock" | xargs)"
   OC_V="$(sed -n 's/^OPENCODE_NPM_VERSION=\([^#]*\).*/\1/p' "$ROOT/VERSIONS.lock" | xargs)"
+  KC_V="$(sed -n 's/^KILO_CLI_NPM_VERSION=\([^#]*\).*/\1/p' "$ROOT/VERSIONS.lock" | xargs)"
   if online; then
     echo "==> engines missing - npm install (pinned, repo-local)"
     NPM_CONFIG_PREFIX="$ROOT/.tools/npm" npm install -g \
-      "@anthropic-ai/claude-code@$CC_V" "opencode-ai@$OC_V" && FIXED+=("engines")
+      "@anthropic-ai/claude-code@$CC_V" "opencode-ai@$OC_V" "@kilocode/cli@$KC_V" && FIXED+=("engines")
   else
-    queue_request "npm:@anthropic-ai/claude-code@$CC_V + npm:opencode-ai@$OC_V" "engines"
+    queue_request "npm:@anthropic-ai/claude-code@$CC_V + npm:opencode-ai@$OC_V + npm:@kilocode/cli@$KC_V" "engines"
   fi
 fi
 

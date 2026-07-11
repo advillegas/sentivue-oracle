@@ -116,6 +116,10 @@ update_user_config() {
         "Oracle Agent: OpenCode": {
           "path": "/bin/bash", "args": [$tab, "opencode"],
           "icon": "rocket", "color": "terminal.ansiMagenta", "overrideName": true
+        },
+        "Oracle Agent: Kilo Code": {
+          "path": "/bin/bash", "args": [$tab, "kilo"],
+          "icon": "circuit-board", "color": "terminal.ansiYellow", "overrideName": true
         }
       })
     }' "$settings")"; then
@@ -176,7 +180,8 @@ case "${1:-launch}" in
     echo "IDE ready. Models are auto-detected on every launch; Kilo Code reads"
     echo "its generated config from ~/.config/kilo/kilo.jsonc (local provider only)."
     echo "Agent tabs: Cmd+Shift+A (Claude Code), Cmd+Shift+Alt+A (worktree),"
-    echo "Cmd+Alt+O (OpenCode) - or the terminal '+' dropdown, 'Oracle Agent' profiles."
+    echo "Cmd+Alt+O (OpenCode) - or the terminal '+' dropdown, 'Oracle Agent' profiles"
+    echo "(Claude Code, OpenCode, Kilo Code)."
     echo "Launch with: oracle ide"
     ;;
   sync)

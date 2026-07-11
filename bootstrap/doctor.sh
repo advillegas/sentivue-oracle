@@ -23,6 +23,7 @@ for spec in "llama-server:brew install llama.cpp" \
             ".tools/bin/llama-swap:re-run ./install (bootstrap phase)" \
             ".tools/npm/bin/claude:re-run ./install (bootstrap phase)" \
             ".tools/npm/bin/opencode:re-run ./install (bootstrap phase)" \
+            ".tools/npm/bin/kilo:re-run ./install (bootstrap phase)" \
             "uv:brew install uv" "jq:brew install jq"; do
   b="${spec%%:*}"; fix="${spec#*:}"
   if [[ "$b" == */* ]]; then [[ -x "$b" ]] && ok "$b" || bad "$b missing" "$fix"

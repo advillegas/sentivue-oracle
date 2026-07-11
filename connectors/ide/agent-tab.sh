@@ -8,6 +8,7 @@
 #   agent-tab.sh claude               agent in the repo itself
 #   agent-tab.sh claude --worktree    agent in an isolated worktree + branch
 #   agent-tab.sh opencode
+#   agent-tab.sh kilo
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 ENGINE="${1:-claude}"
@@ -24,6 +25,7 @@ fi
 
 NAME="Claude Code"; LAUNCH="engines/claude-code/launch.sh"
 if [[ "$ENGINE" == "opencode" ]]; then NAME="OpenCode"; LAUNCH="engines/opencode/launch.sh"; fi
+if [[ "$ENGINE" == "kilo" ]]; then NAME="Kilo Code"; LAUNCH="engines/kilo/launch.sh"; fi
 
 echo ""
 echo "  SentiVue Oracle agent tab - $NAME (local models)"

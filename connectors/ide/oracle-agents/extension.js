@@ -47,15 +47,17 @@ function uptime(t) {
 }
 
 function agentTerminal(kind) {
-  // kind: claude | claude-wt | opencode. One independent engine session per call.
+  // kind: claude | claude-wt | opencode | kilo. One independent engine session per call.
   const script = path.join(ROOT, "connectors", "ide", WIN ? "agent-tab.ps1" : "agent-tab.sh");
-  const engine = kind === "opencode" ? "opencode" : "claude";
+  const engine = kind === "opencode" ? "opencode" : kind === "kilo" ? "kilo" : "claude";
   const wt = kind === "claude-wt";
+  const label = { claude: "Claude", opencode: "OpenCode", kilo: "Kilo" }[engine];
+  const icon = { claude: "hubot", opencode: "rocket", kilo: "circuit-board" }[engine];
   const n = liveTerminals().filter((t) => t.name.startsWith("Agent:")).length + 1;
   const opts = {
-    name: `Agent: ${engine === "claude" ? "Claude" : "OpenCode"} ${n}${wt ? " (worktree)" : ""}`,
+    name: `Agent: ${label} ${n}${wt ? " (worktree)" : ""}`,
     location: vscode.TerminalLocation.Editor,   // real tabs: many at once, split, drag
-    iconPath: new vscode.ThemeIcon(wt ? "git-branch" : engine === "claude" ? "hubot" : "rocket"),
+    iconPath: new vscode.ThemeIcon(wt ? "git-branch" : icon),
   };
   if (WIN) {
     opts.shellPath = "powershell.exe";
@@ -324,6 +326,7 @@ function buildLive() {
   out.push(item("New Agent Terminal (Claude Code)", { icon: "terminal", cmd: "oracleAgents.newClaude", tip: "Full engine TUI as an editor tab" }));
   out.push(item("New Agent in Worktree", { icon: "git-branch", cmd: "oracleAgents.newClaudeWorktree", tip: "Isolated worktree + branch: parallel agents never collide" }));
   out.push(item("New Agent (OpenCode)", { icon: "rocket", cmd: "oracleAgents.newOpenCode" }));
+  out.push(item("New Agent (Kilo Code)", { icon: "circuit-board", cmd: "oracleAgents.newKilo", tip: "Kilo CLI on the same local models and kilo.jsonc as the Kilo side panel" }));
   out.push(item("Start Mission (autonomous loop)...", { icon: "play", cmd: "oracleAgents.startMission" }));
   out.push(item("Orchestration Viewer (Agent-MCP)", {
     icon: "type-hierarchy",
@@ -420,6 +423,7 @@ function activate(ctx) {
     vscode.commands.registerCommand("oracleAgents.newClaude", () => agentTerminal("claude")),
     vscode.commands.registerCommand("oracleAgents.newClaudeWorktree", () => agentTerminal("claude-wt")),
     vscode.commands.registerCommand("oracleAgents.newOpenCode", () => agentTerminal("opencode")),
+    vscode.commands.registerCommand("oracleAgents.newKilo", () => agentTerminal("kilo")),
     vscode.commands.registerCommand("oracleAgents.refresh", refreshAll),
     vscode.commands.registerCommand("oracleAgents.reveal", (key) => {
       const [idx, kind] = String(key).split(":");
@@ -452,7 +456,7 @@ function activate(ctx) {
       if (!missions.length) return vscode.window.showWarningMessage("No mission files under conductor/missions.");
       const pick = await vscode.window.showQuickPick(missions, { placeHolder: "Mission to run (self-governing loop)" });
       if (!pick) return;
-      const engine = await vscode.window.showQuickPick(["claude", "opencode"], { placeHolder: "Engine" });
+      const engine = await vscode.window.showQuickPick(["claude", "opencode", "kilo"], { placeHolder: "Engine" });
       if (!engine) return;
       const hours = await vscode.window.showInputBox({ prompt: "Hour budget", value: "24" });
       if (!hours) return;

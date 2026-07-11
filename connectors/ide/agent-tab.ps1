@@ -7,8 +7,9 @@
 #   agent-tab.ps1 claude              agent in the repo itself
 #   agent-tab.ps1 claude -Worktree    agent in an isolated worktree + branch
 #   agent-tab.ps1 opencode
+#   agent-tab.ps1 kilo
 param(
-    [Parameter(Position = 0)][ValidateSet("claude", "opencode")][string]$Engine = "claude",
+    [Parameter(Position = 0)][ValidateSet("claude", "opencode", "kilo")][string]$Engine = "claude",
     [switch]$Worktree
 )
 $ErrorActionPreference = "Stop"
@@ -23,7 +24,7 @@ if ($Worktree) {
     git -C $Root worktree add -b $branch $dir | Out-Null
 }
 
-$engineName = if ($Engine -eq "claude") { "Claude Code" } else { "OpenCode" }
+$engineName = switch ($Engine) { "claude" { "Claude Code" } "opencode" { "OpenCode" } "kilo" { "Kilo Code" } }
 Write-Host ""
 Write-Host "  SentiVue Oracle agent tab - $engineName (local models)" -ForegroundColor Cyan
 if ($branch) {
@@ -34,7 +35,11 @@ if ($branch) {
 }
 Write-Host ""
 
-$launcher = if ($Engine -eq "claude") { "engines\claude-code\launch.ps1" } else { "engines\opencode\launch.ps1" }
+$launcher = switch ($Engine) {
+    "claude"   { "engines\claude-code\launch.ps1" }
+    "opencode" { "engines\opencode\launch.ps1" }
+    "kilo"     { "engines\kilo\launch.ps1" }
+}
 Set-Location $dir
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root $launcher)
 
