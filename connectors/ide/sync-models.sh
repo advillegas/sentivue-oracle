@@ -108,15 +108,18 @@ pick_tier() {  # pick_tier <wanted> <slot-pref...>
 
 sonnet="$(pick_tier "$(tier_from_env SONNET_MODEL)" fast big)"
 opus="$(pick_tier "$(tier_from_env OPUS_MODEL)" big fast)"
-# haiku = the SMALLEST fast model on disk, even off-profile: background traffic
-# (overseer, audits, research) must ride a separate model process so it never
-# evicts the primary model's KV prefix cache (eviction = multi-minute re-prefills
-# that read as watchdog stalls; measured 115s cold vs 2s cached, 2026-07-11).
+# haiku = the smallest fast model that can HOLD AN AGENT SESSION (ctx >= 32k).
+# A separate small process protects the primary model's prefix cache, but a
+# model too small for engine sessions is worse than eviction (16k 7B died on
+# tool grammar + context floor, FAILURES 2026-07-11). No qualifying small
+# model => haiku rides the sonnet model.
 haiku=""
 smallest=""
 smallest_size=0
 for m in "${chat[@]:-}"; do
   [[ -n "$m" && "$(slot_of "$m")" == "fast" ]] || continue
+  ctx_m="$(ctx_of "$m")"
+  [[ "$ctx_m" =~ ^[0-9]+$ && "$ctx_m" -ge 32768 ]] || continue
   sz="$(find "$ROOT/models/$m" -name '*.gguf' -type f -exec stat -f%z {} + 2>/dev/null | awk '{s+=$1} END {print s+0}')"
   [[ "$sz" -gt 0 ]] || sz="$(find "$ROOT/models/$m" -name '*.gguf' -type f -exec stat -c%s {} + 2>/dev/null | awk '{s+=$1} END {print s+0}')"
   if [[ "$sz" -gt 0 && ( -z "$smallest" || "$sz" -lt "$smallest_size" ) ]]; then
@@ -124,6 +127,7 @@ for m in "${chat[@]:-}"; do
   fi
 done
 [[ -n "$smallest" ]] && haiku="$smallest"
+[[ -z "$haiku" ]] && haiku="$sonnet"
 [[ -z "$haiku" ]] && haiku="$(pick_tier "$(tier_from_env HAIKU_MODEL)" fast big)"
 
 anchor="$sonnet"

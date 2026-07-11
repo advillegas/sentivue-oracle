@@ -75,18 +75,22 @@ function Pick-Tier([string]$Wanted, [string[]]$SlotPref) {
 }
 $sonnet = Pick-Tier $want["SONNET_MODEL"] @("fast", "big")
 $opus   = Pick-Tier $want["OPUS_MODEL"]   @("big", "fast")
-# haiku = the SMALLEST fast model on disk, even off-profile: background traffic
-# (overseer, audits, research) must ride a separate model process so it never
-# evicts the primary model's KV prefix cache - eviction forces full multi-minute
-# re-prefills that read as watchdog stalls (measured 2026-07-11: 115s cold vs
-# 2s cached on this box).
+# haiku = the smallest fast model that can HOLD AN AGENT SESSION (ctx >= 32k).
+# A separate small process protects the primary model's KV prefix cache from
+# background traffic - but a model too small for engine sessions is worse than
+# eviction: the 16k 7B died on Claude Code's tool grammar AND its context floor
+# (FAILURES 2026-07-11). No qualifying small model => haiku rides the sonnet
+# model and cache eviction is the accepted cost.
 $haiku = $null
-$fastOnDisk = $chat | Where-Object { $Meta.ContainsKey($_) -and $Meta[$_].Slot -eq "fast" } | ForEach-Object {
+$fastOnDisk = $chat | Where-Object {
+    $Meta.ContainsKey($_) -and $Meta[$_].Slot -eq "fast" -and $Meta[$_].Ctx -ge 32768
+} | ForEach-Object {
     $sz = (Get-ChildItem (Join-Path $Root "models\$_") -Recurse -Filter "*.gguf" -ErrorAction SilentlyContinue |
         Measure-Object Length -Sum).Sum
     if ($sz) { [pscustomobject]@{ Id = $_; Size = $sz } }
 } | Sort-Object Size
 if ($fastOnDisk) { $haiku = ($fastOnDisk | Select-Object -First 1).Id }
+if (-not $haiku) { $haiku = $sonnet }
 if (-not $haiku) { $haiku = Pick-Tier $want["HAIKU_MODEL"] @("fast", "big") }
 
 # anchor = default chat model everywhere; never an embedding model

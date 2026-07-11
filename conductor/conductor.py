@@ -126,6 +126,15 @@ def git(repo: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProce
     return sh(["git", "-C", str(repo), *args], timeout=timeout)
 
 
+def rel_to_root(p: Path) -> str:
+    """Path for human display: relative to the repo when possible (memory and
+    report dirs may live elsewhere, e.g. under test harnesses)."""
+    try:
+        return str(p.relative_to(ROOT))
+    except ValueError:
+        return str(p)
+
+
 def _pid_alive(pid: int) -> bool:
     """NB: os.kill(pid, 0) is NOT a liveness probe on Windows (it terminates)."""
     if IS_WIN:
@@ -1458,7 +1467,7 @@ class Conductor:
             except Exception as e:
                 self.ledger("OVERSEER ERROR", str(e)[:200])
             p = self.report(overseer_text=osr)
-            self.ledger("HOURLY REPORT", str(p.relative_to(ROOT)))
+            self.ledger("HOURLY REPORT", rel_to_root(p))
 
     # ---- main loop ----------------------------------------------------------
     def run(self) -> int:
@@ -1526,7 +1535,7 @@ class Conductor:
             self.write_state()
             self.vault_backup()                    # everything, incl. task branches kept for forensics
             p = self.report(final=True)
-            self.ledger("MISSION END", str(p.relative_to(ROOT)))
+            self.ledger("MISSION END", rel_to_root(p))
         return 0 if all(t.status == "done" for t in self.m.tasks if not t.background) else 1
 
 
