@@ -10,6 +10,8 @@
 #
 # NOTE: checks below use `python -m pytest`; ensure-tools provisions python+pytest
 # automatically at mission start (bootstrap/ensure-tools.ps1|.sh).
+# macOS: `python` is not a stock binary - if re-running this mission there,
+# change the pytest checks to `uv run --project env pytest ...` (env ships pytest).
 
 [mission]
 name = "platform-hardening"

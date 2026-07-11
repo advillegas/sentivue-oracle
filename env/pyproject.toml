@@ -39,6 +39,8 @@ dependencies = [
     # db clients
     "psycopg[binary]>=3.2,<4",
     "sqlalchemy>=2.0,<3",
+    # test runner (mission deterministic checks run pytest)
+    "pytest>=8,<9",
 ]
 
 [project.optional-dependencies]

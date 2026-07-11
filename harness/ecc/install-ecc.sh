@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install a pinned, curated subset of ECC (harness skills) into both engines.
 # ECC complements the engines: it is a config/skill layer, not an agent itself.
+# NOTE: stock macOS bash is 3.2 - no associative arrays in this file.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/VERSIONS.lock"
@@ -17,46 +18,53 @@ else
   echo "==> ECC vendor checkout present ($(git -C "$VENDOR" describe --tags --always))"
 fi
 
-# Catalog every skill directory in the checkout (any depth: <name>/SKILL.md).
-declare -A CATALOG
-while IFS= read -r skill_md; do
+# Catalog every skill directory (any depth: <name>/SKILL.md) as "name<TAB>dir".
+CATALOG="$(mktemp)"
+trap 'rm -f "$CATALOG"' EXIT
+find "$VENDOR" -name SKILL.md -not -path "*/node_modules/*" 2>/dev/null | while IFS= read -r skill_md; do
   dir="$(dirname "$skill_md")"
-  CATALOG["$(basename "$dir")"]="$dir"
-done < <(find "$VENDOR" -name SKILL.md -not -path "*/node_modules/*" 2>/dev/null)
+  printf '%s\t%s\n' "$(basename "$dir")" "$dir"
+done > "$CATALOG"
 
-echo "==> ECC catalog: ${#CATALOG[@]} skills available"
+echo "==> ECC catalog: $(wc -l < "$CATALOG" | xargs) skills available"
 
-install_one() {
-  local name="$1"
-  rm -rf "$CC_DIR/ecc-$name" "$OC_DIR/ecc-$name"
-  cp -R "${CATALOG[$name]}" "$CC_DIR/ecc-$name"
-  cp -R "${CATALOG[$name]}" "$OC_DIR/ecc-$name"
-  echo "    + ecc-$name"
+lookup() {  # lookup <name> -> dir (empty if absent)
+  awk -F'\t' -v n="$1" '$1 == n { print $2; exit }' "$CATALOG"
 }
 
-installed=0; missing=()
+install_one() {  # install_one <name> <dir>
+  rm -rf "$CC_DIR/ecc-$1" "$OC_DIR/ecc-$1"
+  cp -R "$2" "$CC_DIR/ecc-$1"
+  cp -R "$2" "$OC_DIR/ecc-$1"
+  echo "    + ecc-$1"
+}
+
+installed=0; missing=""
 while IFS= read -r line; do
   line="$(echo "$line" | xargs)"
   [[ -z "$line" || "$line" == \#* ]] && continue
   if [[ "$line" == ~* ]]; then
     pat="${line#\~}"; hit=0
-    for name in "${!CATALOG[@]}"; do
+    while IFS=$'\t' read -r name dir; do
       if [[ "$name" == *"$pat"* ]]; then
-        install_one "$name"; installed=$((installed+1)); hit=1
+        install_one "$name" "$dir"; installed=$((installed+1)); hit=1
       fi
-    done
-    [[ $hit -eq 0 ]] && missing+=("~$pat")
-  elif [[ -n "${CATALOG[$line]:-}" ]]; then
-    install_one "$line"; installed=$((installed+1))
+    done < "$CATALOG"
+    [[ $hit -eq 0 ]] && missing="$missing ~$pat"
   else
-    missing+=("$line")
+    dir="$(lookup "$line")"
+    if [[ -n "$dir" ]]; then
+      install_one "$line" "$dir"; installed=$((installed+1))
+    else
+      missing="$missing $line"
+    fi
   fi
 done < "$PROFILE"
 
 echo "==> installed $installed ECC skills (prefixed 'ecc-') into both engines"
-if [[ ${#missing[@]} -gt 0 ]]; then
-  echo "NOTE: no catalog match for: ${missing[*]}"
+if [[ -n "$missing" ]]; then
+  echo "NOTE: no catalog match for:$missing"
   echo "      Full catalog of available names:"
-  printf '        %s\n' "${!CATALOG[@]}" | sort
+  cut -f1 "$CATALOG" | sort | sed 's/^/        /'
   echo "      Tune harness/ecc/profile.txt and re-run 'make ecc' if desired."
 fi

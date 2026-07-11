@@ -16,7 +16,14 @@ echo "==> [1/8] Homebrew packages"
 command -v brew >/dev/null || { echo "ERROR: install Homebrew first: https://brew.sh"; exit 1; }
 brew install "$LLAMA_CPP_BREW_FORMULA" "node@${NODE_MAJOR}" uv jq git gettext || true
 brew pin "$LLAMA_CPP_BREW_FORMULA" || true
-chmod +x bootstrap/*.sh serving/service.sh engines/*/launch.sh harness/ecc/install-ecc.sh 2>/dev/null || true
+# node@N is keg-only: without linking, npm/node are NOT on PATH on a clean Mac
+if ! command -v node >/dev/null; then
+  brew link --overwrite --force "node@${NODE_MAJOR}" || true
+fi
+command -v node >/dev/null || export PATH="$(brew --prefix)/opt/node@${NODE_MAJOR}/bin:$PATH"
+command -v npm >/dev/null || { echo "ERROR: npm still not on PATH after linking node@${NODE_MAJOR}"; exit 1; }
+chmod +x bootstrap/*.sh serving/service.sh engines/*/launch.sh harness/ecc/install-ecc.sh \
+         bin/* connectors/ide/*.sh connectors/gitea/*.sh 2>/dev/null || true
 
 echo "==> [2/8] llama-swap ${LLAMA_SWAP_VERSION} (pinned release binary)"
 mkdir -p .tools/bin
