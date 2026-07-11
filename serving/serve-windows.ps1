@@ -83,14 +83,16 @@ switch ($Cmd) {
             $gpu = ""
             if ($sizeGB -gt [Math]::Max(1.0, $vramGB * 0.8)) { $gpu = " --n-gpu-layers 0" }
             # Context floor matters more than parallelism: agentic engines need
-            # >25k tokens just to open a session, and llama-server SPLITS ctx
-            # across --parallel slots. On low-RAM boxes serve one 32k slot
-            # instead of two 8k slots that no engine can use.
+            # >25k tokens to OPEN a session and blow past 50k mid-task (observed
+            # 53k, seed brain V14/E19 incident). llama-server SPLITS ctx across
+            # --parallel slots, so low-RAM boxes serve ONE 64k slot with q8 KV
+            # (~3 GB for a 30B GQA model) instead of parallel slots too small
+            # for any engine to use.
             $ctx = [int]$r.Ctx
             $par = 2
             $kv = ""
             if ($ramGB -lt 48 -and $r.Slot -ne "embed") {
-                $ctx = [Math]::Min($ctx, 32768)
+                $ctx = [Math]::Min($ctx, 65536)
                 $par = 1
                 # q8 KV cache halves context memory; requires flash attention
                 $kv = " -fa on --cache-type-k q8_0 --cache-type-v q8_0"
