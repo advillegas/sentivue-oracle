@@ -175,7 +175,8 @@ def acquire_singleton() -> None:
 
 TASK_FIELDS = {"id", "title", "prompt", "depends_on", "acceptance", "checks", "tier",
                "audit_tier", "timeout_minutes", "stall_minutes", "max_attempts",
-               "adversary", "escalate", "background", "requires_approval", "research"}
+               "adversary", "escalate", "background", "requires_approval", "research",
+               "best_of_n"}
 
 
 @dataclass
@@ -197,6 +198,8 @@ class Task:
     background: bool = False         # only runs when nothing else is dispatchable
     requires_approval: bool = False  # waits until memory/APPROVALS.md has 'APPROVE <id>'
     research: bool = False           # read-only researcher pass feeds the first attempt
+    best_of_n: int = 1               # frontier resampling: N independent candidates on
+                                     # attempt 1; checks+audit pick the winner (max 3)
     # runtime state
     status: str = "pending"          # pending|claimed|running|auditing|done|failed|blocked|merge-conflict
     attempts: int = 0
@@ -208,6 +211,7 @@ class Task:
         clean["background"] = background or bool(clean.get("background"))
         t = Task(**clean)
         t.timeout_minutes = min(int(t.timeout_minutes), 120)
+        t.best_of_n = max(1, min(int(t.best_of_n), 3))
         if t.tier not in TIER_MODEL:
             t.tier = "sonnet"
         if t.audit_tier not in TIER_MODEL:
@@ -500,7 +504,7 @@ class Conductor:
                 return self.m.repo
             return wt
 
-    def merge_task(self, t: Task, wt: Path) -> bool:
+    def merge_task(self, t: Task, wt: Path, branch_name: str | None = None) -> bool:
         """Advance the mission branch to the audited task tip.
 
         Sequential merges from the current mission tip make this a fast-forward,
@@ -512,7 +516,7 @@ class Conductor:
         with self.gitlock:
             git(wt, "add", "-A")
             git(wt, "commit", "-m", f"task({t.id}): {t.title} [audit: pass]")
-            task_branch = self.task_branch(t)
+            task_branch = branch_name or self.task_branch(t)
             if git(self.m.repo, "merge-base", "--is-ancestor", self.branch, task_branch).returncode != 0:
                 r = git(wt, "rebase", self.branch)
                 if r.returncode != 0:
@@ -531,6 +535,34 @@ class Conductor:
             git(self.m.repo, "branch", "-D", task_branch)
         self.vault_backup([self.branch])          # offline private remote, if configured
         return True
+
+    def make_candidate_worktree(self, t: Task, k: int) -> tuple[Path | None, str]:
+        """Independent worktree+branch for tournament candidate k (fresh from the
+        mission tip - candidates never see each other's work)."""
+        if not self.use_git:
+            return None, ""
+        with self.gitlock:
+            if git(self.m.repo, "rev-parse", "--verify", self.branch).returncode != 0:
+                git(self.m.repo, "branch", self.branch)
+            branch = f"{self.task_branch(t)}-cand{k}"
+            wt = WORKTREES / f"{self.m.name}-{t.id}-cand{k}"
+            if wt.exists():
+                git(self.m.repo, "worktree", "remove", "--force", str(wt))
+            git(self.m.repo, "worktree", "prune")
+            git(self.m.repo, "branch", "-D", branch)
+            r = git(self.m.repo, "worktree", "add", "-b", branch, str(wt), self.branch)
+            if r.returncode != 0:
+                self.ledger("WORKTREE ERROR", f"cand{k}: {r.stdout[-300:]}")
+                return None, ""
+            return wt, branch
+
+    def drop_worktree(self, wt: Path | None, branch: str) -> None:
+        if not self.use_git or wt is None:
+            return
+        with self.gitlock:
+            git(self.m.repo, "worktree", "remove", "--force", str(wt))
+            if branch:
+                git(self.m.repo, "branch", "-D", branch)
 
     def vault_backup(self, refs: list[str] | None = None) -> None:
         """Push work to the local 'vault' remote (bare repo on this machine â€”
@@ -763,9 +795,81 @@ class Conductor:
         """Stop dispatching new engine runs 10 minutes before the deadline."""
         return self.deadline - 600
 
+    def best_of_n_round(self, t: Task, brief: str) -> bool:
+        """Frontier resampling (seed brain: 'best-of-n plus adversarial
+        verification where correctness outranks latency - free with local
+        tokens'). Generate N independent candidates from the same base, gate
+        each through deterministic checks, audit the survivors, merge the first
+        candidate that passes everything. Returns True when a winner merged."""
+        n = t.best_of_n
+        self.ledger(f"TOURNAMENT {t.id}", f"best-of-{n}: independent candidates, "
+                                          "checks gate, audit picks the winner")
+        survivors: list[tuple[int, Path, str]] = []
+        for k in range(1, n + 1):
+            if time.monotonic() >= self.cutoff():
+                break
+            wt, branch = self.make_candidate_worktree(t, k)
+            if wt is None:
+                return False                      # no git: caller falls back to single-path
+            if brief:
+                (wt / "RESEARCH.md").write_text(f"# Researcher brief — {t.id}\n\n{brief}\n",
+                                                encoding="utf-8")
+            out = self.run_engine(self.developer_prompt(t, "", brief), t.tier, wt,
+                                  t.timeout_minutes, f"{t.id}-cand{k}",
+                                  stall_min=t.stall_minutes)
+            if "[WATCHDOG] killed" in out or re.match(r"API Error:", out.strip()):
+                self.ledger(f"TOURNAMENT {t.id}", f"candidate {k}: run failed (infra/watchdog)")
+                self.drop_worktree(wt, branch)
+                continue
+            ok, checks_out = self.run_checks(t, wt)
+            self.proc("candidate", task=t.id, k=k, checks="pass" if ok else "fail")
+            if ok:
+                survivors.append((k, wt, branch))
+            else:
+                self.ledger(f"TOURNAMENT {t.id}", f"candidate {k}: checks failed")
+                self.drop_worktree(wt, branch)
+        self.ledger(f"TOURNAMENT {t.id}", f"{len(survivors)}/{n} candidates passed checks")
+        winner_found = False
+        for k, wt, branch in survivors:
+            if not winner_found:
+                ok, verdict = self.audit(t, wt)
+                self.ledger(f"AUDIT {t.id}", f"candidate {k}: {verdict[:200]}")
+                if ok:
+                    if t.adversary:
+                        self.adversary_pass(t, wt)
+                    if self.merge_task(t, wt, branch_name=branch):
+                        t.status = "done"
+                        self.proc("attempt", task=t.id, attempt=t.attempts, tier=t.tier,
+                                  escalated=False, outcome="done", tournament=k)
+                        self.regression_sweep()
+                        winner_found = True
+                        continue
+            self.drop_worktree(wt, branch)
+        return winner_found
+
     def run_task(self, t: Task) -> None:
         feedback = ""
         infra_strikes = 0
+        # Tournament path: attempt 1 samples N candidates; on a fully failed
+        # round the task falls through to the normal retry ladder below.
+        if t.best_of_n > 1 and self.use_git:
+            t.attempts += 1
+            t.status = "running"
+            self.current = f"task {t.id} (best-of-{t.best_of_n} tournament, {t.tier})"
+            self.write_state()
+            brief = ""
+            if t.research:
+                try:
+                    rwt = self.make_worktree(t)
+                    brief = self.research_pass(t, rwt)
+                except Exception as e:
+                    self.ledger(f"RESEARCH ERROR {t.id}", str(e)[:200])
+            if self.best_of_n_round(t, brief):
+                return
+            feedback = ("A best-of-N tournament ran: no candidate passed checks+audit. "
+                        "Study FEEDBACK/RESEARCH context and take a fundamentally "
+                        "different approach.")
+            self.log_failure(t, "tournament", f"best-of-{t.best_of_n}: no candidate survived")
         while t.attempts < t.max_attempts:
             if time.monotonic() >= self.cutoff():
                 t.status, t.note = "pending", "deadline reached before dispatch"

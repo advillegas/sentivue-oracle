@@ -1,0 +1,4 @@
+{"ts": "2026-07-11T14:12:32", "mode": "reference", "passed": 1, "total": 2, "outcomes": {"t01-interval-merge": true, "t02-csv-outliers": false}, "secs": 0, "bench_sha": "aabc84c"}
+{"ts": "2026-07-11T14:12:33", "mode": "placebo", "passed": 0, "total": 2, "outcomes": {"t01-interval-merge": false, "t02-csv-outliers": false}, "secs": 0, "bench_sha": "aabc84c"}
+{"ts": "2026-07-11T14:13:40", "mode": "reference", "passed": 2, "total": 2, "outcomes": {"t01-interval-merge": true, "t02-csv-outliers": true}, "secs": 0, "bench_sha": "aabc84c"}
+{"ts": "2026-07-11T14:13:40", "mode": "placebo", "passed": 0, "total": 2, "outcomes": {"t01-interval-merge": false, "t02-csv-outliers": false}, "secs": 0, "bench_sha": "aabc84c"}

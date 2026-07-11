@@ -1,0 +1,175 @@
+# Frontier-parity mission — the loop builds its own frontier mechanisms.
+# Supersedes platform-hardening (its unfinished tasks are carried forward).
+#
+# Thesis (SEED-BRAIN): frontier capability is a property of the SYSTEM.
+# This mission adds the measurement (bench/), the observability (bin/trace),
+# and the loop's own regression net (conductor tests) — verified by the
+# normal checks -> independent audit -> merge protocol, with the new
+# best-of-N tournament getting its first live outings.
+#
+# Launch:  bin\oracle.ps1 mission conductor\missions\frontier-parity.toml claude 8
+
+[mission]
+name = "frontier-parity"
+goal = "Build the platform's frontier mechanisms: a pytest regression net over the conductor's pure logic, the bin/trace observability CLI over engine session logs, and the complete calibrated 12-task benchmark suite per bench/PROTOCOL.md - all merged only after independent audit."
+engine = "claude"
+hours = 8
+report_minutes = 60
+workers = 1
+
+[[tasks]]
+id = "tests-parsing"
+title = "Pytest suite for conductor parsing (parse_plan, extract_result, Task.from_dict)"
+research = true
+best_of_n = 2              # first live tournament: 2 candidates, checks+audit pick
+prompt = """Create conductor/tests/test_parsing.py (conductor/tests/__init__.py exists)
+with a pytest suite for the PURE functions in conductor/conductor.py (import via:
+import sys, pathlib; sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]));
+import conductor as C).
+
+Cover, at minimum:
+- C.parse_plan: valid ```json fenced array round-trips into Tasks; invalid JSON and
+  empty arrays return []; duplicate ids reject the block; unknown/self depends_on are
+  pruned; >10 tasks truncate to 10; the LAST valid json block wins.
+- C.extract_result (engine='claude'): picks the final {"type":"result"} event text
+  from stream-json lines; falls back to the raw tail without one; engine='opencode'
+  returns raw text unchanged.
+- C.Task.from_dict: unknown keys dropped; bad tier/audit_tier clamp to 'sonnet';
+  timeout_minutes clamps to <=120; best_of_n clamps into [1,3]; research and
+  requires_approval booleans parse.
+Do NOT import anything that talks to git, network, or llama-swap; test pure logic
+only. Do NOT modify conductor.py."""
+acceptance = [
+  "python -m pytest conductor/tests -q passes from a clean state",
+  "parse_plan edge cases covered: invalid JSON, duplicate ids, dep pruning, >10 truncation, last-block-wins",
+  "extract_result covered for result event, raw fallback, opencode passthrough",
+  "Task.from_dict clamps covered including best_of_n [1,3]",
+]
+checks = ["python -m pytest conductor/tests -q"]
+tier = "sonnet"
+timeout_minutes = 35
+
+[[tasks]]
+id = "trace-cli"
+title = "bin/trace: query CLI over engine session logs (decision 0003)"
+best_of_n = 2
+prompt = """Create bin/trace.py - a stdlib-only Python 3.12 CLI over the stream-json
+engine session logs in logs/*.log (each line is a JSON event; non-JSON lines occur
+and must be skipped). Subcommands:
+- list [--mission M]: one row per log file: name, mtime, event count, assistant
+  turns, tool_use count, total output tokens (sum usage.output_tokens across
+  assistant events), and outcome (from the final result event: subtype + is_error).
+- show <log>: chronological tree of the session: assistant text (first 80 chars),
+  tool_use name + key input (command/file_path/pattern), tool_result status
+  (ok/error) - indent tool events under their turn.
+- diff <a> <b>: compare two sessions: counts (turns, tool calls by name, tokens),
+  plus tools present in one but not the other.
+- grep <pattern> [--mission M]: search event JSON text across logs; print
+  log:line-number: match (first 120 chars).
+Also create conductor/tests/test_trace.py with pytest coverage using small synthetic
+log fixtures written to tmp_path (cover: list counts, show tree order, diff tool
+deltas, grep hits, malformed lines skipped). Read logs with encoding='utf-8',
+errors='replace'."""
+acceptance = [
+  "python bin/trace.py list runs against real logs/ without error",
+  "python -m pytest conductor/tests/test_trace.py -q passes from clean state",
+  "malformed/non-JSON lines are skipped, never crash",
+]
+checks = [
+  "python -m pytest conductor/tests/test_trace.py -q",
+  "python bin/trace.py list",
+]
+tier = "sonnet"
+timeout_minutes = 40
+
+[[tasks]]
+id = "bench-suite"
+title = "Author the remaining 10 benchmark tasks + calibrate (bench/PROTOCOL.md)"
+research = true
+adversary = true           # the suite IS the measuring instrument - attack it
+prompt = """Read bench/PROTOCOL.md and the two seed tasks under bench/tasks/ (t01, t02)
+as the authoring pattern. Author tasks t03..t12 (10 new) matching the protocol's
+composition: 2 more algorithmic, 2 data-structure invariants, 2 parsing/regex,
+1 file-IO round-trip, 2 bug-fix-on-provided-broken-code (PROMPT.md embeds the broken
+code to fix), 1 numerics/edge-cases. Each task dir: PROMPT.md (self-contained spec
+naming solution.py + exact function signatures), test.py (stdlib, deterministic,
+exit 0 iff pass, meaningful asserts incl. edge cases), reference.py (correct solution).
+Tests must import solution (never reference). Difficulty target: a strong developer
+solves each in 5-15 minutes; tests must catch plausible wrong implementations, not
+just the happy path. Then calibrate: python bench/run.py --mode reference must print
+12/12 and exit 0; --mode placebo must print 0/12 and exit 0. Do NOT run scored
+raw/harnessed modes (they are budgeted looks per protocol V8)."""
+acceptance = [
+  "10 new task dirs t03..t12 with PROMPT.md + test.py + reference.py each",
+  "python bench/run.py --mode reference prints 12/12 and exits 0",
+  "python bench/run.py --mode placebo prints 0/12 and exits 0",
+]
+checks = [
+  "python bench/run.py --mode reference",
+  "python bench/run.py --mode placebo",
+]
+tier = "sonnet"
+timeout_minutes = 60
+
+[[tasks]]
+id = "windows-doctor"
+title = "Port the doctor to Windows (bootstrap/doctor.ps1)"
+prompt = """Create bootstrap/doctor.ps1 - the Windows twin of bootstrap/doctor.sh (read
+it first for style: one verdict line per subsystem, exit 0 unless critically broken).
+Check: real Python (not the WindowsApps stub) + pytest importable; node + repo-local
+engines (.tools/npm/claude.cmd, .tools/npm/opencode.cmd); llama-swap health at
+http://127.0.0.1:9099/health (DOWN = warning, not failure); every *_MODEL in
+serving/tiers.env has a .gguf under models/; skills synced into both engines
+(engines/claude-code/home/skills non-empty + opencode twin); git vault remote
+configured; free disk (warn under 50 GB). ASCII only, PowerShell 5.1 compatible,
+$ErrorActionPreference = 'Continue'."""
+acceptance = [
+  "powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap/doctor.ps1 exits 0 on this machine",
+  "each subsystem prints exactly one verdict line",
+  "llama-swap DOWN degrades to a warning, not a non-zero exit",
+]
+checks = ["powershell -NoProfile -ExecutionPolicy Bypass -File bootstrap/doctor.ps1; if ($LASTEXITCODE -ne 0) { exit 1 }"]
+tier = "sonnet"
+timeout_minutes = 35
+
+[[tasks]]
+id = "loop-smoke"
+title = "Offline conductor smoke test (scripted engine, no models)"
+depends_on = ["tests-parsing"]
+adversary = true
+prompt = """Create conductor/tests/test_loop_smoke.py: an end-to-end conductor test
+that runs WITHOUT llama-swap, git remotes, or real engines. Monkeypatch:
+Conductor.run_engine to return scripted outputs (developer transcript ending in a
+'DONE' status line, then 'AUDIT: PASS' for the audit call); ensure_serving and
+ensure_tools to no-ops; point conductor module MEMORY/REPORTS/LOGS/WORKTREES
+constants at tmp_path subdirs. Build a Mission in a tmp_path git repo (git init,
+user config, one commit) with one task (no checks). Assert: run() returns 0; the
+task ends 'done'; LEDGER.md contains DISPATCH and AUDIT entries; STATE.md and
+FINAL-REPORT.md exist. Under 60 seconds; pytest.mark.skipif when git is missing.
+Fix conductor.py ONLY if the test exposes a real bug, minimally, noted in the ledger."""
+acceptance = [
+  "python -m pytest conductor/tests -q passes from a clean state",
+  "smoke test covers claim -> dispatch -> audit -> merge -> report with no network or models",
+  "completes in under 60 seconds",
+]
+checks = ["python -m pytest conductor/tests -q"]
+tier = "sonnet"
+timeout_minutes = 60
+
+[[background]]
+id = "platform-map"
+title = "Generate docs/PLATFORM-MAP.md"
+prompt = """Write docs/PLATFORM-MAP.md: one section per top-level directory (bin,
+bootstrap, bench, conductor, connectors, engines, harness, serving, skills, memory),
+each with purpose (2 sentences), load-bearing files, and connections (who calls it,
+what it writes). Derive from the actual tree - no invention. Include a mermaid
+diagram of the mission loop (conductor -> worktree -> engine -> checks -> audit ->
+merge -> regression sweep -> report/overseer)."""
+acceptance = [
+  "docs/PLATFORM-MAP.md exists, covers every listed directory, includes the mermaid loop diagram",
+]
+checks = ["python -c \"import pathlib,sys; p=pathlib.Path('docs/PLATFORM-MAP.md'); sys.exit(0 if p.exists() and p.stat().st_size>1500 else 1)\""]
+tier = "haiku"
+audit_tier = "haiku"
+escalate = false
+timeout_minutes = 30
