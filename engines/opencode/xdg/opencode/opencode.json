@@ -61,7 +61,12 @@
                                                      "DATABASE_URI":  "postgresql://postgres:{env:ORACLE_PG_PASSWORD}@127.0.0.1:54322/postgres"
                                                  },
                                  "enabled":  false
-                             }
+                             },
+                "agent-mcp":  {
+                                  "type":  "remote",
+                                  "url":  "http://127.0.0.1:8100/mcp",
+                                  "enabled":  false
+                              }
             },
     "permission":  {
                        "edit":  "allow",

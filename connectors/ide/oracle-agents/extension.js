@@ -325,6 +325,11 @@ function buildLive() {
   out.push(item("New Agent in Worktree", { icon: "git-branch", cmd: "oracleAgents.newClaudeWorktree", tip: "Isolated worktree + branch: parallel agents never collide" }));
   out.push(item("New Agent (OpenCode)", { icon: "rocket", cmd: "oracleAgents.newOpenCode" }));
   out.push(item("Start Mission (autonomous loop)...", { icon: "play", cmd: "oracleAgents.startMission" }));
+  out.push(item("Orchestration Viewer (Agent-MCP)", {
+    icon: "type-hierarchy",
+    cmd: "oracleAgents.orchestrationViewer",
+    tip: "Watch how agents are orchestrated - agents, tasks, and shared context as a live graph (optional component; installs on first use)",
+  }));
   return out;
 }
 
@@ -390,6 +395,22 @@ function activate(ctx) {
     vscode.window.onDidOpenTerminal((t) => { if (AGENT_RE.test(t.name) && !started.has(t)) started.set(t, Date.now()); trees.live.refresh(); }),
     vscode.window.onDidCloseTerminal((t) => { started.delete(t); trees.live.refresh(); }),
 
+    vscode.commands.registerCommand("oracleAgents.orchestrationViewer", () => {
+      const setup = WIN
+        ? { shellPath: "powershell.exe",
+            shellArgs: ["-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+              `& '${path.join(ROOT, "harness", "agent-mcp", "setup-agent-mcp.ps1")}' install; ` +
+              `& '${path.join(ROOT, "harness", "agent-mcp", "setup-agent-mcp.ps1")}' start`] }
+        : { shellPath: "/bin/bash",
+            shellArgs: ["-c",
+              `bash '${path.join(ROOT, "harness", "agent-mcp", "setup-agent-mcp.sh")}' install && ` +
+              `bash '${path.join(ROOT, "harness", "agent-mcp", "setup-agent-mcp.sh")}' start; exec bash -i`] };
+      const t = vscode.window.createTerminal({
+        name: "Agent-MCP Viewer", iconPath: new vscode.ThemeIcon("type-hierarchy"), ...setup,
+      });
+      t.show();
+      setTimeout(() => vscode.env.openExternal(vscode.Uri.parse("http://127.0.0.1:3847")), 25000);
+    }),
     vscode.commands.registerCommand("oracleAgents.newConversation", () =>
       new ConversationPanel(() => trees.live.refresh())),
     vscode.commands.registerCommand("oracleAgents.revealChat", (id) => {

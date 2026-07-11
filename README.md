@@ -263,6 +263,23 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
   Continue, Kilo Code (generated `~/.config/kilo/kilo.jsonc`), the engine tier maps
   (`serving/tiers.env`), and the opus/sonnet/haiku aliases to models that exist on
   this machine. Download a new model and it shows up everywhere on the next launch.
+- **`oracle agents-ui`** (optional) — the **orchestration viewer**: a vendored,
+  pinned [Agent-MCP](https://github.com/rinadelph/Agent-MCP) deployment pointed
+  entirely at llama-swap (its embeddings ride the local `text-embedding-3-large`
+  alias) and bound to loopback. Watch how agents are orchestrated — agents,
+  tasks, and shared context as a live knowledge graph at `http://127.0.0.1:3847`,
+  with the coordination server (MCP endpoint) on `:8100`. Engines can OPT IN to
+  its create_agent/assign_task/RAG tools: Claude Code via
+  `--mcp-config connectors/mcp.agent-mcp.json`, OpenCode by flipping the
+  `agent-mcp` entry in `opencode.json` to `"enabled": true`. Also launchable
+  from the Agents sidebar ("Orchestration Viewer").
+- **`oracle loops`** — the vendored, pinned
+  [loop-engineering](https://github.com/cobusgreyling/loop-engineering) toolkit:
+  `audit` (Loop Readiness Score for this repo), `init` (scaffold new loop
+  patterns), `cost` (token estimates), `sync` (STATE/LOOP drift detection). The
+  7 production loop patterns are distilled into `skills/loop-engineering` for
+  both engines, and `LOOP.md` documents this platform's own loops, budgets, and
+  kill switches in the same convention.
 - **`oracle console`** — mission control at `http://127.0.0.1:8800`: live mission
   state, one-click operator approvals, the network-request queue, ledger tail, and
   reports (stdlib Python, zero dependencies).

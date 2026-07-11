@@ -63,6 +63,25 @@ switch ($Cmd) {
     "status" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") status }
     "claude"   { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\claude-code\launch.ps1") @Rest }
     "opencode" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\opencode\launch.ps1") @Rest }
+    "agents-ui" {
+        # Agent-MCP orchestration viewer (optional): watch agents/tasks/context live
+        $sub = if ($Rest.Count -ge 1) { $Rest[0] } else { "start" }
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "harness\agent-mcp\setup-agent-mcp.ps1") $sub
+        if ($sub -eq "start") { Start-Sleep 3; Start-Process "http://127.0.0.1:3847" }
+    }
+    "loops" {
+        # loop-engineering CLIs (pinned in .tools\npm): audit|init|cost|sync
+        $env:PATH = (Join-Path $Root ".tools\npm") + ";" + $env:PATH
+        $sub = if ($Rest.Count -ge 1) { $Rest[0] } else { "audit" }
+        $extra = if ($Rest.Count -gt 1) { $Rest[1..($Rest.Count - 1)] } else { @() }
+        switch ($sub) {
+            "audit" { & loop-audit $Root @extra }
+            "init"  { & loop-init $Root @extra }
+            "cost"  { & loop-cost @extra }
+            "sync"  { & loop-sync $Root @extra }
+            default { Write-Host "usage: oracle.ps1 loops {audit|init|cost|sync} [args]" }
+        }
+    }
     "mission" {
         # oracle.ps1 mission <mission.toml> [claude|opencode] [hours]
         if ($Rest.Count -lt 1) { Write-Host "usage: oracle.ps1 mission <mission.toml> [claude|opencode] [hours]"; exit 1 }
@@ -116,6 +135,8 @@ switch ($Cmd) {
         Write-Host "  claude | opencode                         engine sessions on local models"
         Write-Host "  mission <toml> [engine] [hours]           self-governing mission (conductor loop)"
         Write-Host "  retro | state                             process retrospective | mission state"
+        Write-Host "  agents-ui [install|start|stop|status]     orchestration viewer (Agent-MCP, optional)"
+        Write-Host "  loops   audit|init|cost|sync              loop-engineering toolkit"
         Write-Host "  ide  [install|sync]                       Cursor-like IDE (agent tabs, auto-detected models)"
         Write-Host "  desk                                      native desktop app (chat/missions/models/vault)"
         Write-Host "  menu                                      interactive menu (the desktop shortcut opens this)"

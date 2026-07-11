@@ -79,6 +79,14 @@ EOF
       $flags
     ttl: 0
 EOF
+      if [[ "${FAST_ALIASED:-0}" -eq 0 ]]; then
+        FAST_ALIASED=1
+        cat >> "$TMP" <<'EOF'
+    aliases:
+      - gpt-4o-mini
+      - gpt-4o
+EOF
+      fi
       ;;
     embed)
       resident_members+=("$name")
@@ -91,6 +99,15 @@ EOF
       --ctx-size $ctx --mlock
     ttl: 0
 EOF
+      if [[ "${EMBED_ALIASED:-0}" -eq 0 ]]; then
+        EMBED_ALIASED=1
+        cat >> "$TMP" <<'EOF'
+    aliases:
+      - text-embedding-3-large
+      - text-embedding-3-small
+      - text-embedding-ada-002
+EOF
+      fi
       ;;
     *) echo "ERROR: unknown slot '$slot' for $name"; exit 1 ;;
   esac

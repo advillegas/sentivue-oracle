@@ -2,7 +2,7 @@
   "name": "oracle-agents",
   "displayName": "SentiVue Oracle Agents",
   "description": "Agent sidebar in the Secondary Side Bar: open agents and missions, see everything running, jump between them - all on local models.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "sentivue",
   "license": "MIT",
   "engines": { "vscode": "^1.80.0" },
@@ -28,6 +28,7 @@
     },
     "commands": [
       { "command": "oracleAgents.newConversation", "title": "Oracle: New Agent Conversation", "icon": "$(comment-discussion)" },
+      { "command": "oracleAgents.orchestrationViewer", "title": "Oracle: Orchestration Viewer (Agent-MCP)" },
       { "command": "oracleAgents.revealChat", "title": "Oracle: Focus Conversation" },
       { "command": "oracleAgents.newClaude", "title": "Oracle: New Agent Terminal (Claude Code)", "icon": "$(add)" },
       { "command": "oracleAgents.newClaudeWorktree", "title": "Oracle: New Agent in Worktree", "icon": "$(git-branch)" },

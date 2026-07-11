@@ -109,6 +109,20 @@ switch ($Cmd) {
             $lines += "  `"$($r.Name)`":"
             $lines += "    cmd: $cmdline"
             $lines += "    ttl: $ttl"
+            # OpenAI-compatible aliases so stock tools (Agent-MCP RAG, anything
+            # defaulting to OpenAI model names) transparently ride local models.
+            if ($r.Slot -eq "embed" -and -not $script:embedAliased) {
+                $script:embedAliased = $true
+                $lines += "    aliases:"
+                $lines += "      - text-embedding-3-large"
+                $lines += "      - text-embedding-3-small"
+                $lines += "      - text-embedding-ada-002"
+            } elseif ($r.Slot -eq "fast" -and -not $script:fastAliased) {
+                $script:fastAliased = $true
+                $lines += "    aliases:"
+                $lines += "      - gpt-4o-mini"
+                $lines += "      - gpt-4o"
+            }
         }
         Write-Host ("hardware: {0} GB RAM, {1:N1} GB VRAM -> big-model placement {2}" -f `
             $ramGB, $vramGB, $(if ($vramGB -lt 8) { "CPU" } else { "GPU auto-fit" }))

@@ -34,6 +34,22 @@ case "$cmd" in
       ( cd desk && cargo build --release )
     fi
     exec "$BIN" ;;
+  agents-ui)  # Agent-MCP orchestration viewer (optional): watch agents/tasks/context live
+    sub="${1:-start}"
+    bash harness/agent-mcp/setup-agent-mcp.sh "$sub"
+    [[ "$sub" == "start" ]] && { sleep 3; open "http://127.0.0.1:3847" 2>/dev/null || true; }
+    ;;
+  loops)      # loop-engineering CLIs (pinned in .tools/npm): audit|init|cost|sync
+    export PATH="$ROOT/.tools/npm/bin:$PATH"
+    sub="${1:-audit}"; shift || true
+    case "$sub" in
+      audit) exec loop-audit "$ROOT" "$@" ;;
+      init)  exec loop-init "$ROOT" "$@" ;;
+      cost)  exec loop-cost "$@" ;;
+      sync)  exec loop-sync "$ROOT" "$@" ;;
+      *) echo "usage: oracle loops {audit|init|cost|sync} [args]"; exit 1 ;;
+    esac
+    ;;
   mission)    # oracle mission <mission.toml> [claude|opencode] [hours]
     m="${1:?usage: oracle mission <mission.toml> [engine] [hours]}"
     eng="${2:-claude}"; hrs="${3:-24}"
@@ -57,7 +73,9 @@ oracle — offline agentic workstation
   ui             oracle desk             native desktop app (Rust, chat + missions + models + vault)
                  oracle ide [install]    Cursor-like IDE (VSCodium + Continue + Kilo, local models)
                  oracle console          mission control at http://127.0.0.1:8800
+                 oracle agents-ui [install|stop|status]  orchestration viewer (Agent-MCP) at http://127.0.0.1:3847
                  oracle vault ui install|start|stop|status        GitHub-like UI at http://127.0.0.1:3300
+  loops          oracle loops audit|init|cost|sync                loop-engineering toolkit
   git vault      oracle vault init|sync|new|clone|list|backup     (offline private remote)
   maintenance    oracle models           oracle skills        oracle uninstall [--purge]
 EOF

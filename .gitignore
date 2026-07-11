@@ -58,5 +58,8 @@ connectors/supabase/volumes/
 # macOS
 .DS_Store
 
-# vendored ECC checkout (installed, not committed)
-harness/ecc/vendor/
+# vendored harness checkouts (installed, not committed)
+harness/*/vendor/
+
+# Agent-MCP runtime state (sqlite + tokens; machine-local)
+.agent/
