@@ -63,3 +63,8 @@ harness/*/vendor/
 
 # Agent-MCP runtime state (sqlite + tokens; machine-local)
 .agent/
+
+# per-worktree task scaffolding must never land on main (A11 leak guard)
+/TASKPLAN.md
+/RESEARCH.md
+/FEEDBACK.md
