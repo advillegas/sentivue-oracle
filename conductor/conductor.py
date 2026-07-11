@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-SentiVue Oracle conductor — the self-governing mission loop.
+SentiVue Oracle conductor â€” the self-governing mission loop.
 
 Contract (see README):
-  Automations   mission TOML: goal, tasks, dependencies, acceptance criteria — or a
+  Automations   mission TOML: goal, tasks, dependencies, acceptance criteria â€” or a
                 bare goal with auto_plan=true (the planner decomposes it, and replans
                 once if the plan stalls)
   Worktrees     every task runs in an isolated git worktree; merge only after audit
@@ -52,7 +52,7 @@ SWAP_HEALTH = "http://127.0.0.1:9099/health"
 TIER_MODEL = {"opus": "kimi-k2-thinking", "sonnet": "qwen3-coder-480b", "haiku": "qwen3-coder-30b"}
 _tiers_file = ROOT / "serving" / "tiers.env"
 if _tiers_file.exists():
-    for _line in _tiers_file.read_text(encoding="utf-8").splitlines():
+    for _line in _tiers_file.read_text(encoding="utf-8", errors="replace").splitlines():
         _k, _, _v = _line.partition("=")
         _tier = _k.strip().removesuffix("_MODEL").lower()
         if _tier in TIER_MODEL and _v.strip():
@@ -69,7 +69,7 @@ IS_WIN = os.name == "nt"
 def sh(args: list[str], cwd: Path | None = None, timeout: int | None = None,
        env: dict | None = None, stall_timeout: int | None = None) -> subprocess.CompletedProcess:
     """Run a command in its own session/process-group with a total timeout AND an
-    optional output-stall timeout (kill when the process goes silent for too long —
+    optional output-stall timeout (kill when the process goes silent for too long â€”
     catches hung runs long before the total budget is burned)."""
     full_env = {**os.environ, **(env or {})}
     kwargs: dict = {}
@@ -183,7 +183,7 @@ class Mission:
 
     @staticmethod
     def load(path: Path, engine: str | None, hours: float | None) -> "Mission":
-        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+        raw = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
         m = raw.get("mission", {})
         tasks = [Task.from_dict(t) for t in raw.get("tasks", [])]
         tasks += [Task.from_dict(t, background=True) for t in raw.get("background", [])]
@@ -265,14 +265,14 @@ def extract_result(engine: str, raw: str) -> str:
 
 
 def seed_brain_index() -> str:
-    """Compact ID index of the seed brain (engines/shared/SEED-BRAIN.md) —
-    one line per principle — so distillation and retrospective prompts can
+    """Compact ID index of the seed brain (engines/shared/SEED-BRAIN.md) â€”
+    one line per principle â€” so distillation and retrospective prompts can
     cite and extend the founding memory without loading the whole file (C5)."""
     p = ROOT / "engines" / "shared" / "SEED-BRAIN.md"
     if not p.exists():
         return ""
     out = []
-    for line in p.read_text(encoding="utf-8").splitlines():
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
         m = re.match(r"\*\*([OALCEVGM]\d+)\.\*\*\s*`\[(\w+)\]`\s*(.+)", line)
         if m:
             out.append(f"{m.group(1)} [{m.group(2)}]: {m.group(3)[:90]}")
@@ -300,14 +300,14 @@ research=true for tasks entering unfamiliar code or data (a read-only researcher
 briefs the engineer first).
 Prompts are EXECUTABLE DOCUMENTS (seed brain O4): exact file paths, exact commands
 with expected output, concrete acceptance semantics. "TBD", "handle edge cases",
-and "similar to task N" are plan failures — the executing engineer has NO memory
+and "similar to task N" are plan failures â€” the executing engineer has NO memory
 of this conversation and cannot fill gaps you leave.
 Destructive or irreversible operations (database mutations, mass deletes/merges,
 schema changes, anything hard to undo) MUST be split into two tasks: a read-only
 DRY-RUN task that produces a reviewable report, and an EXECUTE task that depends on
 it and carries requires_approval=true. Long-running jobs (big backfills, full
 walk-forwards) MUST be split into a launch task that starts a RESUMABLE,
-checkpointed background job and a separate later verification task — never hold a
+checkpointed background job and a separate later verification task â€” never hold a
 task open waiting on a long job."""
 
 
@@ -361,18 +361,18 @@ class Conductor:
 
     # ---- memory -------------------------------------------------------------
     def ledger(self, event: str, detail: str = "") -> None:
-        line = f"- **{now()}** [{self.m.name}] {event}" + (f" — {detail}" if detail else "")
+        line = f"- **{now()}** [{self.m.name}] {event}" + (f" â€” {detail}" if detail else "")
         path = MEMORY / "LEDGER.md"
         with self.lock:
             if not path.exists():
-                path.write_text("# SentiVue Oracle — Ledger (append-only)\n\n", encoding="utf-8")
+                path.write_text("# SentiVue Oracle â€” Ledger (append-only)\n\n", encoding="utf-8")
             with path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
         print(line, flush=True)
 
     def proc(self, kind: str, **kw) -> None:
         """Process telemetry: one JSON line per process event in memory/PROCESS.jsonl.
-        This is the dataset the retrospective meta-analyzes — the loop documents its
+        This is the dataset the retrospective meta-analyzes â€” the loop documents its
         own working, auditing, and looping behavior as structured data."""
         rec = {"ts": now(), "mission": self.m.name, "kind": kind, **kw}
         with self.lock:
@@ -380,15 +380,15 @@ class Conductor:
                 f.write(json.dumps(rec) + "\n")
 
     def log_failure(self, t: Task, kind: str, detail: str) -> None:
-        """Failure memory: future runs grep this before attempting anything —
+        """Failure memory: future runs grep this before attempting anything â€”
         the cheapest way to stop a 24 h mission from re-running dead ends."""
         p = MEMORY / "FAILURES.md"
         with self.lock:
             if not p.exists():
-                p.write_text("# Failure memory — what did not work and why. "
+                p.write_text("# Failure memory â€” what did not work and why. "
                              "Search this before any risky attempt.\n\n", encoding="utf-8")
             with p.open("a", encoding="utf-8") as f:
-                f.write(f"## {now()} · {self.m.name}/{t.id} · attempt {t.attempts} · {kind}\n"
+                f.write(f"## {now()} Â· {self.m.name}/{t.id} Â· attempt {t.attempts} Â· {kind}\n"
                         f"{detail.strip()[:600]}\n\n")
 
     def write_state(self) -> None:
@@ -397,8 +397,8 @@ class Conductor:
             for t in self.m.tasks)
         left = max(0.0, (self.deadline - time.monotonic()) / 3600)
         state = (
-            f"# STATE — mission `{self.m.name}` ({self.m.engine} engine)\n\n"
-            f"Updated: {now()} · Time left: {left:.1f} h\nGoal: {self.m.goal}\n\n"
+            f"# STATE â€” mission `{self.m.name}` ({self.m.engine} engine)\n\n"
+            f"Updated: {now()} Â· Time left: {left:.1f} h\nGoal: {self.m.goal}\n\n"
             f"Now: {self.current}\n\n"
             f"| task | status | attempts | tier | title |\n|---|---|---|---|---|\n{rows}\n"
         )
@@ -408,7 +408,7 @@ class Conductor:
     # ---- self-healing -------------------------------------------------------
     def ensure_tools(self) -> None:
         """Self-provision the toolbelt before work starts. Doctrine: a missing
-        tool is a task, not a blocker — install it (or queue a NET-REQUEST on the
+        tool is a task, not a blocker â€” install it (or queue a NET-REQUEST on the
         air-gapped node) instead of failing the mission on it."""
         script = ROOT / ("bootstrap/ensure-tools.ps1" if IS_WIN else "bootstrap/ensure-tools.sh")
         if not script.exists():
@@ -425,7 +425,7 @@ class Conductor:
                 with urllib.request.urlopen(SWAP_HEALTH, timeout=5):
                     return
             except Exception:
-                self.ledger("SELF-HEAL", f"llama-swap unhealthy — restart attempt {attempt + 1}")
+                self.ledger("SELF-HEAL", f"llama-swap unhealthy â€” restart attempt {attempt + 1}")
                 if IS_WIN:
                     sh(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                         str(ROOT / "serving/serve-windows.ps1"), "start"], timeout=180)
@@ -487,7 +487,7 @@ class Conductor:
         return True
 
     def vault_backup(self, refs: list[str] | None = None) -> None:
-        """Push work to the local 'vault' remote (bare repo on this machine —
+        """Push work to the local 'vault' remote (bare repo on this machine â€”
         the air-gapped stand-in for a hosted origin). Silent no-op when the
         vault remote isn't configured; failures warn but never block work."""
         if not self.use_git:
@@ -539,10 +539,10 @@ class Conductor:
             return False
         background = [t for t in self.m.tasks if t.background]
         self.m.tasks = tasks + background
-        plan_md = "\n".join(f"- **{t.id}** ({t.tier}, deps: {t.depends_on or '—'}): {t.title}"
+        plan_md = "\n".join(f"- **{t.id}** ({t.tier}, deps: {t.depends_on or 'â€”'}): {t.title}"
                             for t in tasks)
         (MEMORY / "MISSION-PLAN.md").write_text(
-            f"# Mission plan — {self.m.name}\n\n{now()}\nGoal: {self.m.goal}\n\n{plan_md}\n",
+            f"# Mission plan â€” {self.m.name}\n\n{now()}\nGoal: {self.m.goal}\n\n{plan_md}\n",
             encoding="utf-8")
         self.ledger("PLANNED", f"{len(tasks)} tasks: " + ", ".join(t.id for t in tasks))
         return True
@@ -554,7 +554,7 @@ class Conductor:
         failures = ""
         fpath = MEMORY / "FAILURES.md"
         if fpath.exists():
-            failures = fpath.read_text(encoding="utf-8")[-3000:]
+            failures = fpath.read_text(encoding="utf-8", errors="replace")[-3000:]
         tier = "opus" if TIER_MODEL["opus"] != TIER_MODEL["sonnet"] else "sonnet"
         prompt = (
             f"You are the mission PLANNER. The plan has STALLED.\n"
@@ -600,7 +600,7 @@ class Conductor:
         )
         out = self.run_engine(prompt, "haiku", wt, 12, f"{t.id}-research", stall_min=8).strip()
         if out:
-            (wt / "RESEARCH.md").write_text(f"# Researcher brief — {t.id}\n\n{out}\n",
+            (wt / "RESEARCH.md").write_text(f"# Researcher brief â€” {t.id}\n\n{out}\n",
                                             encoding="utf-8")
             self.ledger(f"RESEARCH {t.id}", f"brief written ({len(out.splitlines())} lines)")
             self.proc("research", task=t.id, lines=len(out.splitlines()))
@@ -611,33 +611,33 @@ class Conductor:
         acc = "\n".join(f"  {i+1}. {a}" for i, a in enumerate(t.acceptance)) or "  (none listed)"
         gates = ""
         if t.checks:
-            gates = ("\n\nMECHANICAL GATES — the conductor runs these itself after you finish; "
+            gates = ("\n\nMECHANICAL GATES â€” the conductor runs these itself after you finish; "
                      "every one must exit 0:\n" +
                      "\n".join(f"  $ {c}" for c in t.checks))
         fb = ""
         if feedback:
-            fb = (f"\n\nATTEMPT {t.attempts} — THE PREVIOUS ATTEMPT FAILED. Full details are in "
+            fb = (f"\n\nATTEMPT {t.attempts} â€” THE PREVIOUS ATTEMPT FAILED. Full details are in "
                   "FEEDBACK.md in this directory; the summary:\n"
                   f"{feedback[:1200]}\n"
                   "Do NOT re-run the failed approach harder. First write the DIAGNOSIS block in "
-                  "TASKPLAN.md (root cause, not symptom — 5 lines), then execute a changed plan. "
+                  "TASKPLAN.md (root cause, not symptom â€” 5 lines), then execute a changed plan. "
                   "Repeating a logged failure wastes the mission's budget.")
         rb = ""
         if brief:
-            rb = ("\n\nRESEARCHER BRIEF (read-only recon done for you — full text in "
+            rb = ("\n\nRESEARCHER BRIEF (read-only recon done for you â€” full text in "
                   f"RESEARCH.md here):\n{brief[:2500]}")
         return (
             f"MISSION: {self.m.goal}\nTASK [{t.id}]: {t.title}\n\n{t.prompt}{rb}\n\n"
-            f"ACCEPTANCE CRITERIA (audited independently — all must demonstrably hold):\n"
+            f"ACCEPTANCE CRITERIA (audited independently â€” all must demonstrably hold):\n"
             f"{acc}{gates}{fb}\n\n"
             "You operate under the Long-Horizon Autonomy Protocol (in your loaded instructions). "
             "Non-negotiables for this run:\n"
             f"1. START RITUAL before any edit: read {MEMORY / 'STATE.md'}, the tail of "
-            f"{MEMORY / 'LEDGER.md'}, {MEMORY / 'LESSONS.md'} (hard-won knowledge — do not "
+            f"{MEMORY / 'LEDGER.md'}, {MEMORY / 'LESSONS.md'} (hard-won knowledge â€” do not "
             f"relearn it), and {MEMORY / 'FAILURES.md'} (search '{t.id}'); "
             "run `git log --oneline -10` and `git status` here; read TASKPLAN.md if present.\n"
             "2. Write TASKPLAN.md (GOAL / 3-7 STEPS each with a CHECK / NOT-DOING) before "
-            "touching code; keep it updated — it is your anchor against drift.\n"
+            "touching code; keep it updated â€” it is your anchor against drift.\n"
             "3. Work the ratchet: one step, run its CHECK, commit "
             "(`bash $ORACLE_ROOT/bin/checkpoint \"msg\"` does commit + ledger in one step), "
             "next step. Never end a step with a broken tree.\n"
@@ -648,7 +648,7 @@ class Conductor:
             f"6. Finish: full test suite from clean state, commit, ledger entry to "
             f"{MEMORY / 'LEDGER.md'} (what/why/files/next) INCLUDING one 'friction:' line "
             "naming the biggest process obstacle this run (tooling, prompts, missing info) "
-            "or 'friction: none' — the retrospective mines these to evolve the loop.\n"
+            "or 'friction: none' â€” the retrospective mines these to evolve the loop.\n"
             "Finish with EXACTLY ONE status line (seed brain A6), the last line of your "
             "output:\n"
             "  DONE                          all criteria hold with fresh evidence\n"
@@ -690,10 +690,10 @@ class Conductor:
             f"You are the AUDITOR. Verify task [{t.id}] '{t.title}' in the current directory.\n"
             f"ACCEPTANCE CRITERIA:\n{acc}\n{conc}\nCHANGE SUMMARY:\n{diff}\n\n"
             "Verify the ARTIFACT, not the developer's report (seed brain A7): run the tests "
-            "yourself, inspect the actual changes. Spec compliance first — nothing missing, "
-            "nothing extra — then quality (A8). Do NOT fix anything.\n"
+            "yourself, inspect the actual changes. Spec compliance first â€” nothing missing, "
+            "nothing extra â€” then quality (A8). Do NOT fix anything.\n"
             "Also flag scope drift (changed files the task did not require) and any test that "
-            "was weakened or deleted to force a pass — both are FAIL reasons.\n"
+            "was weakened or deleted to force a pass â€” both are FAIL reasons.\n"
             "Finish with exactly one line: 'AUDIT: PASS' or 'AUDIT: FAIL: <reasons>'."
         )
         out = self.run_engine(prompt, tier or t.audit_tier, wt, 25,
@@ -776,7 +776,7 @@ class Conductor:
                 if infra_strikes >= 3:
                     t.status = "blocked"
                     t.note = f"infrastructure failure x{infra_strikes}: {stripped[:200]}"
-                    self.ledger(f"BLOCKED {t.id}", "persistent engine/API failure — "
+                    self.ledger(f"BLOCKED {t.id}", "persistent engine/API failure â€” "
                                 "check serving context size and engine config")
                     return
                 self.ensure_serving()
@@ -784,9 +784,9 @@ class Conductor:
                 continue
             if "[WATCHDOG] killed" in out:
                 feedback = ("The previous attempt hung (or went silent) and was killed. "
-                            "The approach was likely too monolithic — decompose the work, "
+                            "The approach was likely too monolithic â€” decompose the work, "
                             "commit after every step, avoid long-running commands.")
-                self.ledger(f"WATCHDOG {t.id}", "stalled run killed — retrying")
+                self.ledger(f"WATCHDOG {t.id}", "stalled run killed â€” retrying")
                 self.log_failure(t, "watchdog-kill",
                                  "run exceeded its time box or went silent and was killed")
                 attempt_end("watchdog")
@@ -800,7 +800,7 @@ class Conductor:
                 return
             if re.search(r"^NEEDS_CONTEXT:", last_line, re.M):
                 # A6/A5: under-specified task. Retrying the same prompt harder is
-                # waste — surface it for the planner/operator instead.
+                # waste â€” surface it for the planner/operator instead.
                 t.status, t.note = "blocked", last_line[:300]
                 self.ledger(f"NEEDS_CONTEXT {t.id}", t.note)
                 self.log_failure(t, "needs-context", t.note)
@@ -821,7 +821,7 @@ class Conductor:
             tiebreak = False
             if (not ok and t.checks
                     and TIER_MODEL["opus"] != TIER_MODEL[t.audit_tier]):
-                # Checks passed but the auditor disagrees — tiebreak with the
+                # Checks passed but the auditor disagrees â€” tiebreak with the
                 # strongest model (skipped when the profile maps opus to the same
                 # model, where a re-audit would add nothing).
                 ok2, verdict2 = self.audit(t, wt, tier="opus", tag="-tiebreak")
@@ -849,16 +849,16 @@ class Conductor:
     # ---- approvals (guardian countersign for irreversible work) ---------------
     def approved(self, t: Task) -> bool:
         """Irreversible tasks wait for the operator to write 'APPROVE <id>' into
-        memory/APPROVALS.md — a guardian countersign, not a rubber stamp."""
+        memory/APPROVALS.md â€” a guardian countersign, not a rubber stamp."""
         if not t.requires_approval:
             return True
         ap = MEMORY / "APPROVALS.md"
         if not ap.exists():
-            ap.write_text("# Operator approvals — write 'APPROVE <task-id>' on its own "
+            ap.write_text("# Operator approvals â€” write 'APPROVE <task-id>' on its own "
                           "line to release an irreversible task.\n\n", encoding="utf-8")
             return False
         return re.search(rf"^APPROVE\s+{re.escape(t.id)}\s*$",
-                         ap.read_text(encoding="utf-8"), re.M) is not None
+                         ap.read_text(encoding="utf-8", errors="replace"), re.M) is not None
 
     def awaiting_approval(self) -> list[Task]:
         done = {t.id for t in self.m.tasks if t.status == "done"}
@@ -970,12 +970,12 @@ class Conductor:
     # ---- compounding memory ---------------------------------------------------
     def distill_lessons(self) -> None:
         """End-of-mission: distill the ledger + failure memory into a few reusable
-        lessons in memory/LESSONS.md — the mechanism that makes mission N+1 start
+        lessons in memory/LESSONS.md â€” the mechanism that makes mission N+1 start
         smarter than mission N (the 'do not relearn these' file)."""
         if not any(t.attempts for t in self.m.tasks):
             return
         def tail(p: Path, n: int) -> str:
-            return p.read_text(encoding="utf-8")[-n:] if p.exists() else ""
+            return p.read_text(encoding="utf-8", errors="replace")[-n:] if p.exists() else ""
         prompt = (
             "You are the mission historian. From the records below, distill 3-8 numbered "
             "LESSONS for future missions in this repository: reusable facts, gotchas, "
@@ -984,7 +984,7 @@ class Conductor:
             "Tag every lesson: if it instantiates a seed-brain principle from the index "
             "below, end it with ' [seed: <ID>]'; if it GENERALIZES beyond this repository "
             "and no existing principle covers it, end it with ' [CANDIDATE-PRINCIPLE: "
-            "<series letter O/A/L/C/E/V/G/M>]' — the retrospective promotes candidates "
+            "<series letter O/A/L/C/E/V/G/M>]' â€” the retrospective promotes candidates "
             "into the founding memory. Respond with ONLY the numbered list.\n\n"
             f"SEED-BRAIN INDEX:\n{seed_brain_index()}\n\n"
             f"LEDGER (tail):\n{tail(MEMORY / 'LEDGER.md', 6000)}\n\n"
@@ -999,14 +999,14 @@ class Conductor:
         with self.lock:
             if not p.exists():
                 p.write_text(
-                    "# Lessons — Layer 1 runtime memory (this machine's distilled "
+                    "# Lessons â€” Layer 1 runtime memory (this machine's distilled "
                     "experience).\n# Layer 0 (founding memory) is engines/shared/"
-                    "SEED-BRAIN.md — stable principles with IDs.\n# Read during the "
+                    "SEED-BRAIN.md â€” stable principles with IDs.\n# Read during the "
                     "start ritual; do not relearn these. Lessons tagged "
                     "[CANDIDATE-PRINCIPLE] are\n# promoted into the seed brain by the "
                     "retrospective's amendment flow.\n\n", encoding="utf-8")
             with p.open("a", encoding="utf-8") as f:
-                f.write(f"## {now()} · mission {self.m.name}\n" + "\n".join(lines) + "\n\n")
+                f.write(f"## {now()} Â· mission {self.m.name}\n" + "\n".join(lines) + "\n\n")
         self.ledger("LESSONS", f"{len(lines)} lessons distilled to memory/LESSONS.md")
 
     # ---- the evolving loop (retrospective -> amendments -> measurement) --------
@@ -1017,7 +1017,7 @@ class Conductor:
         per: dict[str, list[dict]] = {}
         order: list[str] = []
         if path.exists():
-            for line in path.read_text(encoding="utf-8").splitlines():
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 try:
                     rec = json.loads(line)
                 except ValueError:
@@ -1080,7 +1080,7 @@ class Conductor:
         self.ledger("RETRO", "meta-analyzing process telemetry")
 
         def tail(p: Path, n: int) -> str:
-            return p.read_text(encoding="utf-8")[-n:] if p.exists() else ""
+            return p.read_text(encoding="utf-8", errors="replace")[-n:] if p.exists() else ""
         friction = "\n".join(ln for ln in tail(MEMORY / "LEDGER.md", 8000).splitlines()
                              if "friction:" in ln.lower())[-1500:]
         amendments = tail(MEMORY / "AMENDMENTS.md", 4000)
@@ -1090,9 +1090,9 @@ class Conductor:
         date = dt.datetime.now().strftime("%Y%m%d")
         prompt = (
             "You are the PROCESS META-ANALYST for an autonomous engineering loop. Your "
-            "subject is the LOOP ITSELF — how it plans, works, documents, audits, retries, "
-            "and merges — not the engineering artifacts it produced.\n"
-            "You are STRICTLY READ-ONLY: edit no files, run no mutations — your entire "
+            "subject is the LOOP ITSELF â€” how it plans, works, documents, audits, retries, "
+            "and merges â€” not the engineering artifacts it produced.\n"
+            "You are STRICTLY READ-ONLY: edit no files, run no mutations â€” your entire "
             "output is this report. Changes happen only through the governed amendment "
             "mission after operator approval.\n\n"
             f"PROCESS METRICS, this mission:\n{json.dumps(cur, indent=1)}\n\n"
@@ -1104,13 +1104,13 @@ class Conductor:
             f"SEED-BRAIN INDEX (founding memory, engines/shared/SEED-BRAIN.md):\n"
             f"{seed_brain_index()}\n\n"
             "Produce:\n"
-            "1. METRICS READING — what moved vs baseline and what it means (be skeptical; "
+            "1. METRICS READING â€” what moved vs baseline and what it means (be skeptical; "
             "small samples prove little).\n"
             "2. VERDICTS on every prior APPLIED amendment: MET / NOT-MET / "
             "INSUFFICIENT-DATA against its registered success criterion, with the number "
             "that decides it, and an action (keep / revert / extend).\n"
             "3. TOP PROCESS BOTTLENECKS (max 3) with evidence from the data above.\n"
-            "4. AMENDMENT PROPOSALS (0-3; propose NOTHING if the evidence is weak — "
+            "4. AMENDMENT PROPOSALS (0-3; propose NOTHING if the evidence is weak â€” "
             "protocol churn is itself a process failure). Each proposal targets exactly "
             "one file among: engines/shared/AUTONOMY.md, engines/shared/CONVENTIONS.md, "
             "engines/shared/SEED-BRAIN.md, skills/*/SKILL.md, or a conductor default, and "
@@ -1118,8 +1118,8 @@ class Conductor:
             "computable from the process metrics above at the next retro.\n"
             "5. PRINCIPLE PROMOTIONS (0-2): incidents from THIS mission whose lesson "
             "GENERALIZES beyond this repository (seed brain M4/M5). Formulate each exactly "
-            "like a seed-brain principle — project specifics removed, the failure kernel "
-            "kept, one imperative rule — and emit it as a proposal whose target is "
+            "like a seed-brain principle â€” project specifics removed, the failure kernel "
+            "kept, one imperative rule â€” and emit it as a proposal whose target is "
             "engines/shared/SEED-BRAIN.md and whose change is: append under '## NEW "
             "PRINCIPLES' the line '**<next free ID in its series>.** `[strong]` <text> "
             "(incident: <mission/task>, " + date + ")'. Never renumber or edit existing "
@@ -1134,7 +1134,7 @@ class Conductor:
         )
         out = self.run_engine(prompt, tier, ROOT, 25, f"retro-{date}", stall_min=15)
         (REPORTS / f"RETRO-{dt.datetime.now():%Y%m%d-%H%M}.md").write_text(
-            f"# Retrospective — mission `{self.m.name}`\n\n{now()}\n\n{out}\n", encoding="utf-8")
+            f"# Retrospective â€” mission `{self.m.name}`\n\n{now()}\n\n{out}\n", encoding="utf-8")
 
         payload: dict = {}
         for block in reversed(re.findall(r"```json\s*(.*?)```", out, re.S)):
@@ -1159,7 +1159,7 @@ class Conductor:
         ap = MEMORY / "AMENDMENTS.md"
         with self.lock:
             if not ap.exists():
-                ap.write_text("# Protocol amendments — PROPOSED by retrospectives, APPLIED by "
+                ap.write_text("# Protocol amendments â€” PROPOSED by retrospectives, APPLIED by "
                               "approval-gated amendment missions, MEASURED at the next retro.\n\n",
                               encoding="utf-8")
             with ap.open("a", encoding="utf-8") as f:
@@ -1167,7 +1167,7 @@ class Conductor:
                     f.write(f"- VERDICT {now()}: {v.get('id')} -> {v.get('verdict')} "
                             f"({v.get('evidence', '')[:200]}) action={v.get('action')}\n")
                 for p in proposals:
-                    f.write(f"\n## {p['id']} · PROPOSED · {now()}\n"
+                    f.write(f"\n## {p['id']} Â· PROPOSED Â· {now()}\n"
                             f"target: {p['target']}\n"
                             f"change: {p['change']}\n"
                             f"rationale: {p.get('rationale', '')}\n"
@@ -1182,7 +1182,7 @@ class Conductor:
 
     def _write_amendment_mission(self, proposals: list[dict], date: str) -> str:
         lines = [
-            "# AUTO-GENERATED by the retrospective — protocol amendment mission.",
+            "# AUTO-GENERATED by the retrospective â€” protocol amendment mission.",
             "# Specs live in memory/AMENDMENTS.md. Approve what you accept:",
             "#   echo APPROVE <task-id> >> memory/APPROVALS.md",
             "",
@@ -1227,12 +1227,12 @@ class Conductor:
         spinning tasks, repeated failures, idle capacity, drift from the goal.
         The verdict lands in the ledger, the telemetry, and the hourly report."""
         def tail(p: Path, n: int) -> str:
-            return p.read_text(encoding="utf-8")[-n:] if p.exists() else ""
+            return p.read_text(encoding="utf-8", errors="replace")[-n:] if p.exists() else ""
         table = "\n".join(f"- {t.id}: {t.status}, attempts {t.attempts}/{t.max_attempts}"
                           f" ({t.note[:100]})" for t in self.m.tasks)
         elapsed = (time.monotonic() - self.t0) / 3600
         prompt = (
-            "You are the mission OVERSEER — the time-use auditor. STRICTLY READ-ONLY: "
+            "You are the mission OVERSEER â€” the time-use auditor. STRICTLY READ-ONLY: "
             "modify nothing; your entire output is this judgment.\n\n"
             f"MISSION GOAL: {self.m.goal}\n"
             f"ELAPSED: {elapsed:.1f} h of {self.m.hours} h budget\n"
@@ -1240,8 +1240,8 @@ class Conductor:
             f"LEDGER (tail):\n{tail(MEMORY / 'LEDGER.md', 4000)}\n\n"
             f"FAILURE MEMORY (tail):\n{tail(MEMORY / 'FAILURES.md', 2000)}\n\n"
             "Judge, in at most 8 lines: (1) is machine time being used effectively "
-            "right now, at this burn rate? (2) is any task spinning — repeated attempts "
-            "hitting the same wall — that should be BLOCKED or rerouted instead of "
+            "right now, at this burn rate? (2) is any task spinning â€” repeated attempts "
+            "hitting the same wall â€” that should be BLOCKED or rerouted instead of "
             "retried? (3) what is the single highest-value next action for the loop? "
             "Then end with EXACTLY one line: 'OVERSEER: OK' or "
             "'OVERSEER: CONCERN: <the one thing to change>'."
@@ -1269,8 +1269,8 @@ class Conductor:
         elapsed = (time.monotonic() - self.t0) / 3600
         name = "FINAL-REPORT.md" if final else f"REPORT-{dt.datetime.now():%Y%m%d-%H%M}.md"
         lines = [
-            f"# {'Final report' if final else 'Hourly report'} — mission `{self.m.name}`",
-            f"\n{now()} · engine {self.m.engine} · elapsed {elapsed:.1f} h of {self.m.hours} h",
+            f"# {'Final report' if final else 'Hourly report'} â€” mission `{self.m.name}`",
+            f"\n{now()} Â· engine {self.m.engine} Â· elapsed {elapsed:.1f} h of {self.m.hours} h",
             f"\n**Happening now:** {self.current}",
             f"\n**Status:** " + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())),
             "\n## Tasks\n| id | status | attempts | note |\n|---|---|---|---|",
@@ -1282,17 +1282,17 @@ class Conductor:
                       "`memory/APPROVALS.md`): " + ", ".join(t.id for t in waiting)]
         nr = MEMORY / "NET-REQUESTS.md"
         if nr.exists():
-            open_reqs = sum(1 for ln in nr.read_text(encoding="utf-8").splitlines()
+            open_reqs = sum(1 for ln in nr.read_text(encoding="utf-8", errors="replace").splitlines()
                             if ln.strip().startswith("- [ ]"))
             if open_reqs:
-                lines += [f"\n**OPEN NETWORK REQUESTS:** {open_reqs} — run `oracle envoy --queue` "
+                lines += [f"\n**OPEN NETWORK REQUESTS:** {open_reqs} â€” run `oracle envoy --queue` "
                           "to fulfil them in a controlled window"]
         nxt = self.dispatchable(False)
-        lines += [f"\n**Planned next:** {nxt.id + ' — ' + nxt.title if nxt else 'nothing pending'}"]
+        lines += [f"\n**Planned next:** {nxt.id + ' â€” ' + nxt.title if nxt else 'nothing pending'}"]
         if overseer_text:
-            lines += ["\n## Overseer — time-use audit\n", overseer_text]
+            lines += ["\n## Overseer â€” time-use audit\n", overseer_text]
         try:
-            tail = (MEMORY / "LEDGER.md").read_text(encoding="utf-8").splitlines()[-12:]
+            tail = (MEMORY / "LEDGER.md").read_text(encoding="utf-8", errors="replace").splitlines()[-12:]
             lines += ["\n## Ledger tail", *tail]
         except FileNotFoundError:
             pass
@@ -1316,7 +1316,7 @@ class Conductor:
                     f"goal='{self.m.goal}' engine={self.m.engine} budget={self.m.hours}h "
                     f"tasks={len(self.m.tasks)} workers={self.m.workers} repo={self.m.repo}")
         if not self.use_git:
-            self.ledger("WARN", "target repo is not a git repo — running without worktree isolation")
+            self.ledger("WARN", "target repo is not a git repo â€” running without worktree isolation")
         try:
             self.ensure_tools()                    # missing tools are healed, not fatal
         except Exception as e:
@@ -1355,8 +1355,8 @@ class Conductor:
                     if self.replan():
                         continue
                 pending = [t for t in self.m.tasks if t.status == "pending"]
-                self.current = f"stalled — {len(pending)} tasks blocked by failed dependencies"
-                self.ledger("STALLED", self.current + " — ending early rather than idling")
+                self.current = f"stalled â€” {len(pending)} tasks blocked by failed dependencies"
+                self.ledger("STALLED", self.current + " â€” ending early rather than idling")
                 break
         except KeyboardInterrupt:
             self.interrupted = True
@@ -1394,14 +1394,14 @@ def main() -> int:
 
     if args.cmd == "status":
         state = MEMORY / "STATE.md"
-        print(state.read_text(encoding="utf-8") if state.exists() else "no mission state yet")
+        print(state.read_text(encoding="utf-8", errors="replace") if state.exists() else "no mission state yet")
         return 0
     if args.cmd == "retro":
         # Analyze the most recent mission's telemetry without running anything new.
         path = MEMORY / "PROCESS.jsonl"
         last = "retro"
         if path.exists():
-            for line in path.read_text(encoding="utf-8").splitlines():
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
                 try:
                     last = json.loads(line).get("mission", last)
                 except ValueError:
