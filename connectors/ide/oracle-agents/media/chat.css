@@ -1,0 +1,99 @@
+:root {
+  --bg: var(--vscode-editor-background);
+  --fg: var(--vscode-editor-foreground);
+  --muted: var(--vscode-descriptionForeground);
+  --border: var(--vscode-panel-border, rgba(128,128,128,0.25));
+  --accent: var(--vscode-focusBorder);
+  --card: var(--vscode-sideBar-background);
+  --user-bg: var(--vscode-input-background);
+  --mono: var(--vscode-editor-font-family, monospace);
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+  font-family: var(--vscode-font-family); font-size: 13px;
+  display: flex; flex-direction: column;
+}
+
+#header {
+  padding: 6px 14px; border-bottom: 1px solid var(--border);
+  display: flex; gap: 10px; align-items: center; flex-shrink: 0;
+  color: var(--muted); font-size: 11px;
+}
+#header .dot { width: 8px; height: 8px; border-radius: 50%; background: #d9822b; }
+#header .dot.ready { background: #4caf7d; }
+#header .dot.busy { background: #d9822b; animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: 0.35; } }
+
+#chat {
+  flex: 1; overflow-y: auto; padding: 14px 14px 4px;
+  scroll-behavior: smooth;
+}
+.msg { max-width: 100%; margin-bottom: 14px; }
+
+.user-msg {
+  background: var(--user-bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 12px; white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.text-block { line-height: 1.55; overflow-wrap: anywhere; }
+.text-block p { margin: 0 0 8px; }
+.text-block pre {
+  background: var(--card); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; overflow-x: auto; font-family: var(--mono); font-size: 12px;
+}
+.text-block code { font-family: var(--mono); font-size: 12px; }
+
+details.thinking, details.tool {
+  border: 1px solid var(--border); border-radius: 8px;
+  margin: 6px 0; background: var(--card); overflow: hidden;
+}
+details summary {
+  cursor: pointer; padding: 6px 10px; user-select: none;
+  color: var(--muted); font-size: 12px; display: flex; gap: 8px; align-items: center;
+  list-style: none;
+}
+details summary::-webkit-details-marker { display: none; }
+details summary .chev { transition: transform 0.15s; font-size: 10px; }
+details[open] summary .chev { transform: rotate(90deg); }
+details .body {
+  padding: 8px 12px; border-top: 1px solid var(--border);
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 340px; overflow-y: auto;
+  font-size: 12px;
+}
+details.thinking .body { color: var(--muted); font-style: italic; line-height: 1.5; }
+details.thinking summary .label { font-style: italic; }
+details.thinking.streaming summary .label::after { content: "…"; animation: pulse 1s infinite; }
+details.tool .body { font-family: var(--mono); font-size: 11.5px; }
+details.tool .tool-out { border-top: 1px dashed var(--border); margin-top: 6px; padding-top: 6px; }
+details.tool .err { color: var(--vscode-errorForeground); }
+.tool-status { margin-left: auto; font-size: 10px; }
+
+.turn-meta {
+  color: var(--muted); font-size: 10.5px; margin: -6px 0 12px; padding-left: 2px;
+}
+
+#composer {
+  flex-shrink: 0; border-top: 1px solid var(--border); padding: 10px 14px;
+  display: flex; gap: 8px; align-items: flex-end; background: var(--bg);
+}
+#input {
+  flex: 1; resize: none; min-height: 34px; max-height: 160px;
+  background: var(--user-bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  font-family: var(--vscode-font-family); font-size: 13px; outline: none;
+}
+#input:focus { border-color: var(--accent); }
+button {
+  background: var(--vscode-button-background); color: var(--vscode-button-foreground);
+  border: none; border-radius: 6px; padding: 7px 14px; cursor: pointer; font-size: 12px;
+}
+button:disabled { opacity: 0.45; cursor: default; }
+button.secondary {
+  background: var(--vscode-button-secondaryBackground, transparent);
+  color: var(--vscode-button-secondaryForeground, var(--fg));
+  border: 1px solid var(--border);
+}
+.sysline { color: var(--muted); font-size: 11px; margin: 6px 0 14px; }

@@ -10,9 +10,11 @@ const vscode = require("vscode");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { spawn } = require("child_process");
 
 const WIN = process.platform === "win32";
 let ROOT = "";
+let EXT_URI = null;
 
 function findRoot() {
   const folders = vscode.workspace.workspaceFolders || [];
@@ -90,6 +92,152 @@ function missionTerminal(tomlPath, engine, hours) {
   return t;
 }
 
+// ---- conversation panels (Cursor-style chat over claude stream-json) ------------
+
+const conversations = new Map(); // id -> ConversationPanel
+let convSeq = 0;
+
+function claudeBin() {
+  const local = WIN
+    ? path.join(ROOT, ".tools", "npm", "claude.cmd")
+    : path.join(ROOT, ".tools", "npm", "bin", "claude");
+  return fs.existsSync(local) ? local : "claude";
+}
+
+class ConversationPanel {
+  constructor(refreshLive) {
+    this.id = ++convSeq;
+    this.name = `Chat: Claude ${this.id}`;
+    this.refreshLive = refreshLive;
+    this.child = null;
+    this.buf = "";
+    this.panel = vscode.window.createWebviewPanel(
+      "oracleAgentChat", this.name, vscode.ViewColumn.Active,
+      {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.joinPath(EXT_URI, "media")],
+      });
+    this.panel.iconPath = vscode.Uri.joinPath(EXT_URI, "media", "oracle.svg");
+    this.panel.webview.html = this.html();
+    this.panel.onDidDispose(() => {
+      this.kill();
+      conversations.delete(this.id);
+      this.refreshLive();
+    });
+    this.panel.webview.onDidReceiveMessage((m) => this.onMessage(m));
+    conversations.set(this.id, this);
+    this.refreshLive();
+  }
+
+  html() {
+    const w = this.panel.webview;
+    const css = w.asWebviewUri(vscode.Uri.joinPath(EXT_URI, "media", "chat.css"));
+    const js = w.asWebviewUri(vscode.Uri.joinPath(EXT_URI, "media", "chat.js"));
+    const nonce = String(Math.random()).slice(2);
+    return `<!DOCTYPE html><html><head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy"
+  content="default-src 'none'; style-src ${w.cspSource}; script-src 'nonce-${nonce}'; img-src ${w.cspSource};">
+<link rel="stylesheet" href="${css}">
+</head><body>
+<div id="header">
+  <span id="dot" class="dot"></span>
+  <span id="status">starting…</span>
+  <span id="model"></span>
+  <span style="margin-left:auto"></span>
+  <button id="stop" class="secondary" disabled>Stop</button>
+  <button id="restart" class="secondary">Restart</button>
+</div>
+<div id="chat"></div>
+<div id="composer">
+  <textarea id="input" rows="1" placeholder="Ask the agent - it can read, edit, and run things here (Enter to send, Shift+Enter for newline)"></textarea>
+  <button id="send">Send</button>
+</div>
+<script nonce="${nonce}" src="${js}"></script>
+</body></html>`;
+  }
+
+  spawnEngine() {
+    this.kill();
+    const env = { ...process.env };
+    env.CLAUDE_CONFIG_DIR = path.join(ROOT, "engines", "claude-code", "home");
+    env.ORACLE_ROOT = ROOT;
+    env.PATH = [path.join(ROOT, ".tools", "npm"),
+                path.join(ROOT, ".tools", "npm", "bin"),
+                env.PATH || ""].join(path.delimiter);
+    const args = [
+      "--input-format", "stream-json",
+      "--output-format", "stream-json",
+      "--include-partial-messages",
+      "--verbose",
+      "--dangerously-skip-permissions",
+      "--mcp-config", path.join(ROOT, "connectors", "mcp.claude.json"),
+    ];
+    try {
+      this.child = spawn(claudeBin(), args, { cwd: ROOT, env, shell: WIN });
+    } catch (e) {
+      this.post({ type: "proc-error", text: String(e) });
+      return;
+    }
+    this.child.stdout.on("data", (d) => this.onData(String(d)));
+    this.child.stderr.on("data", (d) => {
+      const t = String(d).trim();
+      if (t) this.post({ type: "proc-error", text: t.slice(0, 400) });
+    });
+    this.child.on("exit", (code) => this.post({ type: "proc-exit", code }));
+    this.child.on("error", (e) => this.post({ type: "proc-error", text: String(e) }));
+  }
+
+  onData(chunk) {
+    this.buf += chunk;
+    let nl;
+    while ((nl = this.buf.indexOf("\n")) >= 0) {
+      const line = this.buf.slice(0, nl).trim();
+      this.buf = this.buf.slice(nl + 1);
+      if (!line.startsWith("{")) continue;
+      try { this.post(JSON.parse(line)); } catch { /* partial/garbage line */ }
+    }
+  }
+
+  post(ev) {
+    try { this.panel.webview.postMessage(ev); } catch { /* disposed */ }
+  }
+
+  onMessage(m) {
+    if (m.type === "ready") {
+      this.spawnEngine();
+    } else if (m.type === "send") {
+      if (!this.child || this.child.exitCode !== null) this.spawnEngine();
+      this.post({ type: "echo-user", text: m.text });
+      const msg = { type: "user",
+        message: { role: "user", content: [{ type: "text", text: m.text }] } };
+      try { this.child.stdin.write(JSON.stringify(msg) + "\n"); }
+      catch (e) { this.post({ type: "proc-error", text: "stdin write failed: " + e }); }
+    } else if (m.type === "stop") {
+      // best effort: control-protocol interrupt, then a hard kill fallback
+      try {
+        this.child.stdin.write(JSON.stringify(
+          { type: "control_request", request_id: `int-${Date.now()}`,
+            request: { subtype: "interrupt" } }) + "\n");
+      } catch { this.kill(); }
+    } else if (m.type === "restart") {
+      this.spawnEngine();
+    }
+  }
+
+  kill() {
+    if (!this.child) return;
+    try {
+      if (WIN) spawn("taskkill", ["/F", "/T", "/PID", String(this.child.pid)]);
+      else this.child.kill("SIGKILL");
+    } catch { /* already gone */ }
+    this.child = null;
+  }
+
+  reveal() { this.panel.reveal(); }
+}
+
 // ---- mission state parsing ------------------------------------------------------
 
 function missionState() {
@@ -139,6 +287,7 @@ function buildLive() {
   const live = liveTerminals();
   const missions = live.filter((t) => t.name.startsWith("Mission:"));
   const agents = live.filter((t) => t.name.startsWith("Agent:"));
+  const chats = [...conversations.values()];
   if (missions.length) {
     out.push(item("RUNNING MISSIONS", {
       icon: "target",
@@ -149,19 +298,27 @@ function buildLive() {
       })),
     }));
   }
-  if (agents.length) {
+  if (chats.length || agents.length) {
     out.push(item("OPEN AGENTS", {
       icon: "hubot",
-      children: agents.map((t, i) => item(t.name.replace(/^Agent: /, ""), {
-        icon: t.name.includes("worktree") ? "git-branch" : t.name.includes("OpenCode") ? "rocket" : "hubot",
-        desc: uptime(t), ctx: "runningAgent",
-        tip: "Click to open this agent's tab",
-        cmd: "oracleAgents.reveal", args: [i + ":agent"],
-      })),
+      children: [
+        ...chats.map((c) => item(c.name.replace(/^Chat: /, ""), {
+          icon: "comment-discussion", desc: "chat", ctx: "runningAgent",
+          tip: "Click to open this conversation",
+          cmd: "oracleAgents.revealChat", args: [c.id],
+        })),
+        ...agents.map((t, i) => item(t.name.replace(/^Agent: /, ""), {
+          icon: t.name.includes("worktree") ? "git-branch" : t.name.includes("OpenCode") ? "rocket" : "terminal",
+          desc: uptime(t), ctx: "runningAgent",
+          tip: "Click to open this agent's tab",
+          cmd: "oracleAgents.reveal", args: [i + ":agent"],
+        })),
+      ],
     }));
   }
-  if (!live.length) out.push(item("Nothing running", { icon: "info", desc: "open an agent or mission below" }));
-  out.push(item("New Agent (Claude Code)", { icon: "add", cmd: "oracleAgents.newClaude", tip: "Full engine session as an editor tab" }));
+  if (!live.length && !chats.length) out.push(item("Nothing running", { icon: "info", desc: "open an agent or mission below" }));
+  out.push(item("New Agent Conversation", { icon: "comment-discussion", cmd: "oracleAgents.newConversation", tip: "Cursor-style chat: live thinking, expandable tool calls, full visibility" }));
+  out.push(item("New Agent Terminal (Claude Code)", { icon: "terminal", cmd: "oracleAgents.newClaude", tip: "Full engine TUI as an editor tab" }));
   out.push(item("New Agent in Worktree", { icon: "git-branch", cmd: "oracleAgents.newClaudeWorktree", tip: "Isolated worktree + branch: parallel agents never collide" }));
   out.push(item("New Agent (OpenCode)", { icon: "rocket", cmd: "oracleAgents.newOpenCode" }));
   out.push(item("Start Mission (autonomous loop)...", { icon: "play", cmd: "oracleAgents.startMission" }));
@@ -206,6 +363,7 @@ function buildSessions() {
 
 function activate(ctx) {
   ROOT = findRoot();
+  EXT_URI = ctx.extensionUri;
   const trees = { live: new Tree(buildLive), mission: new Tree(buildMission), sessions: new Tree(buildSessions) };
   const refreshAll = () => Object.values(trees).forEach((t) => t.refresh());
 
@@ -229,6 +387,12 @@ function activate(ctx) {
     vscode.window.onDidOpenTerminal((t) => { if (AGENT_RE.test(t.name) && !started.has(t)) started.set(t, Date.now()); trees.live.refresh(); }),
     vscode.window.onDidCloseTerminal((t) => { started.delete(t); trees.live.refresh(); }),
 
+    vscode.commands.registerCommand("oracleAgents.newConversation", () =>
+      new ConversationPanel(() => trees.live.refresh())),
+    vscode.commands.registerCommand("oracleAgents.revealChat", (id) => {
+      const c = conversations.get(Number(id));
+      if (c) c.reveal();
+    }),
     vscode.commands.registerCommand("oracleAgents.newClaude", () => agentTerminal("claude")),
     vscode.commands.registerCommand("oracleAgents.newClaudeWorktree", () => agentTerminal("claude-wt")),
     vscode.commands.registerCommand("oracleAgents.newOpenCode", () => agentTerminal("opencode")),

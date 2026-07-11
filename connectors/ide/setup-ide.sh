@@ -51,11 +51,12 @@ install_oracle_agents_extension() {
   <Default Extension="vsixmanifest" ContentType="text/xml"/>
   <Default Extension="js" ContentType="application/javascript"/>
   <Default Extension="svg" ContentType="image/svg+xml"/>
+  <Default Extension="css" ContentType="text/css"/>
   <Default Extension="md" ContentType="text/markdown"/>
 </Types>
 EOF
   cp "$src/package.json" "$src/extension.js" "$stage/extension/"
-  cp "$src/media/oracle.svg" "$stage/extension/media/"
+  cp -R "$src/media/." "$stage/extension/media/"
   vsix="$VSIX_DIR/sentivue.oracle-agents-$ver.vsix"
   rm -f "$vsix"
   (cd "$stage" && zip -qr "$vsix" "[Content_Types].xml" extension.vsixmanifest extension)

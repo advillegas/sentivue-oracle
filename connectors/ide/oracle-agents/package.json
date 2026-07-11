@@ -2,7 +2,7 @@
   "name": "oracle-agents",
   "displayName": "SentiVue Oracle Agents",
   "description": "Agent sidebar in the Secondary Side Bar: open agents and missions, see everything running, jump between them - all on local models.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "sentivue",
   "license": "MIT",
   "engines": { "vscode": "^1.80.0" },
@@ -27,7 +27,9 @@
       ]
     },
     "commands": [
-      { "command": "oracleAgents.newClaude", "title": "Oracle: New Agent (Claude Code)", "icon": "$(add)" },
+      { "command": "oracleAgents.newConversation", "title": "Oracle: New Agent Conversation", "icon": "$(comment-discussion)" },
+      { "command": "oracleAgents.revealChat", "title": "Oracle: Focus Conversation" },
+      { "command": "oracleAgents.newClaude", "title": "Oracle: New Agent Terminal (Claude Code)", "icon": "$(add)" },
       { "command": "oracleAgents.newClaudeWorktree", "title": "Oracle: New Agent in Worktree", "icon": "$(git-branch)" },
       { "command": "oracleAgents.newOpenCode", "title": "Oracle: New Agent (OpenCode)", "icon": "$(rocket)" },
       { "command": "oracleAgents.startMission", "title": "Oracle: Start Mission...", "icon": "$(play)" },
@@ -39,7 +41,7 @@
     ],
     "menus": {
       "view/title": [
-        { "command": "oracleAgents.newClaude", "when": "view == oracleAgents.live", "group": "navigation@1" },
+        { "command": "oracleAgents.newConversation", "when": "view == oracleAgents.live", "group": "navigation@1" },
         { "command": "oracleAgents.startMission", "when": "view == oracleAgents.live", "group": "navigation@2" },
         { "command": "oracleAgents.refresh", "when": "view == oracleAgents.live", "group": "navigation@3" },
         { "command": "oracleAgents.refresh", "when": "view == oracleAgents.mission", "group": "navigation@1" },

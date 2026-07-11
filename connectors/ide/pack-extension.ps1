@@ -26,12 +26,13 @@ New-Item -ItemType Directory -Force -Path (Join-Path $stage "extension\media") |
   <Default Extension="vsixmanifest" ContentType="text/xml"/>
   <Default Extension="js" ContentType="application/javascript"/>
   <Default Extension="svg" ContentType="image/svg+xml"/>
+  <Default Extension="css" ContentType="text/css"/>
   <Default Extension="md" ContentType="text/markdown"/>
 </Types>
 '@ | Set-Content -LiteralPath (Join-Path $stage "[Content_Types].xml") -Encoding UTF8
 Copy-Item (Join-Path $Src "package.json") (Join-Path $stage "extension")
 Copy-Item (Join-Path $Src "extension.js") (Join-Path $stage "extension")
-Copy-Item (Join-Path $Src "media\oracle.svg") (Join-Path $stage "extension\media")
+Copy-Item (Join-Path $Src "media\*") (Join-Path $stage "extension\media") -Recurse -Force
 
 $vsix = Join-Path $OutDir "sentivue.oracle-agents-$ver.vsix"
 Remove-Item $vsix -Force -ErrorAction SilentlyContinue
