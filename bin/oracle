@@ -34,6 +34,14 @@ case "$cmd" in
       ( cd desk && cargo build --release )
     fi
     exec "$BIN" ;;
+  notes)      # Obsidian over the repo: the operator's lens on memory/doctrine/reports
+    if [[ ! -d "/Applications/Obsidian.app" ]]; then
+      echo "==> installing Obsidian (brew cask, one time)"
+      brew install --cask obsidian
+    fi
+    open "obsidian://open?path=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$ROOT" 2>/dev/null || echo "$ROOT")" \
+      || open -a Obsidian "$ROOT"
+    ;;
   agents-ui)  # Agent-MCP orchestration viewer (optional): watch agents/tasks/context live
     sub="${1:-start}"
     bash harness/agent-mcp/setup-agent-mcp.sh "$sub"
@@ -74,6 +82,7 @@ oracle — offline agentic workstation
                  oracle ide [install]    Cursor-like IDE (VSCodium + Continue + Kilo, local models)
                  oracle console          mission control at http://127.0.0.1:8800
                  oracle agents-ui [install|stop|status]  orchestration viewer (Agent-MCP) at http://127.0.0.1:3847
+                 oracle notes            Obsidian over the repo (memory/doctrine/reports lens)
                  oracle vault ui install|start|stop|status        GitHub-like UI at http://127.0.0.1:3300
   loops          oracle loops audit|init|cost|sync                loop-engineering toolkit
   git vault      oracle vault init|sync|new|clone|list|backup     (offline private remote)

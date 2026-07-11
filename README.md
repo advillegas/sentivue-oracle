@@ -280,6 +280,12 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
   7 production loop patterns are distilled into `skills/loop-engineering` for
   both engines, and `LOOP.md` documents this platform's own loops, budgets, and
   kill switches in the same convention.
+- **`oracle notes`** (optional) — **Obsidian over the repo itself**: the entire
+  knowledge surface (seed brain, doctrine, ledger, lessons, failures, session
+  journals, mission reports, decision records — ~300 markdown files) is already
+  plain text, so the repo opens directly as a vault. Checked-in `.obsidian/app.json`
+  excludes heavy runtime dirs from indexing; no sync, no account, not in the agent
+  path — purely the operator's search/navigate/edit lens (decision 0002).
 - **`oracle console`** — mission control at `http://127.0.0.1:8800`: live mission
   state, one-click operator approvals, the network-request queue, ledger tail, and
   reports (stdlib Python, zero dependencies).

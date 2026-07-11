@@ -63,6 +63,16 @@ switch ($Cmd) {
     "status" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") status }
     "claude"   { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\claude-code\launch.ps1") @Rest }
     "opencode" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\opencode\launch.ps1") @Rest }
+    "notes" {
+        # Obsidian over the repo: the operator's lens on memory/doctrine/reports
+        $exe = "$env:LOCALAPPDATA\Programs\Obsidian\Obsidian.exe"
+        if (-not (Test-Path $exe)) {
+            Write-Host "==> installing Obsidian (winget, one time)"
+            winget install --id Obsidian.Obsidian -e --silent --accept-package-agreements --accept-source-agreements
+        }
+        if (Test-Path $exe) { Start-Process $exe "obsidian://open?path=$([uri]::EscapeDataString($Root))" }
+        else { Write-Host "Obsidian installed - launch it once from the Start menu, then open this folder as a vault: $Root" }
+    }
     "agents-ui" {
         # Agent-MCP orchestration viewer (optional): watch agents/tasks/context live
         $sub = if ($Rest.Count -ge 1) { $Rest[0] } else { "start" }
@@ -137,6 +147,7 @@ switch ($Cmd) {
         Write-Host "  retro | state                             process retrospective | mission state"
         Write-Host "  agents-ui [install|start|stop|status]     orchestration viewer (Agent-MCP, optional)"
         Write-Host "  loops   audit|init|cost|sync              loop-engineering toolkit"
+        Write-Host "  notes                                     Obsidian over the repo (memory lens)"
         Write-Host "  ide  [install|sync]                       Cursor-like IDE (agent tabs, auto-detected models)"
         Write-Host "  desk                                      native desktop app (chat/missions/models/vault)"
         Write-Host "  menu                                      interactive menu (the desktop shortcut opens this)"

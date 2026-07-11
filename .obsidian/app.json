@@ -1,0 +1,26 @@
+{
+  "userIgnoreFilters": [
+    "models/",
+    ".tools/",
+    ".worktrees/",
+    ".venv/",
+    "node_modules/",
+    "logs/",
+    "state/",
+    "incoming/",
+    "data/",
+    "artifacts/",
+    "backups/",
+    "desk/target/",
+    "harness/ecc/vendor/",
+    "harness/agent-mcp/vendor/",
+    "harness/loop-engineering/vendor/",
+    ".agent/"
+  ],
+  "alwaysUpdateLinks": false,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "docs",
+  "attachmentFolderPath": "docs/assets",
+  "showLineNumber": true,
+  "readableLineLength": true
+}

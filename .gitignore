@@ -64,6 +64,10 @@ harness/*/vendor/
 # Agent-MCP runtime state (sqlite + tokens; machine-local)
 .agent/
 
+# Obsidian vault state is machine-local except the shared config (decision 0002)
+.obsidian/*
+!.obsidian/app.json
+
 # per-worktree task scaffolding must never land on main (A11 leak guard)
 /TASKPLAN.md
 /RESEARCH.md
