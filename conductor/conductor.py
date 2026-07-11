@@ -27,6 +27,7 @@ Stdlib only (Python >= 3.11 for tomllib).
 from __future__ import annotations
 
 import argparse
+import atexit
 import contextlib
 import datetime as dt
 import json
@@ -123,6 +124,51 @@ def sh(args: list[str], cwd: Path | None = None, timeout: int | None = None,
 
 def git(repo: Path, *args: str, timeout: int = 300) -> subprocess.CompletedProcess:
     return sh(["git", "-C", str(repo), *args], timeout=timeout)
+
+
+def _pid_alive(pid: int) -> bool:
+    """NB: os.kill(pid, 0) is NOT a liveness probe on Windows (it terminates)."""
+    if IS_WIN:
+        r = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                           capture_output=True, text=True)
+        return str(pid) in (r.stdout or "")
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def acquire_singleton() -> None:
+    """One conductor per machine (seed brain O15/L3). Two missions sharing the
+    big-model slot starve each other into watchdog kills - observed 2026-07-11:
+    parallel 6h and 8h instances produced 18 false-positive kills and zero
+    merged work. The lock is advisory-but-checked: stale locks (dead pid)
+    are cleaned automatically."""
+    lock = ROOT / "state" / "conductor.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    if lock.exists():
+        try:
+            pid = int(lock.read_text(encoding="utf-8", errors="replace").strip())
+        except ValueError:
+            pid = 0
+        if pid and pid != os.getpid() and _pid_alive(pid):
+            sys.exit(
+                f"REFUSED: another conductor (pid {pid}) is already running a mission.\n"
+                "One loop instance per machine (seed brain O15/L3): parallel missions\n"
+                "starve each other on the model slot. Stop the other mission first,\n"
+                "or delete state/conductor.lock if you are certain it is stale."
+            )
+    lock.write_text(str(os.getpid()), encoding="utf-8")
+
+    def _release() -> None:
+        try:
+            if lock.exists() and lock.read_text(encoding="utf-8",
+                                                errors="replace").strip() == str(os.getpid()):
+                lock.unlink()
+        except OSError:
+            pass
+    atexit.register(_release)
 
 
 # ---------------------------------------------------------------- mission spec
@@ -1410,6 +1456,7 @@ def main() -> int:
                         tasks=[], engine=args.engine, hours=1, auto_plan=True)
         Conductor(shell).retrospective()
         return 0
+    acquire_singleton()
     mission = Mission.load(args.mission, args.engine, args.hours)
     return Conductor(mission).run()
 
