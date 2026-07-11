@@ -33,16 +33,34 @@ fetch_vsix() {  # fetch_vsix <namespace> <name> [target-platform]
 }
 
 install_oracle_agents_extension() {
-  # The agents sidebar (view container + mission tree + session journals) is a
-  # local extension shipped with the repo - copied in place, no marketplace.
+  # The agents sidebar is a local extension shipped with the repo. It MUST be
+  # packed as a .vsix and installed via the codium CLI - a folder copied into
+  # .vscode-oss/extensions is ignored (extensions.json is the registry).
   local src="$ROOT/connectors/ide/oracle-agents"
   [[ -f "$src/package.json" ]] || return 0
-  local ver
-  ver="$(jq -r .version "$src/package.json" 2>/dev/null || echo 0.1.0)"
-  local extroot="$HOME/.vscode-oss/extensions"
-  mkdir -p "$extroot"
-  rm -rf "$extroot"/sentivue.oracle-agents-*
-  cp -R "$src" "$extroot/sentivue.oracle-agents-$ver"
+  local ver stage vsix
+  ver="$(jq -r .version "$src/package.json" 2>/dev/null || echo 0.2.0)"
+  stage="$(mktemp -d)"
+  mkdir -p "$stage/extension/media" "$VSIX_DIR"
+  sed "s/Id=\"oracle-agents\" Version=\"[^\"]*\"/Id=\"oracle-agents\" Version=\"$ver\"/" \
+    "$src/extension.vsixmanifest" > "$stage/extension.vsixmanifest"
+  cat > "$stage/[Content_Types].xml" <<'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="json" ContentType="application/json"/>
+  <Default Extension="vsixmanifest" ContentType="text/xml"/>
+  <Default Extension="js" ContentType="application/javascript"/>
+  <Default Extension="svg" ContentType="image/svg+xml"/>
+  <Default Extension="md" ContentType="text/markdown"/>
+</Types>
+EOF
+  cp "$src/package.json" "$src/extension.js" "$stage/extension/"
+  cp "$src/media/oracle.svg" "$stage/extension/media/"
+  vsix="$VSIX_DIR/sentivue.oracle-agents-$ver.vsix"
+  rm -f "$vsix"
+  (cd "$stage" && zip -qr "$vsix" "[Content_Types].xml" extension.vsixmanifest extension)
+  rm -rf "$stage"
+  codium --install-extension "$vsix" --force >/dev/null
   echo "==> installed agents sidebar extension (sentivue.oracle-agents-$ver)"
 }
 

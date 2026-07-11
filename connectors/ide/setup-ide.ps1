@@ -25,18 +25,20 @@ function Find-Codium {
 }
 
 function Install-OracleAgentsExtension {
-    # The agents sidebar (view container + mission tree + session journals) is a
-    # local extension shipped with the repo - copied in place, no marketplace.
+    # The agents sidebar is a local extension shipped with the repo. It MUST be
+    # packed as a .vsix and installed via the codium CLI - a folder copied into
+    # .vscode-oss\extensions is ignored (extensions.json is the registry).
     $src = Join-Path $PSScriptRoot "oracle-agents"
     if (-not (Test-Path (Join-Path $src "package.json"))) { return }
+    $codium = Find-Codium
+    if (-not $codium) { return }
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "pack-extension.ps1")
     $ver = (Get-Content (Join-Path $src "package.json") -Raw | ConvertFrom-Json).version
-    $extRoot = Join-Path $env:USERPROFILE ".vscode-oss\extensions"
-    New-Item -ItemType Directory -Force -Path $extRoot | Out-Null
-    Get-ChildItem $extRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object Name -like "sentivue.oracle-agents-*" | Remove-Item -Recurse -Force
-    $dest = Join-Path $extRoot "sentivue.oracle-agents-$ver"
-    Copy-Item $src $dest -Recurse -Force
-    Write-Host "==> installed agents sidebar extension (sentivue.oracle-agents-$ver)"
+    $vsix = Join-Path $Root "incoming\vsix\sentivue.oracle-agents-$ver.vsix"
+    if (Test-Path $vsix) {
+        & $codium --install-extension $vsix --force | Out-Null
+        Write-Host "==> installed agents sidebar extension (sentivue.oracle-agents-$ver)"
+    }
 }
 
 function Update-UserConfig {
