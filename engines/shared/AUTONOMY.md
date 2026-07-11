@@ -5,6 +5,25 @@ goal drift, context rot, repeated dead ends, false completion — and every rule
 counters a specific failure mode. Follow it mechanically: the point of a protocol is
 that it keeps working when your in-context judgment has degraded.
 
+**The seed brain.** `engines/shared/SEED-BRAIN.md` is this platform's inherited
+experience: ~90 principles with stable IDs (O/A/L/C/E/V/G/M) distilled from years
+of agent-orchestrated development and a 315-transcript failure record. This protocol
+is the enforcement layer for its highest-frequency findings; the seed brain is the
+reference text. Rules of use:
+
+- **Cite principle IDs** (e.g. `V1`, `E3`, `C13`) in ledger entries, TASKPLAN
+  decisions, FAILURES.md records, and code comments — shared vocabulary is what
+  lets the retrospective connect incidents to principles.
+- **Load by role, not wholesale** (C5): personas carry their own digests;
+  consult the full file when working on the loop itself, protocols, or anything
+  irreversible.
+- **Amend by errata** (M6): corrections are appended to its ERRATA section with
+  date + incident, through the normal amendment lifecycle — never silent edits.
+- The empirically top failure modes it exists to kill, in frequency order:
+  unverified completion claims (V1), speculation stated as fact and performative
+  agreement (V13), fixes that don't fix (E1), and scope creep (A14). When in
+  doubt, those four first.
+
 ## 0. The hierarchy of intent
 
 Mission goal > task acceptance criteria > current plan step > the action in front of you.
@@ -120,6 +139,13 @@ The same failure twice means the approach is wrong, not under-executed.
 - After any failed attempt, append: what was tried, root cause of failure, what to
   try instead. Ten seconds of writing saves the next run an entire attempt.
 - A retry that repeats a logged failure is the definition of wasted budget.
+- Significant incidents (data damage, destroyed work, contamination, false
+  completion that reached a merge) use the seed brain's fixed format (M3) —
+  WHAT / DAMAGE (honest, including "self-inflicted") / ROOT CAUSE (mechanism,
+  not blame) / LESSON (one imperative rule) / PROMOTION stage. Lessons then
+  climb the ladder (M4): memory entry → codified rule → mechanical gate →
+  structurally impossible — and the promotion includes amending the source
+  that misled you.
 
 ## 9. Budget and pacing
 
@@ -254,6 +280,15 @@ success criterion. The current protocol is the baseline plus these entries.
 - **v1.0 (2026-07-09)** — baseline protocol as committed; derived from first
   principles plus the frontier-loop meta-analysis
   (`docs/meta-analysis-frontier-loops.md`).
+- **v1.2 (2026-07-10)** — seed brain ingested: `engines/shared/SEED-BRAIN.md`
+  (frontier meta-analysis of the operator's full project history; ~90 principles,
+  stable O/A/L/C/E/V/G/M IDs) becomes the platform's reference doctrine. Protocol
+  now requires principle-ID citations, M3 incident format for significant
+  failures, and errata-based amendment of the seed brain. Personas carry
+  role-scoped digests (C5-compliant selective loading); the conductor enforces
+  O4 executable plans and the A6 agent status protocol. Success criterion:
+  ledger/FAILURES entries citing principle IDs appear in the next mission, and
+  unverified-completion audit failures (V1 class) do not increase.
 - **v1.1 (2026-07-10)** — operator retrospective of the platform build itself
   (the assistant meta-analyzed its own process failures): added five §12 patterns
   (artifact-first diagnosis, production-shaped smoke tests, config-effect

@@ -18,5 +18,15 @@ Attack surfaces, in priority order:
 4. Safety: any path that can silently corrupt data/ or memory/? Any unbounded loop
    or runaway disk usage?
 
+Seed-brain digest (A9/V tier — full text: engines/shared/SEED-BRAIN.md):
+- A9: falsify, don't confirm — differential testing is your sharpest tool:
+  re-derive claims independently, hand-compute examples, build deliberately
+  broken counter-implementations and prove the real one diverges from them.
+- V11: improbably good results are bugs until falsified — the one time a metric
+  looked too good in the historical record, it WAS the bug. Demand placebo-zero
+  and reproduction on disjoint seeds.
+- V6: protocols themselves are attack surfaces — quoted text, concrete exploit,
+  exact replacement wording.
+
 Output: numbered findings with reproduction evidence, each tagged CRITICAL / MAJOR /
 MINOR, then one line: `ADVERSARY: <n_critical> critical, <n_major> major, <n_minor> minor`.

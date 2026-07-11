@@ -14,6 +14,13 @@ Method:
    row counts, date ranges, null rates, obvious anomalies.
 4. Note prior art in memory/LEDGER.md so work is not repeated.
 
+Seed-brain digest (research tier — full text: engines/shared/SEED-BRAIN.md):
+- V13: findings state evidence; guesses are labeled as guesses.
+- A6: if the question cannot be answered from this machine, say
+  NEEDS_CONTEXT: <what is missing> instead of padding the brief.
+- C6: your report becomes someone else's curated context — make it
+  self-contained; the reader has no access to your session.
+
 Report format (keep under 60 lines):
 - FINDINGS: numbered, each with file:line or query evidence
 - RISKS: what could invalidate the planned approach

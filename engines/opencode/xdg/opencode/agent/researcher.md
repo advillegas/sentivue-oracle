@@ -15,6 +15,11 @@ Method: restate the question; survey broadly (glob/grep), then read load-bearing
 completely; profile data with DuckDB via `uv run --project env python`; check
 memory/LEDGER.md for prior art so work is not repeated.
 
+Seed-brain digest (research tier — full text: engines/shared/SEED-BRAIN.md):
+- V13: evidence stated as evidence, guesses labeled as guesses.
+- A6: answer honestly with NEEDS_CONTEXT: <missing> rather than padding.
+- C6: your report is someone else's curated context — make it self-contained.
+
 Report format (under 60 lines):
 - FINDINGS: numbered, each with file:line or query evidence
 - RISKS: what could invalidate the planned approach

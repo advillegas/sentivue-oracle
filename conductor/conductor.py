@@ -273,6 +273,10 @@ checks wherever a shell command can express it; use tier "haiku" for grunt work,
 "opus" only where deep reasoning is essential; adversary=true for risk-bearing tasks;
 research=true for tasks entering unfamiliar code or data (a read-only researcher pass
 briefs the engineer first).
+Prompts are EXECUTABLE DOCUMENTS (seed brain O4): exact file paths, exact commands
+with expected output, concrete acceptance semantics. "TBD", "handle edge cases",
+and "similar to task N" are plan failures — the executing engineer has NO memory
+of this conversation and cannot fill gaps you leave.
 Destructive or irreversible operations (database mutations, mass deletes/merges,
 schema changes, anything hard to undo) MUST be split into two tasks: a read-only
 DRY-RUN task that produces a reviewable report, and an EXECUTE task that depends on
@@ -620,8 +624,14 @@ class Conductor:
             f"{MEMORY / 'LEDGER.md'} (what/why/files/next) INCLUDING one 'friction:' line "
             "naming the biggest process obstacle this run (tooling, prompts, missing info) "
             "or 'friction: none' — the retrospective mines these to evolve the loop.\n"
-            "If two genuinely different strategies fail, end with 'BLOCKED: <what you know, "
-            "what you ruled out, what you would try next>'."
+            "Finish with EXACTLY ONE status line (seed brain A6), the last line of your "
+            "output:\n"
+            "  DONE                          all criteria hold with fresh evidence\n"
+            "  DONE_WITH_CONCERNS: <worry>   done, but flag what the auditor should probe\n"
+            "  NEEDS_CONTEXT: <missing>      the task is under-specified; name exactly what\n"
+            "  BLOCKED: <known/ruled out/next>  after two genuinely different failed strategies\n"
+            "Bad work reported as DONE poisons the mission's memory; an honest "
+            "NEEDS_CONTEXT or BLOCKED is a good outcome."
         )
 
     # ---- verification stack ------------------------------------------------------
@@ -638,7 +648,8 @@ class Conductor:
                 fails.append(f"$ {c}\n{r.stdout[-1500:]}")
         return (not fails), "\n\n".join(fails)
 
-    def audit(self, t: Task, wt: Path, tier: str | None = None, tag: str = "") -> tuple[bool, str]:
+    def audit(self, t: Task, wt: Path, tier: str | None = None, tag: str = "",
+              concerns: str = "") -> tuple[bool, str]:
         t.status = "auditing"
         self.write_state()
         diff = ""
@@ -647,10 +658,15 @@ class Conductor:
             git(wt, "commit", "-m", f"wip({t.id}): pre-audit snapshot")
             diff = git(wt, "diff", f"{self.branch}...HEAD", "--stat").stdout[-3000:]
         acc = "\n".join(f"  {i+1}. {a}" for i, a in enumerate(t.acceptance)) or "  (none listed)"
+        conc = ""
+        if concerns:
+            conc = (f"\nTHE DEVELOPER FLAGGED CONCERNS (probe these first): {concerns}\n")
         prompt = (
             f"You are the AUDITOR. Verify task [{t.id}] '{t.title}' in the current directory.\n"
-            f"ACCEPTANCE CRITERIA:\n{acc}\n\nCHANGE SUMMARY:\n{diff}\n\n"
-            "Run the tests yourself. Inspect the actual changes. Do NOT fix anything.\n"
+            f"ACCEPTANCE CRITERIA:\n{acc}\n{conc}\nCHANGE SUMMARY:\n{diff}\n\n"
+            "Verify the ARTIFACT, not the developer's report (seed brain A7): run the tests "
+            "yourself, inspect the actual changes. Spec compliance first — nothing missing, "
+            "nothing extra — then quality (A8). Do NOT fix anything.\n"
             "Also flag scope drift (changed files the task did not require) and any test that "
             "was weakened or deleted to force a pass — both are FAIL reasons.\n"
             "Finish with exactly one line: 'AUDIT: PASS' or 'AUDIT: FAIL: <reasons>'."
@@ -753,13 +769,26 @@ class Conductor:
                 self.log_failure(t, "blocked", t.note)
                 attempt_end("blocked")
                 return
+            if re.search(r"^NEEDS_CONTEXT:", last_line, re.M):
+                # A6/A5: under-specified task. Retrying the same prompt harder is
+                # waste — surface it for the planner/operator instead.
+                t.status, t.note = "blocked", last_line[:300]
+                self.ledger(f"NEEDS_CONTEXT {t.id}", t.note)
+                self.log_failure(t, "needs-context", t.note)
+                attempt_end("needs-context")
+                return
+            concerns = ""
+            m_conc = re.search(r"^DONE_WITH_CONCERNS:?\s*(.*)$", last_line, re.M)
+            if m_conc:
+                concerns = m_conc.group(1).strip()[:400]
+                self.ledger(f"CONCERNS {t.id}", concerns or "(unspecified)")
             checks_ok, checks_out = self.run_checks(t, wt)
             if not checks_ok:
                 self.log_failure(t, "checks-fail", checks_out[:600])
                 feedback = f"Deterministic checks failed:\n{checks_out}"
                 attempt_end("checks-fail")
                 continue
-            ok, verdict = self.audit(t, wt)
+            ok, verdict = self.audit(t, wt, concerns=concerns)
             tiebreak = False
             if (not ok and t.checks
                     and TIER_MODEL["opus"] != TIER_MODEL[t.audit_tier]):

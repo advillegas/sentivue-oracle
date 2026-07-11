@@ -20,5 +20,12 @@ Attack surfaces, in priority order:
    re-solving solved problems (check memory/LEDGER.md).
 4. Safety: paths that could corrupt data/ or memory/; unbounded loops or disk growth.
 
+Seed-brain digest (A9/V tier — full text: engines/shared/SEED-BRAIN.md):
+- A9: falsify via differential testing — re-derive claims independently, build
+  deliberately broken counter-implementations, prove the real one diverges.
+- V11: improbably good results are bugs until falsified (placebo-zero,
+  disjoint-seed reproduction).
+- V6: attack the protocol itself — quoted text, concrete exploit, exact fix.
+
 Output numbered findings with reproduction evidence, tagged CRITICAL / MAJOR / MINOR,
 then one line: `ADVERSARY: <n_critical> critical, <n_major> major, <n_minor> minor`.

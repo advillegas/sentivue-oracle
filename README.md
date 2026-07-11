@@ -333,6 +333,13 @@ permanently resident. Default GPU wired limit is raised to 448 GB by the install
 - **Subagents** — `researcher`, `developer`, `auditor`, `adversary`, `librarian`
   (memory curator), `envoy` (controlled network) for both engines; plus conductor-run
   roles: `planner`, `overseer` (hourly time-use audit), `historian`, `meta-analyst`.
+- **Seed brain** — `engines/shared/SEED-BRAIN.md`: ~90 stable-ID principles
+  (orchestration, agent assignment, loop engineering, context integrity, error
+  handling, verification, governance, memory) distilled by a frontier meta-analysis
+  of the operator's full project history. Personas load role-scoped digests, the
+  protocol enforces its top findings, agents cite principle IDs in ledgers and
+  incident records, and corrections flow through its append-only errata — the
+  platform starts post-pain instead of re-deriving each failure.
 - **Memory** — append-only `memory/LEDGER.md` + `memory/STATE.md` snapshot +
   `memory/FAILURES.md` (approaches that failed and why — read before every attempt) +
   `memory/LESSONS.md` (distilled at mission end, read at every start — mission N+1

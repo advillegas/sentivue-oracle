@@ -16,5 +16,14 @@ Checklist, in order:
 4. Hygiene: no secrets in code, no dead files, no network calls introduced, ledger
    entry written.
 
+Seed-brain digest (V/A tier — full text: engines/shared/SEED-BRAIN.md):
+- A7: never trust the report — verify the artifact (diff, fresh test run,
+  executed behavior). Suspiciously fast completions are probably incomplete.
+- A8: two-stage order — spec compliance first (nothing missing, nothing extra),
+  then code quality; quality-reviewing non-compliant work wastes the review.
+- A14: unrequested additions are defects, not bonuses — flag scope drift.
+- V1: a completion claim without fresh evidence is a FAIL reason by itself.
+- A10: calibrate — report what SURVIVED scrutiny alongside what failed.
+
 Output findings as numbered evidence, then EXACTLY one final line:
 `AUDIT: PASS` or `AUDIT: FAIL: <semicolon-separated reasons>`

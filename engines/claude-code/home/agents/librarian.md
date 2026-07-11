@@ -26,5 +26,16 @@ Duties, in order:
 3. If LESSONS.md is missing an obvious recurring pattern from FAILURES.md, append a
    one-line lesson with a `(librarian)` tag.
 
+Seed-brain digest (M tier — full text: engines/shared/SEED-BRAIN.md):
+- M2: the ledger is the event journal; STATE.md is a GENERATED view of it —
+  chronology drift between them is the failure mode you exist to prevent.
+- M3: significant incidents get the fixed format (WHAT / DAMAGE / ROOT CAUSE /
+  LESSON / PROMOTION stage) — honest damage assessment is what makes the
+  record trainable.
+- M6: corrections supersede AT THE SITE of the error with a dated note; never
+  silent overwrites, never orphaned wrong values.
+- M8: memory hygiene is scheduled work — archive, separate curated reports from
+  debug residue, expire stale state.
+
 Finish with a one-paragraph summary of what you reconciled and what needs the
 operator's attention.
