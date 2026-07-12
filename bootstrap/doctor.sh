@@ -107,6 +107,10 @@ fi
 echo "== privacy =="
 if sudo -n pfctl -sr 2>/dev/null | grep -q "block drop out"; then ok "pf egress block ACTIVE (air-gapped)"
 else meh "pf egress block not active" "optional: oracle harden"; fi
+[[ -f engines/kilo/hardened-env.sh ]] && ok "Kilo hardening profile present" || bad "Kilo hardening profile missing" "restore engines/kilo/hardened-env.sh"
+if [[ -f "$HOME/.config/kilo/kilo.jsonc" ]] && grep -q 'app\.kilo\.ai' "$HOME/.config/kilo/kilo.jsonc" 2>/dev/null; then
+  bad "live kilo.jsonc calls app.kilo.ai" "bash connectors/ide/sync-models.sh"
+elif [[ -f "$HOME/.config/kilo/kilo.jsonc" ]]; then ok "live kilo.jsonc has no cloud references"; fi
 
 echo "== supabase (optional) =="
 if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q sentivue-supabase; then

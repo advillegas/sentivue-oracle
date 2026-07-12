@@ -59,6 +59,14 @@ if (Select-String -Path "engines\claude-code\home\settings.json" -Pattern "DISAB
     OK "claude telemetry disabled"
 } else { BAD "claude telemetry env missing" "restore engines\claude-code\home\settings.json" }
 
+Write-Host "== security posture =="
+if (Test-Path "engines\kilo\hardened-env.ps1") { OK "Kilo hardening profile present" } else { BAD "Kilo hardening profile missing" "restore engines\kilo\hardened-env.ps1" }
+if (Get-NetFirewallRule -Group "SentiVue Oracle Egress" -ErrorAction SilentlyContinue) { OK "egress default-deny ACTIVE" }
+else { MEH "egress default-deny inactive (opt-in)" "bin\oracle.ps1 harden" }
+$kiloCfg = Join-Path $env:USERPROFILE ".config\kilo\kilo.jsonc"
+if ((Test-Path $kiloCfg) -and (Select-String -Path $kiloCfg -Pattern 'app\.kilo\.ai' -Quiet)) { BAD "live kilo.jsonc calls app.kilo.ai" "connectors\ide\sync-models.ps1" }
+elseif (Test-Path $kiloCfg) { OK "live kilo.jsonc has no cloud references" }
+
 Write-Host "== git vault =="
 $vault = git remote get-url vault 2>$null
 if ($vault) {

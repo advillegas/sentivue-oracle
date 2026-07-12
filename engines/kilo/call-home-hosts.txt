@@ -1,0 +1,24 @@
+# Kilo call-home hosts - EVIDENCE-DERIVED from the pinned @kilocode/cli 7.4.5
+# binary (139.9 MB Bun executable), extracted by scanning embedded strings.
+# These are the endpoints the upstream binary can reach for cloud/telemetry/
+# update/discovery features. The hardening profile (hardened-env.*) disables the
+# features that use them; the OS egress default-deny (harden-egress.*) is what
+# actually guarantees they are unreachable. This file is the human-readable
+# manifest of what we are defanging and the input to verify-egress.
+#
+# feature                         host
+# ------------------------------  -------------------------------------------
+gateway/login/org                 api.kilo.ai
+gateway/login/org                 kilo.ai
+gateway/login/org                 app.kilo.ai
+cloud-sharing/session-ingest      ingest.kilosessions.ai
+cloud-sharing/session-export      supermassive-black-hole.kiloapps.io
+cloud-relay/chat                  chat.kiloapps.io
+cloud-events                      events.kiloapps.io
+cloud-misc                        kilo.cloud
+analytics-posthog                 us.i.posthog.com
+error-reporting-sentry            sentry.io
+remote-model-discovery            models.dev
+update-check-releases             api.github.com
+update-check-chocolatey           community.chocolatey.org
+update-installer                  kilo.ai

@@ -59,6 +59,13 @@ switch ($Cmd) {
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") setup
         Write-Host "==> setup complete: 'oracle.ps1 serve' then 'oracle.ps1 claude'"
     }
+    "harden" {
+        $sub = if ($Rest.Count -ge 1 -and $Rest[0] -eq "off") { "off" } else { "on" }
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\harden-egress.ps1") $sub
+    }
+    "egress" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\harden-egress.ps1") $(if ($Rest.Count -ge 1) { $Rest[0] } else { "status" }) }
+    "verify-egress" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\verify-egress.ps1") }
+    "audit"  { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\security-audit.ps1") @Rest }
     "serve"  { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") start }
     "stop"   { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") stop }
     "status" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") status }
@@ -144,6 +151,8 @@ switch ($Cmd) {
         Write-Host "oracle (Windows - full platform)"
         Write-Host "  setup                                     engines (pinned) + serving toolchain (one time)"
         Write-Host "  serve | status | stop                     local model serving (llama-swap on :9099)"
+        Write-Host "  harden [off] | egress [status|plan]       default-deny egress for all appliance processes"
+        Write-Host "  verify-egress | audit [-Deep]             prove no leaks | full security sweep"
         Write-Host "  claude | opencode | kilo                  engine sessions on local models"
         Write-Host "  mission <toml> [engine] [hours]           self-governing mission (conductor loop)"
         Write-Host "  retro | state                             process retrospective | mission state"

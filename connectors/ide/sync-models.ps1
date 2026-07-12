@@ -211,8 +211,9 @@ foreach ($id in $chat) {
     $kiloModels[$id] = $entry
 }
 if ($kiloModels.Count -gt 0) {
+    # NB: no remote '$schema' key on purpose - it would make the editor fetch
+    # https://app.kilo.ai/config.json (remote configuration schema). Hardened out.
     $kilo = [ordered]@{
-        '$schema'           = "https://app.kilo.ai/config.json"
         model               = "openai-compatible/$anchor"
         share               = "disabled"
         enabled_providers   = @("openai-compatible")

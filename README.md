@@ -304,15 +304,26 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
 
 ## Privacy posture
 
+Full detail in [`docs/SECURITY.md`](docs/SECURITY.md). In brief:
+
 - No Cursor, no hosted APIs, no accounts. Models, inference, data, and memory never
   leave the machine.
 - Every service binds `127.0.0.1` only (llama-swap, llama-server, Postgres, PostgREST,
-  Studio, Gitea, the console).
-- Telemetry, error reporting, and auto-update are disabled for all engines
-  (Kilo additionally runs with sharing disabled and local providers only).
-- `make harden` installs a pf anchor that blocks ALL outbound traffic machine-wide
-  except loopback — a software air gap (optional, reversible with `harden-offline.sh off`).
-  `oracle envoy` opens it briefly and always restores it.
+  Studio, Gitea, the console, the Agent-MCP viewer).
+- Telemetry, error reporting, and auto-update are disabled for all engines. **Kilo Code
+  ships as a hardened in-repo fork** ([`engines/kilo/HARDENING.md`](engines/kilo/HARDENING.md)):
+  gateway, login, cloud sharing/ingest, remote relay, feedback, Sentry/PostHog/OpenTelemetry,
+  update + marketplace checks, remote model discovery, external autocomplete, and remote
+  config schemas are all defanged.
+- **Default-deny egress** — `oracle harden` blocks all non-loopback traffic for every
+  appliance process class (editor, extension hosts, agent engines, inference servers,
+  agent-spawned package managers, MCP servers, agent-launched containers). Loopback stays
+  up, so local models keep working; the internet does not. Windows Firewall per-program
+  rules on Windows, a pf anchor on macOS. Reversible; the envoy window is the one
+  controlled exception.
+- **Verify it:** `oracle audit` (full sweep — binds, kill-switches, secret hygiene,
+  hardening presence; fails on any break), `oracle verify-egress` (empirical: internet
+  blocked, loopback intact), `oracle doctor` (security-posture section).
 - Network touches the machine in exactly two ways after bootstrap: envoy windows
   (fetch-only, allowlisted, quarantined, provenance-tracked) — and nothing else.
 - The only broad network phase is bootstrap: Homebrew, npm pins, model downloads,

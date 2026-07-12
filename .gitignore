@@ -48,9 +48,18 @@ engines/claude-code/home/.last-cleanup
 engines/claude-code/home/skills/
 engines/opencode/xdg/opencode/skill/
 
-# secrets / local env
+# secrets / local env — never commit credentials or private keys
 .env
+.env.*
+!.env.example
 connectors/supabase/.env
+**/credentials*.json
+*.key
+*.pem
+id_rsa
+id_ed25519
+*.p12
+*.pfx
 
 # supabase volumes
 connectors/supabase/volumes/

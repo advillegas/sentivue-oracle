@@ -6,6 +6,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export ORACLE_ROOT="$ROOT"
 export PATH="$ROOT/.tools/npm/bin:$PATH"
+# hardening profile: disable every Kilo call-home path (telemetry, sharing,
+# gateway, update, remote model discovery, ...). See engines/kilo/HARDENING.md.
+# shellcheck source=/dev/null
+source "$(dirname "${BASH_SOURCE[0]}")/hardened-env.sh"
 
 command -v kilo >/dev/null || { echo "ERROR: kilo not installed — run 'make install'"; exit 1; }
 [[ -f "$HOME/.config/kilo/kilo.jsonc" ]] || bash "$ROOT/connectors/ide/sync-models.sh" >/dev/null

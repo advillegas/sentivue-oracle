@@ -5,6 +5,9 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $env:ORACLE_ROOT = $Root
 $env:PATH = (Join-Path $Root ".tools\npm") + ";" + (Join-Path $Root ".tools\npm\node_modules\.bin") + ";" + $env:PATH
+# hardening profile: disable every Kilo call-home path (telemetry, sharing,
+# gateway, update, remote model discovery, ...). See engines\kilo\HARDENING.md.
+. (Join-Path $PSScriptRoot "hardened-env.ps1")
 $kilo = Get-Command kilo -ErrorAction SilentlyContinue
 if (-not $kilo) { Write-Host "ERROR: kilo not installed - run: bin\oracle.ps1 setup"; exit 1 }
 if (-not (Test-Path "$env:USERPROFILE\.config\kilo\kilo.jsonc")) {

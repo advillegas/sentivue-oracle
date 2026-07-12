@@ -17,8 +17,11 @@ case "$cmd" in
   status)     exec bash serving/service.sh status ;;
   verify)     exec bash bootstrap/verify-offline.sh ;;
   doctor)     exec bash bootstrap/doctor.sh ;;
-  harden)     [[ "${1:-on}" == "off" ]] && exec sudo bash bootstrap/harden-offline.sh off \
-                                        || exec sudo bash bootstrap/harden-offline.sh ;;
+  harden)     [[ "${1:-on}" == "off" ]] && exec sudo bash bootstrap/harden-egress.sh off \
+                                        || exec sudo bash bootstrap/harden-egress.sh on ;;
+  egress)     exec bash bootstrap/harden-egress.sh "${1:-status}" ;;
+  audit)      exec bash bootstrap/security-audit.sh "$@" ;;
+  verify-egress) exec bash bootstrap/verify-egress.sh ;;
   models)     exec bash bootstrap/download-models.sh ;;
   skills)     exec bash bootstrap/sync-skills.sh ;;
   vault)
@@ -78,7 +81,11 @@ oracle — offline agentic workstation
                  oracle retro [engine]   process meta-analysis + amendment proposals
                  oracle state            oracle report        oracle ledger [n]
   health         oracle verify           oracle doctor
-  privacy        oracle harden [off]     oracle envoy [--queue]   controlled fetch-only network window
+  privacy        oracle harden [off]     default-deny egress (all agent/editor/inference procs)
+                 oracle egress [status|plan]              inspect the egress guard
+                 oracle verify-egress    prove no leaks + loopback intact
+                 oracle audit [--deep]   full platform security sweep
+                 oracle envoy [--queue]  controlled fetch-only network window
   ui             oracle desk             native desktop app (Rust, chat + missions + models + vault)
                  oracle ide [install]    Cursor-like IDE (VSCodium + Continue + Kilo, local models)
                  oracle console          mission control at http://127.0.0.1:8800

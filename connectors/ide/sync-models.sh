@@ -240,8 +240,7 @@ if [[ ${#chat[@]} -gt 0 ]] && command -v jq >/dev/null; then
     jq -n --argjson mm "$mm" --arg m "openai-compatible/$anchor" --arg base "$API_BASE" \
        --arg ide "$ROOT/engines/shared/IDE-AGENT.md" \
        --arg conv "$ROOT/engines/shared/CONVENTIONS.md" --arg auto "$ROOT/engines/shared/AUTONOMY.md" '
-      {"$schema": "https://app.kilo.ai/config.json",
-       model: $m,
+      {model: $m,
        share: "disabled",
        enabled_providers: ["openai-compatible"],
        instructions: [$ide, $conv, $auto],
