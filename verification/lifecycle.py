@@ -2594,8 +2594,21 @@ def install_source_archive(
         except Exception:
             if destination.exists() and not _is_reparse_point(destination):
                 os.replace(destination, content_root)
+            restored_previous = False
             if backup is not None and backup.exists():
                 os.replace(backup, destination)
+                restored_previous = True
+            if (
+                restored_previous
+                and backup_temporary is not None
+                and backup_temporary.exists()
+                and not _is_reparse_point(backup_temporary)
+            ):
+                try:
+                    backup_temporary.rmdir()
+                except OSError:
+                    # Preserve a nonempty or concurrently changed backup root.
+                    pass
             raise
         if backup is not None and backup.exists():
             if (

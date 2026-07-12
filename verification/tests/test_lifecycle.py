@@ -2952,6 +2952,67 @@ def test_third_review_source_install_upgrades_idempotently_and_rolls_back(
     )
 
 
+def test_final_task2_failed_upgrade_cleans_only_restored_empty_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_revision = "a" * 40
+    root, trusted, cache, _archive = source_install_fixture(
+        tmp_path, revision=first_revision, content=b"version one\n"
+    )
+    destination = trusted / "component"
+    install_fixture_source(
+        root, trusted, cache, destination, first_revision
+    )
+    second_revision = "b" * 40
+    source_install_fixture(
+        tmp_path, revision=second_revision, content=b"version two\n"
+    )
+    original_replace = lifecycle.os.replace
+    failed = False
+
+    def fail_upgrade_once(source: object, target: object) -> None:
+        nonlocal failed
+        if Path(target) == destination and not failed:
+            failed = True
+            raise OSError("simulated upgrade failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(lifecycle.os, "replace", fail_upgrade_once)
+    with pytest.raises(OSError, match="simulated upgrade failure"):
+        install_fixture_source(
+            root, trusted, cache, destination, second_revision
+        )
+
+    assert (destination / "tool.txt").read_bytes() == b"version one\n"
+    backup_pattern = f".{destination.name}.backup-*"
+    assert list(destination.parent.glob(backup_pattern)) == []
+
+    def fail_upgrade_and_rollback(source: object, target: object) -> None:
+        if Path(target) == destination:
+            if Path(source).name == "previous":
+                raise OSError("simulated rollback failure")
+            raise OSError("simulated upgrade failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(
+        lifecycle.os,
+        "replace",
+        fail_upgrade_and_rollback,
+    )
+    with pytest.raises(OSError, match="simulated rollback failure"):
+        install_fixture_source(
+            root, trusted, cache, destination, second_revision
+        )
+
+    backups = list(destination.parent.glob(backup_pattern))
+    assert len(backups) == 1
+    assert (
+        backups[0] / "previous" / "tool.txt"
+    ).read_bytes() == b"version one\n"
+    assert not destination.exists()
+
+
 @pytest.mark.parametrize(
     ("kind", "requested", "resolved", "source_url"),
     [
