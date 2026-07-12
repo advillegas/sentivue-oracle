@@ -15,13 +15,20 @@ CC_DIR="$ROOT/engines/claude-code/home/skills"
 OC_DIR="$ROOT/engines/opencode/xdg/opencode/skill"
 mkdir -p "$CC_DIR" "$OC_DIR"
 
+"$PYTHON_BIN" "$ROOT/verification/lifecycle.py" preflight-source \
+  --root "$ROOT" --manifest "$DEPENDENCY_CACHE/manifest.json" \
+  --cache "$DEPENDENCY_CACHE" --artifact-id source-ecc --destination "$VENDOR" \
+  --trusted-root "$ROOT" \
+  --expected-version "$ECC_COMMIT" --expected-requested-version "$ECC_PIN" >/dev/null
 "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" install-source \
   --root "$ROOT" --manifest "$DEPENDENCY_CACHE/manifest.json" \
   --cache "$DEPENDENCY_CACHE" --artifact-id source-ecc --destination "$VENDOR" \
+  --trusted-root "$ROOT" \
   --expected-version "$ECC_COMMIT" --expected-requested-version "$ECC_PIN" >/dev/null
 "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-source \
   --root "$ROOT" --manifest "$DEPENDENCY_CACHE/manifest.json" \
   --cache "$DEPENDENCY_CACHE" --artifact-id source-ecc --destination "$VENDOR" \
+  --trusted-root "$ROOT" \
   --expected-version "$ECC_COMMIT" --expected-requested-version "$ECC_PIN" >/dev/null
 echo "==> ECC policy-bound vendor tree installed (${ECC_COMMIT})"
 

@@ -1,7 +1,8 @@
 # SentiVue Oracle — pinned versions (single source of truth for bootstrap)
 # Exact values are installed as written. Dynamic/unresolved values are acquisition
-# inputs only: release/install reject them until an independently verified resolved
-# version/revision and digest are promoted into this tracked lock.
+# inputs only: release/install reject them until independently verified identity
+# and digest data are promoted through named keys here or the generated tracked
+# verification/dependency-authorities.json manifest.
 # Bump deliberately, one at a time, and re-run `make verify` after any change.
 #
 # BEFORE FIRST BOOTSTRAP on the Mac: sanity-check that each pin still exists

@@ -24,15 +24,21 @@ Get-Content (Join-Path $Root "VERSIONS.lock") | Where-Object { $_ -match "=" } |
     $kv = $_ -split "=", 2; $pins[$kv[0].Trim()] = ($kv[1] -split "#")[0].Trim()
 }
 
+& $Python (Join-Path $Root "verification\lifecycle.py") preflight-source `
+    --root $Root --manifest $ArtifactManifest --cache $DependencyCache `
+    --artifact-id "source-loop-engineering" --destination $Vendor --trusted-root $Root `
+    --expected-version $pins['LOOP_ENG_COMMIT'] `
+    --expected-requested-version $pins['LOOP_ENG_PIN'] | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "loop-engineering source install preflight failed" }
 & $Python (Join-Path $Root "verification\lifecycle.py") install-source `
     --root $Root --manifest $ArtifactManifest --cache $DependencyCache `
-    --artifact-id "source-loop-engineering" --destination $Vendor `
+    --artifact-id "source-loop-engineering" --destination $Vendor --trusted-root $Root `
     --expected-version $pins['LOOP_ENG_COMMIT'] `
     --expected-requested-version $pins['LOOP_ENG_PIN'] | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "loop-engineering policy-bound source install failed" }
 & $Python (Join-Path $Root "verification\lifecycle.py") validate-source `
     --root $Root --manifest $ArtifactManifest --cache $DependencyCache `
-    --artifact-id "source-loop-engineering" --destination $Vendor `
+    --artifact-id "source-loop-engineering" --destination $Vendor --trusted-root $Root `
     --expected-version $pins['LOOP_ENG_COMMIT'] `
     --expected-requested-version $pins['LOOP_ENG_PIN'] | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "loop-engineering source identity validation failed" }

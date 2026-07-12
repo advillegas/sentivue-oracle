@@ -1,4 +1,4 @@
-# Import an offline archive already bound by VERSIONS.lock and policy.json.
+# Import an archive bound by VERSIONS.lock or dependency-authorities.json.
 param(
     [Parameter(Mandatory = $true)][string]$ArtifactId,
     [Parameter(Mandatory = $true)][string]$SourceFile,

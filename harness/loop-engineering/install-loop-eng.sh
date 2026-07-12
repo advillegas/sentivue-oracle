@@ -11,14 +11,19 @@ PYTHON_BIN="${ORACLE_PYTHON:-$ROOT/env/.venv/bin/python}"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python || true)"
 [[ -n "$PYTHON_BIN" ]] || { echo "ERROR: Python is required." >&2; exit 1; }
 
+"$PYTHON_BIN" "$ROOT/verification/lifecycle.py" preflight-source \
+  --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+  --artifact-id source-loop-engineering --destination "$VENDOR" --trusted-root "$ROOT" \
+  --expected-version "$LOOP_ENG_COMMIT" \
+  --expected-requested-version "$LOOP_ENG_PIN" >/dev/null
 "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" install-source \
   --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
-  --artifact-id source-loop-engineering --destination "$VENDOR" \
+  --artifact-id source-loop-engineering --destination "$VENDOR" --trusted-root "$ROOT" \
   --expected-version "$LOOP_ENG_COMMIT" \
   --expected-requested-version "$LOOP_ENG_PIN" >/dev/null
 "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-source \
   --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
-  --artifact-id source-loop-engineering --destination "$VENDOR" \
+  --artifact-id source-loop-engineering --destination "$VENDOR" --trusted-root "$ROOT" \
   --expected-version "$LOOP_ENG_COMMIT" \
   --expected-requested-version "$LOOP_ENG_PIN" >/dev/null
 

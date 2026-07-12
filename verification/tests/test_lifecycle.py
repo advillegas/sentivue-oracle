@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -2179,6 +2180,7 @@ def test_second_review_source_install_rejects_modified_existing_checkout(
         cache,
         "source-test",
         destination,
+        trusted_root=root,
         expected_version=revision,
         expected_requested_version=revision,
     )
@@ -2188,6 +2190,7 @@ def test_second_review_source_install_rejects_modified_existing_checkout(
         cache,
         "source-test",
         destination,
+        trusted_root=root,
         expected_version=revision,
         expected_requested_version=revision,
     ) == []
@@ -2201,6 +2204,7 @@ def test_second_review_source_install_rejects_modified_existing_checkout(
             cache,
             "source-test",
             destination,
+            trusted_root=root,
             expected_version=revision,
             expected_requested_version=revision,
         )
@@ -2696,3 +2700,621 @@ def test_review_release_rejects_dirty_dependency_authority(
 
     with pytest.raises(LifecycleError, match="differs from immutable revision"):
         lifecycle._require_release_inputs_match_revision(root, revision)
+
+
+def source_install_fixture(
+    tmp_path: Path,
+    *,
+    revision: str,
+    content: bytes,
+) -> tuple[Path, Path, Path, Path]:
+    root = tmp_path / "policy root"
+    trusted = root / "managed source trees"
+    cache = tmp_path / "offline cache"
+    archive = tmp_path / f"source-{revision[0]}.zip"
+    trusted.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("source-export/tool.txt", content)
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    put(
+        root,
+        "VERSIONS.lock",
+        f"SOURCE_PIN={revision}\n"
+        f"SOURCE_COMMIT={revision}\n"
+        f"SOURCE_SHA256={digest}\n"
+        "SOURCE_REPO=https://example.invalid/source\n",
+    )
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "dependency_inputs": [
+                    {
+                        "id": "source-test",
+                        "kind": "git",
+                        "version_key": "SOURCE_PIN",
+                        "allow_dynamic": False,
+                        "source": {
+                            "identity_key": "SOURCE_REPO",
+                            "url": "{identity}/archive/{resolved}.zip",
+                            "revision_key": "SOURCE_COMMIT",
+                            "digest_key": "SOURCE_SHA256",
+                        },
+                    }
+                ]
+            }
+        )
+        + "\n",
+    )
+    put(root, "serving/models.manifest", "# no models\n")
+    lifecycle.import_artifact(
+        root,
+        cache,
+        artifact_id="source-test",
+        source_file=archive,
+        source_url=f"https://example.invalid/source/archive/{revision}.zip",
+        requested_version=revision,
+        resolved_version=revision,
+    )
+    return root, trusted, cache, archive
+
+
+def install_fixture_source(
+    root: Path,
+    trusted: Path,
+    cache: Path,
+    destination: Path,
+    revision: str,
+) -> Path:
+    lifecycle.preflight_source_install(
+        root,
+        cache / "manifest.json",
+        cache,
+        "source-test",
+        destination,
+        trusted_root=trusted,
+        expected_version=revision,
+        expected_requested_version=revision,
+    )
+    return lifecycle.install_source_archive(
+        root,
+        cache / "manifest.json",
+        cache,
+        "source-test",
+        destination,
+        trusted_root=trusted,
+        expected_version=revision,
+        expected_requested_version=revision,
+    )
+
+
+def test_third_review_source_install_confines_lexical_paths_and_supports_spaces(
+    tmp_path: Path,
+) -> None:
+    revision = "a" * 40
+    root, trusted, cache, _archive = source_install_fixture(
+        tmp_path, revision=revision, content=b"version one\n"
+    )
+    destination = trusted / "component with spaces"
+
+    installed = install_fixture_source(
+        root, trusted, cache, destination, revision
+    )
+
+    assert installed == destination
+    assert (destination / "tool.txt").read_bytes() == b"version one\n"
+    escape = trusted / ".." / "outside" / "component"
+    with pytest.raises(LifecycleError, match="trusted root|lexical traversal"):
+        install_fixture_source(root, trusted, cache, escape, revision)
+    assert not (tmp_path / "policy root" / "outside").exists()
+
+
+def test_third_review_source_install_rejects_symlink_ancestor(
+    tmp_path: Path,
+) -> None:
+    revision = "a" * 40
+    root, trusted, cache, _archive = source_install_fixture(
+        tmp_path, revision=revision, content=b"version one\n"
+    )
+    outside = tmp_path / "outside"
+    linked = trusted / "linked"
+    outside.mkdir()
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    with pytest.raises(LifecycleError, match="reparse|symbolic"):
+        install_fixture_source(
+            root, trusted, cache, linked / "component", revision
+        )
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("unsafe_part", ["junction", "component"])
+def test_third_review_source_install_rejects_simulated_windows_reparse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unsafe_part: str,
+) -> None:
+    revision = "a" * 40
+    root, trusted, cache, _archive = source_install_fixture(
+        tmp_path, revision=revision, content=b"version one\n"
+    )
+    ancestor = trusted / "junction"
+    destination = ancestor / "component"
+    ancestor.mkdir()
+    original = lifecycle._is_reparse_point
+    unsafe = ancestor if unsafe_part == "junction" else destination
+    monkeypatch.setattr(
+        lifecycle,
+        "_is_reparse_point",
+        lambda path: Path(path) == unsafe or original(Path(path)),
+    )
+
+    with pytest.raises(LifecycleError, match="reparse"):
+        install_fixture_source(root, trusted, cache, destination, revision)
+
+    assert not destination.exists()
+    assert not any(path.name.startswith(".component") for path in ancestor.iterdir())
+
+
+def test_third_review_source_install_preserves_unowned_and_modified_trees(
+    tmp_path: Path,
+) -> None:
+    first_revision = "a" * 40
+    root, trusted, cache, _archive = source_install_fixture(
+        tmp_path, revision=first_revision, content=b"version one\n"
+    )
+    unowned = trusted / "unowned"
+    put(unowned, "user.txt", b"user data")
+    with pytest.raises(LifecycleError, match="unowned"):
+        install_fixture_source(
+            root, trusted, cache, unowned, first_revision
+        )
+    assert (unowned / "user.txt").read_bytes() == b"user data"
+
+    destination = trusted / "owned"
+    install_fixture_source(
+        root, trusted, cache, destination, first_revision
+    )
+    (destination / "tool.txt").write_bytes(b"locally modified\n")
+    second_revision = "b" * 40
+    source_install_fixture(
+        tmp_path, revision=second_revision, content=b"version two\n"
+    )
+    with pytest.raises(LifecycleError, match="modified"):
+        install_fixture_source(
+            root, trusted, cache, destination, second_revision
+        )
+    assert (destination / "tool.txt").read_bytes() == b"locally modified\n"
+
+
+def test_third_review_source_install_upgrades_idempotently_and_rolls_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_revision = "a" * 40
+    root, trusted, cache, _archive = source_install_fixture(
+        tmp_path, revision=first_revision, content=b"version one\n"
+    )
+    destination = trusted / "component with spaces"
+    install_fixture_source(
+        root, trusted, cache, destination, first_revision
+    )
+
+    second_revision = "b" * 40
+    source_install_fixture(
+        tmp_path, revision=second_revision, content=b"version two\n"
+    )
+    install_fixture_source(
+        root, trusted, cache, destination, second_revision
+    )
+    assert (destination / "tool.txt").read_bytes() == b"version two\n"
+    receipt_before = (destination / lifecycle.SOURCE_RECEIPT).read_bytes()
+    tool_mtime = (destination / "tool.txt").stat().st_mtime_ns
+    install_fixture_source(
+        root, trusted, cache, destination, second_revision
+    )
+    assert (destination / lifecycle.SOURCE_RECEIPT).read_bytes() == receipt_before
+    assert (destination / "tool.txt").stat().st_mtime_ns == tool_mtime
+
+    third_revision = "c" * 40
+    source_install_fixture(
+        tmp_path, revision=third_revision, content=b"version three\n"
+    )
+    original_replace = lifecycle.os.replace
+    failed = False
+
+    def fail_new_tree_once(source: object, target: object) -> None:
+        nonlocal failed
+        if Path(target) == destination and not failed:
+            failed = True
+            raise OSError("simulated replacement failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(lifecycle.os, "replace", fail_new_tree_once)
+    with pytest.raises(OSError, match="simulated replacement"):
+        install_fixture_source(
+            root, trusted, cache, destination, third_revision
+        )
+    assert (destination / "tool.txt").read_bytes() == b"version two\n"
+    lifecycle.preflight_source_install(
+        root,
+        cache / "manifest.json",
+        cache,
+        "source-test",
+        destination,
+        trusted_root=trusted,
+        expected_version=third_revision,
+        expected_requested_version=third_revision,
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "requested", "resolved", "source_url"),
+    [
+        ("npm", "1.2.3", "1.2.3", "https://registry.invalid/pkg-1.2.3.tgz"),
+        (
+            "git",
+            "v1.2.3",
+            "d" * 40,
+            "https://example.invalid/repo/archive/" + ("d" * 40) + ".zip",
+        ),
+        ("native", "unresolved", "2.3.4", "https://example.invalid/native.bin"),
+        ("toolchain", "0.11.26", "0.11.26", "https://example.invalid/uv.tar.gz"),
+        ("ide", "dynamic", "1.99.0", "https://example.invalid/ide.zip"),
+        (
+            "ide-extension",
+            "dynamic",
+            "1.5.0",
+            "https://example.invalid/extension.vsix",
+        ),
+        (
+            "python",
+            "package==1.0.0",
+            "package==1.0.0",
+            "https://example.invalid/package.whl",
+        ),
+        (
+            "container",
+            "registry.invalid/image:1.0",
+            "registry.invalid/image:1.0",
+            "oci://registry.invalid/image:1.0@sha256:" + ("e" * 64),
+        ),
+    ],
+)
+def test_third_review_generic_authority_promotion_round_trips_each_kind(
+    tmp_path: Path,
+    kind: str,
+    requested: str,
+    resolved: str,
+    source_url: str,
+) -> None:
+    root = tmp_path / f"{kind} policy"
+    cache = tmp_path / f"{kind} cache"
+    artifact_id = f"{kind}-fixture"
+    source_file = put(tmp_path, f"{kind}.artifact", f"{kind} bytes\n")
+    digest = hashlib.sha256(source_file.read_bytes()).hexdigest()
+    dynamic = requested in {"dynamic", "unresolved"}
+    version_lines = [
+        f"ARTIFACT_VERSION={requested}",
+        "ARTIFACT_SHA256=unresolved",
+    ]
+    source: dict[str, str] = {
+        "identity": "unresolved",
+        "digest_key": "ARTIFACT_SHA256",
+    }
+    if dynamic:
+        version_lines.append("ARTIFACT_RESOLVED=unresolved")
+        source["resolved_version_key"] = "ARTIFACT_RESOLVED"
+    if kind == "git":
+        version_lines.append("ARTIFACT_COMMIT=unresolved")
+        source["revision_key"] = "ARTIFACT_COMMIT"
+    if kind == "container":
+        version_lines.extend(
+            [
+                "ARTIFACT_IDENTITY_DIGEST=unresolved",
+                "ARTIFACT_ARCHIVE_SHA256=unresolved",
+            ]
+        )
+        source = {
+            "identity": "oci://{version}@{identity_digest}",
+            "identity_digest_key": "ARTIFACT_IDENTITY_DIGEST",
+            "artifact_digest_key": "ARTIFACT_ARCHIVE_SHA256",
+        }
+    put(root, "VERSIONS.lock", "\n".join(version_lines) + "\n")
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "dependency_inputs": [
+                    {
+                        "id": artifact_id,
+                        "kind": kind,
+                        "version_key": "ARTIFACT_VERSION",
+                        "allow_dynamic": dynamic,
+                        "source": source,
+                    }
+                ]
+            }
+        )
+        + "\n",
+    )
+    put(root, "serving/models.manifest", "# no models\n")
+    authority = put(
+        tmp_path,
+        f"{kind}-authority.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "authorities": {
+                    artifact_id: {
+                        "kind": kind,
+                        "requested_version": requested,
+                        "resolved_version": resolved,
+                        "source_url": source_url,
+                        "sha256": digest,
+                    }
+                },
+            }
+        )
+        + "\n",
+    )
+
+    before = validate_dependency_inputs(root, reproducible=True)
+    assert any("unresolved" in error for error in before)
+    promoted = lifecycle.promote_dependency_authority(
+        root, artifact_id=artifact_id, authority_file=authority
+    )
+    assert promoted["sha256"] == digest
+    tracked = root / "verification" / "dependency-authorities.json"
+    with pytest.raises(LifecycleError, match="independently supplied"):
+        lifecycle.promote_dependency_authority(
+            root, artifact_id=artifact_id, authority_file=tracked
+        )
+
+    record = lifecycle.import_artifact(
+        root,
+        cache,
+        artifact_id=artifact_id,
+        source_file=source_file,
+        source_url=source_url,
+        requested_version=requested,
+        resolved_version=resolved,
+    )
+    assert record.trust == "policy-bound"
+    assert (
+        validate_dependency_inputs(
+            root,
+            artifact_manifest=cache / "manifest.json",
+            cache_root=cache,
+            reproducible=True,
+        )
+        == []
+    )
+
+    source_file.write_bytes(b"self-hashed replacement")
+    with pytest.raises(LifecycleError, match="trusted digest"):
+        lifecycle.import_artifact(
+            root,
+            cache,
+            artifact_id=artifact_id,
+            source_file=source_file,
+            source_url=source_url,
+            requested_version=requested,
+            resolved_version=resolved,
+        )
+
+
+def test_third_review_promotion_rejects_incomplete_expected_authority(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    put(
+        root,
+        "VERSIONS.lock",
+        "TOOL_VERSION=unresolved\n"
+        "TOOL_RESOLVED=unresolved\n"
+        "TOOL_SHA256=unresolved\n",
+    )
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "dependency_inputs": [
+                    {
+                        "id": "tool",
+                        "kind": "toolchain",
+                        "version_key": "TOOL_VERSION",
+                        "allow_dynamic": True,
+                        "source": {
+                            "identity": "unresolved",
+                            "resolved_version_key": "TOOL_RESOLVED",
+                            "digest_key": "TOOL_SHA256",
+                        },
+                    }
+                ]
+            }
+        )
+        + "\n",
+    )
+    authority = put(
+        tmp_path,
+        "incomplete-authority.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "authorities": {
+                    "tool": {
+                        "kind": "toolchain",
+                        "requested_version": "unresolved",
+                        "resolved_version": "1.0.0",
+                        "source_url": "https://example.invalid/tool.zip",
+                        "sha256": "unresolved",
+                    }
+                },
+            }
+        )
+        + "\n",
+    )
+
+    with pytest.raises(LifecycleError, match="SHA-256"):
+        lifecycle.promote_dependency_authority(
+            root, artifact_id="tool", authority_file=authority
+        )
+    assert not (root / "verification/dependency-authorities.json").exists()
+
+
+def test_third_review_release_rebuild_is_time_deterministic(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    add_package_policy(root, ["src"])
+    put(root, "README.md", "fixture\n")
+    put(root, "src/main.py", "VALUE = 1\n")
+    revision = init_repository(root)
+    first = build_source_archives(
+        root, revision, tmp_path / "first output", "v1.2.3"
+    )
+    time.sleep(0.02)
+    second = build_source_archives(
+        root, revision, tmp_path / "second output", "v1.2.3"
+    )
+
+    first_files = {
+        path.name: path.read_bytes()
+        for path in [*first.archives, first.provenance, first.checksums]
+    }
+    second_files = {
+        path.name: path.read_bytes()
+        for path in [*second.archives, second.provenance, second.checksums]
+    }
+    assert first_files == second_files
+    source_epoch = int(
+        subprocess.run(
+            ["git", "-C", str(root), "show", "-s", "--format=%ct", revision],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+    )
+    expected_created = (
+        lifecycle.datetime.fromtimestamp(source_epoch, lifecycle.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    provenance = json.loads(first.provenance.read_text(encoding="utf-8"))
+    assert provenance["created_at"] == expected_created
+
+
+def test_third_review_installer_synthetic_commit_uses_source_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    add_package_policy(root, ["bootstrap"])
+    put(root, "README.md", "fixture\n")
+    put(root, "bootstrap/build-installers.ps1", "# protected fixture\n")
+    revision = init_repository(root)
+    output = tmp_path / "output"
+    output.mkdir()
+    source_epoch = lifecycle._git_timestamp(root, revision)
+    original_checked = lifecycle._checked
+    invocations: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def checked(
+        argv: list[str],
+        *,
+        cwd: Path,
+        text: bool = True,
+        input_data: str | bytes | None = None,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[object]:
+        invocations.append((list(argv), env))
+        if argv[0] == "fixture-powershell":
+            built = Path(argv[argv.index("-OutDir") + 1])
+            put(built, "SentiVue-Oracle-Installer-v1.2.3.command", b"mac")
+            put(built, "SentiVue-Oracle-Setup-v1.2.3.cmd", b"windows")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return original_checked(
+            argv, cwd=cwd, text=text, input_data=input_data, env=env
+        )
+
+    monkeypatch.setattr(lifecycle, "_checked", checked)
+    monkeypatch.setattr(lifecycle, "_find_powershell", lambda: "fixture-powershell")
+    monkeypatch.setattr(
+        lifecycle,
+        "_harden_built_installer",
+        lambda path: {
+            "id": lifecycle.INSTALLER_HARDENING_TRANSFORM,
+            "artifact": path.name,
+            "changes": ["fixture"],
+        },
+    )
+
+    lifecycle._build_installers(root, revision, output, "v1.2.3")
+
+    commit_env = next(env for argv, env in invocations if "commit" in argv)
+    builder_env = next(
+        env for argv, env in invocations if argv[0] == "fixture-powershell"
+    )
+    assert commit_env is not None
+    assert builder_env is not None
+    assert commit_env["GIT_AUTHOR_DATE"] == f"@{source_epoch} +0000"
+    assert commit_env["GIT_COMMITTER_DATE"] == f"@{source_epoch} +0000"
+    assert builder_env["SOURCE_DATE_EPOCH"] == str(source_epoch)
+    assert builder_env["TZ"] == "UTC"
+
+
+def test_third_review_transform_provenance_names_reparse_containment(
+    tmp_path: Path,
+) -> None:
+    windows = put(
+        tmp_path,
+        "installer.cmd",
+        b"""@echo off
+#==PSPAYLOAD==#
+$ErrorActionPreference = "Stop"
+if ($sel.Name -eq "full") { Remove-Item (Join-Path $dest "serving\\models.profile") -ErrorAction SilentlyContinue }
+else { Set-Content -Path (Join-Path $dest "serving\\models.profile") -Value (($sel.Models -split ",") -join "`n") }
+Set-Content -Path (Join-Path $dest "serving\\tiers.env") -Value @("OPUS_MODEL=$($sel.Opus)", "SONNET_MODEL=$($sel.Sonnet)", "HAIKU_MODEL=$($sel.Haiku)")
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "connectors\\ide\\setup-ide.ps1") install
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\\download-models.ps1")
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bin\\oracle.ps1") setup
+#==B64PAYLOAD==#
+UEFZTE9BRA==
+""",
+    )
+
+    transform = lifecycle._harden_built_installer(windows)
+
+    assert "reject-reparse-config-paths" in transform["changes"]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "bootstrap/install.sh",
+        "harness/ecc/install-ecc.sh",
+        "harness/skill-packs/install-skill-packs.sh",
+        "harness/skill-packs/install-skill-packs.ps1",
+        "harness/agent-mcp/setup-agent-mcp.sh",
+        "harness/agent-mcp/setup-agent-mcp.ps1",
+        "harness/loop-engineering/install-loop-eng.sh",
+        "harness/loop-engineering/install-loop-eng.ps1",
+    ],
+)
+def test_third_review_source_callers_preflight_inside_explicit_trusted_root(
+    relative: str,
+) -> None:
+    source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+
+    assert "--trusted-root" in source
+    assert "preflight-source" in source
+    assert source.index("preflight-source") < source.index("install-source")

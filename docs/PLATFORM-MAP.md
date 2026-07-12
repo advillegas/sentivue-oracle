@@ -39,8 +39,10 @@ commits + ledgers in one step (with a 50 MB blob guard). `envoy-fetch` /
 Install and lifecycle. `install.sh` is the offline Mac bootstrap;
 `doctor.sh` / `doctor.ps1` are the read-only diagnostics;
 `download-models.ps1|.sh` are explicit online acquisition commands whose local
-hash scans remain untrusted; `import-dependency.ps1|.sh` and
-`import-model.ps1|.sh` admit independently policy-bound offline inputs;
+hash scans remain untrusted; `promote-dependency.ps1|.sh` validates a separately
+supplied expected identity/digest and updates the generated tracked dependency
+authority manifest without reading artifact bytes; `import-dependency.ps1|.sh`
+and `import-model.ps1|.sh` admit independently policy-bound offline inputs;
 `render-config.sh` +
 `serving/serve-windows.ps1` render llama-swap configs; `sync-skills.ps1|.sh`
 link `skills/` into both engines; `vault.sh|.ps1` manage the offline git vault;
@@ -99,7 +101,9 @@ skill subset), `skill-packs/` (superpowers `sp-*` + gstack `gs-*`, 67 skills),
 `loop-engineering/` (patterns + the loop-audit/init/cost/sync CLIs). Vendor
 checkouts are gitignored; installers re-materialize them only from validated
 source archives whose commit, upstream identity, archive digest, and extracted
-tree digest all match policy.
+tree digest all match policy. Source installation preflights an explicit trusted
+root, preserves unowned or locally modified trees, and uses adjacent staged
+replacement with rollback for verified owned upgrades.
 
 ## serving/
 
@@ -134,4 +138,6 @@ transcripts — the trace store), `docs/` (decision records 0001-0004,
 meta-analyses, this map), `state/` (pids + locks), `models/` (GGUF weights),
 `env/` (uv-managed quant Python), `desk/` (Rust desktop app, optional),
 `LOOP.md` (loop inventory + budgets + kill switches), `AGENTS.md` (working
-rules for any agent in this repo), `VERSIONS.lock` (every pin).
+rules for any agent in this repo), `VERSIONS.lock` (named request/pin keys), and
+`verification/dependency-authorities.json` (generated tracked promotions for
+independently verified identities and digests).

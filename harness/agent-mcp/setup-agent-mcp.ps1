@@ -63,7 +63,7 @@ function Find-Uv {
 function Assert-ValidatedVendor {
     & $Python (Join-Path $Root "verification\lifecycle.py") validate-source `
         --root $Root --manifest $ArtifactManifest --cache $DependencyCache `
-        --artifact-id "source-agent-mcp" --destination $Vendor `
+        --artifact-id "source-agent-mcp" --destination $Vendor --trusted-root $Root `
         --expected-version $pins['AGENT_MCP_COMMIT'] `
         --expected-requested-version $pins['AGENT_MCP_PIN'] | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "Agent-MCP source identity validation failed" }
@@ -73,9 +73,15 @@ switch ($Cmd) {
     "install" {
         $uv = Find-Uv
         if (-not $uv) { throw "uv is missing from the validated offline toolchain" }
+        & $Python (Join-Path $Root "verification\lifecycle.py") preflight-source `
+            --root $Root --manifest $ArtifactManifest --cache $DependencyCache `
+            --artifact-id "source-agent-mcp" --destination $Vendor --trusted-root $Root `
+            --expected-version $pins['AGENT_MCP_COMMIT'] `
+            --expected-requested-version $pins['AGENT_MCP_PIN'] | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Agent-MCP source install preflight failed" }
         & $Python (Join-Path $Root "verification\lifecycle.py") install-source `
             --root $Root --manifest $ArtifactManifest --cache $DependencyCache `
-            --artifact-id "source-agent-mcp" --destination $Vendor `
+            --artifact-id "source-agent-mcp" --destination $Vendor --trusted-root $Root `
             --expected-version $pins['AGENT_MCP_COMMIT'] `
             --expected-requested-version $pins['AGENT_MCP_PIN'] | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Agent-MCP policy-bound source install failed" }

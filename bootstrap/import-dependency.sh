@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Import an offline archive whose source identity and SHA-256 are already bound
-# by VERSIONS.lock and verification/policy.json.
+# by named VERSIONS.lock keys or verification/dependency-authorities.json.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ARTIFACT_ID="${1:?usage: import-dependency.sh ID FILE URL REQUESTED RESOLVED}"

@@ -106,13 +106,38 @@ For offline transfer, `make dist VERSION=vX.Y.Z` produces checksummed source
 archives. Exported online dependencies live separately under
 `incoming/dependency-cache/`; carry that cache with the source archive. Acquisition
 records are untrusted evidence until their source identity, resolved revision, and
-digest are independently verified and promoted into `VERSIONS.lock`; reproducible
-install/release reject anything less. Local archives (including optional OCI image
-archives) are imported with `bootstrap/import-dependency.sh` or
-`bootstrap/import-dependency.ps1`; the command verifies the tracked source identity
-and archive digest before granting policy-bound status. Optional, platform-scoped
-components are reported separately by the doctors and do not block unrelated release
-preflight. A plain
+digest are independently verified. Every dependency kind uses the same promotion
+boundary: an independent verifier supplies an authority JSON containing the artifact
+ID, kind, requested/resolved identities, authoritative HTTPS (or digest-qualified
+OCI) URL, and expected SHA-256. Run
+`bootstrap/promote-dependency.sh ID AUTHORITY.json` (or
+`bootstrap/promote-dependency.ps1 -ArtifactId ID -AuthorityFile AUTHORITY.json`) to
+validate it against the named `VERSIONS.lock`/policy keys and update the generated,
+tracked `verification/dependency-authorities.json`. The promotion command accepts no
+artifact bytes and never computes the expected artifact hash, so newly observed bytes
+cannot self-promote. Reproducible validation continues to fail closed until this
+separate promotion is committed.
+
+```json
+{
+  "schema_version": 1,
+  "authorities": {
+    "uv-darwin-arm64": {
+      "kind": "toolchain",
+      "requested_version": "0.11.26",
+      "resolved_version": "0.11.26",
+      "source_url": "https://independently-verified.example/uv.tar.gz",
+      "sha256": "<64 lowercase hexadecimal characters>"
+    }
+  }
+}
+```
+
+After promotion, local archives (including optional OCI image archives) are imported
+with `bootstrap/import-dependency.sh` or `bootstrap/import-dependency.ps1`; import
+requires exact agreement with the promoted source identity and digest before granting
+policy-bound status. Optional, platform-scoped components are reported separately by
+the doctors and do not block unrelated release preflight. A plain
 `git clone` from the vault remains available for source-only transfer.
 
 ### Pre-downloading the models on Windows (optional, saves a night)

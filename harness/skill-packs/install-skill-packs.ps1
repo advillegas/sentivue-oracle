@@ -32,13 +32,20 @@ function Get-Vendored(
 ) {
     $vendor = Join-Path $PSScriptRoot "vendor\$Name"
     $lifecycle = Join-Path $Root "verification\lifecycle.py"
+    & $Python $lifecycle preflight-source --root $Root --manifest $ArtifactManifest `
+        --cache $DependencyCache --artifact-id $ArtifactId --destination $vendor `
+        --trusted-root $Root --expected-version $Resolved `
+        --expected-requested-version $Requested | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "$Name source install preflight failed" }
     & $Python $lifecycle install-source --root $Root --manifest $ArtifactManifest `
         --cache $DependencyCache --artifact-id $ArtifactId --destination $vendor `
-        --expected-version $Resolved --expected-requested-version $Requested | Out-Null
+        --trusted-root $Root --expected-version $Resolved `
+        --expected-requested-version $Requested | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$Name policy-bound source install failed" }
     & $Python $lifecycle validate-source --root $Root --manifest $ArtifactManifest `
         --cache $DependencyCache --artifact-id $ArtifactId --destination $vendor `
-        --expected-version $Resolved --expected-requested-version $Requested | Out-Null
+        --trusted-root $Root --expected-version $Resolved `
+        --expected-requested-version $Requested | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "$Name source identity validation failed" }
     Write-Host "==> $Name policy-bound vendor tree installed ($Resolved)"
     return $vendor

@@ -46,6 +46,7 @@ VERSION_PATTERN = re.compile(
 )
 PORTABLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-reparse-v2"
+DEPENDENCY_AUTHORITY_FILE = "verification/dependency-authorities.json"
 
 HARD_EXCLUDED_PARTS = {
     ".agent",
@@ -178,11 +179,13 @@ def _run(
     cwd: Path | None = None,
     text: bool = True,
     input_data: str | bytes | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[Any]:
     return subprocess.run(
         list(argv),
         cwd=cwd,
         input=input_data,
+        env=dict(env) if env is not None else None,
         text=text,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -196,8 +199,15 @@ def _checked(
     cwd: Path,
     text: bool = True,
     input_data: str | bytes | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[Any]:
-    completed = _run(argv, cwd=cwd, text=text, input_data=input_data)
+    completed = _run(
+        argv,
+        cwd=cwd,
+        text=text,
+        input_data=input_data,
+        env=env,
+    )
     if completed.returncode != 0:
         error = completed.stderr or completed.stdout or "command failed"
         if isinstance(error, bytes):
@@ -769,6 +779,15 @@ def _dependency_policy_errors(
     versions: Mapping[str, str], policy: Mapping[str, Any]
 ) -> list[str]:
     errors: list[str] = []
+    authority_manifest = policy.get(
+        "dependency_authority_manifest",
+        DEPENDENCY_AUTHORITY_FILE,
+    )
+    if authority_manifest != DEPENDENCY_AUTHORITY_FILE:
+        errors.append(
+            "policy dependency_authority_manifest must name the tracked "
+            f"{DEPENDENCY_AUTHORITY_FILE}"
+        )
     raw_inputs = policy.get("dependency_inputs", [])
     if not isinstance(raw_inputs, list):
         return ["policy dependency_inputs must be a list"]
@@ -939,6 +958,41 @@ def _prepare_archive_entries(
     dependency_errors = _dependency_policy_errors(versions, policy)
     if dependency_errors:
         raise LifecycleError("; ".join(dependency_errors))
+    authority_blob = next(
+        (
+            entry.data
+            for entry in selected
+            if entry.path == DEPENDENCY_AUTHORITY_FILE
+        ),
+        b"",
+    )
+    if authority_blob:
+        try:
+            authorities = _dependency_authorities_from_payload(
+                json.loads(authority_blob.decode("utf-8"))
+            )
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            LifecycleError,
+        ) as exc:
+            raise LifecycleError(
+                "immutable dependency authority manifest is invalid"
+            ) from exc
+        raw_by_id = {
+            str(raw.get("id")): raw
+            for raw in policy.get("dependency_inputs", [])
+            if isinstance(raw, dict) and isinstance(raw.get("id"), str)
+        }
+        for artifact_id, authority in authorities.items():
+            raw = raw_by_id.get(artifact_id)
+            if raw is None:
+                raise LifecycleError(
+                    f"{artifact_id}: immutable authority has no policy entry"
+                )
+            _validate_dependency_authority_policy(
+                versions, raw, authority
+            )
     selected_by_path = {entry.path: entry for entry in selected}
     if "env/pyproject.toml" in selected_by_path:
         lock_entry = selected_by_path.get("env/uv.lock")
@@ -1074,6 +1128,7 @@ def _write_release_metadata(
     version: str,
     revision: str,
     artifacts: Sequence[Path],
+    source_timestamp: int,
     build_transforms: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[Path, Path]:
     provenance = output_dir / "PROVENANCE.json"
@@ -1082,7 +1137,11 @@ def _write_release_metadata(
         "schema_version": SCHEMA_VERSION,
         "version": version,
         "source_revision": revision,
-        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "created_at": (
+            datetime.fromtimestamp(source_timestamp, timezone.utc)
+            .isoformat()
+            .replace("+00:00", "Z")
+        ),
         "artifacts": _artifact_payload(artifacts),
         "builder": "verification/lifecycle.py",
         "build_transforms": [dict(item) for item in build_transforms],
@@ -1120,7 +1179,11 @@ def build_source_archives(
     _write_zip(zip_path, entries, timestamp)
     artifacts = [tar_path, zip_path]
     checksums, provenance = _write_release_metadata(
-        output_dir, version, resolved, artifacts
+        output_dir,
+        version,
+        resolved,
+        artifacts,
+        timestamp,
     )
     return ReleaseBundle(
         version=version,
@@ -1529,6 +1592,7 @@ def _harden_built_installer(path: Path) -> dict[str, Any]:
         "artifact": path.name,
         "changes": [
             "atomic-utf8-no-bom-config",
+            "reject-reparse-config-paths",
             "separate-online-acquisition",
             "propagate-child-failures",
         ],
@@ -1552,6 +1616,22 @@ def _build_installers(
         raise LifecycleError(
             "immutable source does not disclose the protected installer transform"
         )
+    source_timestamp = _git_timestamp(root, revision)
+    release_environment = dict(os.environ)
+    release_environment.update(
+        {
+            "SOURCE_DATE_EPOCH": str(source_timestamp),
+            "TZ": "UTC",
+            "LC_ALL": "C",
+        }
+    )
+    commit_environment = dict(release_environment)
+    commit_environment.update(
+        {
+            "GIT_AUTHOR_DATE": f"@{source_timestamp} +0000",
+            "GIT_COMMITTER_DATE": f"@{source_timestamp} +0000",
+        }
+    )
     with tempfile.TemporaryDirectory(prefix="oracle immutable release ") as temporary:
         stage = Path(temporary) / "source with spaces"
         stage.mkdir()
@@ -1571,6 +1651,7 @@ def _build_installers(
                 "immutable release input",
             ],
             cwd=stage,
+            env=commit_environment,
         )
         _checked(["git", "tag", version], cwd=stage)
         builder = stage / "bootstrap" / "build-installers.ps1"
@@ -1593,6 +1674,7 @@ def _build_installers(
                 str(built),
             ],
             cwd=stage,
+            env=release_environment,
         )
         names = (
             f"SentiVue-Oracle-Installer-{version}.command",
@@ -1621,6 +1703,7 @@ def _require_release_inputs_match_revision(root: Path, revision: str) -> None:
         "VERSIONS.lock",
         "bootstrap/build-installers.ps1",
         "verification/policy.json",
+        DEPENDENCY_AUTHORITY_FILE,
         "serving/models.manifest",
         "serving/model-authorities.json",
         "env/pyproject.toml",
@@ -1657,6 +1740,7 @@ def _build_release_bundle(
         version,
         source_bundle.revision,
         artifacts,
+        _git_timestamp(root, source_bundle.revision),
         build_transforms=transforms,
     )
     bundle = ReleaseBundle(
@@ -2124,6 +2208,92 @@ def record_cached_artifact(
 SOURCE_RECEIPT = ".oracle-source.json"
 
 
+def _guard_source_destination(
+    trusted_root: Path,
+    destination: Path,
+) -> tuple[Path, Path]:
+    """Confine one source tree beneath an explicit, non-reparse root."""
+
+    raw_root = Path(trusted_root)
+    raw_destination = Path(destination)
+    if ".." in raw_root.parts or ".." in raw_destination.parts:
+        raise LifecycleError("source destination uses lexical traversal")
+    trusted_root = Path(os.path.abspath(os.fspath(raw_root)))
+    destination = Path(os.path.abspath(os.fspath(raw_destination)))
+    try:
+        relative = destination.relative_to(trusted_root)
+    except ValueError as exc:
+        raise LifecycleError(
+            "source destination is outside the explicit trusted root"
+        ) from exc
+    if not relative.parts:
+        raise LifecycleError("source destination must be beneath the trusted root")
+    for candidate in [*reversed(trusted_root.parents), trusted_root]:
+        if candidate == Path(candidate.anchor):
+            continue
+        if _is_reparse_point(candidate):
+            raise LifecycleError(
+                f"source trusted root has a symlink or reparse ancestor: {candidate}"
+            )
+        if candidate.exists() and not candidate.is_dir():
+            raise LifecycleError(
+                f"source trusted root ancestor is not a directory: {candidate}"
+            )
+    if not trusted_root.is_dir():
+        raise LifecycleError(
+            f"explicit source trusted root is missing: {trusted_root}"
+        )
+    real_root = Path(os.path.realpath(trusted_root))
+    current = trusted_root
+    for index, part in enumerate(relative.parts):
+        current = current / part
+        is_final = index == len(relative.parts) - 1
+        if _is_reparse_point(current):
+            role = "target" if is_final else "ancestor"
+            raise LifecycleError(
+                f"source destination has a symlink or reparse {role}: {current}"
+            )
+        if current.exists():
+            if not current.is_dir():
+                role = "target" if is_final else "ancestor"
+                raise LifecycleError(
+                    f"source destination {role} is not a directory: {current}"
+                )
+            resolved = Path(os.path.realpath(current))
+            try:
+                contained = (
+                    os.path.commonpath((str(real_root), str(resolved)))
+                    == str(real_root)
+                )
+            except ValueError:
+                contained = False
+            if not contained:
+                raise LifecycleError(
+                    f"source destination resolves outside trusted root: {current}"
+                )
+    return trusted_root, destination
+
+
+def _create_source_parent(trusted_root: Path, destination: Path) -> None:
+    """Create missing destination ancestors one at a time under a checked root."""
+
+    trusted_root, destination = _guard_source_destination(
+        trusted_root, destination
+    )
+    relative_parent = destination.parent.relative_to(trusted_root)
+    current = trusted_root
+    for part in relative_parent.parts:
+        current = current / part
+        if not current.exists():
+            current.mkdir()
+        _guard_source_destination(trusted_root, current / "_oracle_child_probe")
+        if _is_reparse_point(current) or not current.is_dir():
+            raise LifecycleError(
+                f"source destination ancestor became unsafe: {current}"
+            )
+    _guard_source_destination(trusted_root, destination)
+
+
 def _extract_source_archive(archive_path: Path, destination: Path) -> Path:
     destination.mkdir(parents=True, exist_ok=False)
     if archive_path.suffix.lower() == ".zip":
@@ -2200,9 +2370,12 @@ def _source_tree_digest(source_root: Path) -> str:
 
 def _expected_source_tree(
     archive_path: Path,
-    parent: Path,
+    parent: Path | None = None,
 ) -> tuple[tempfile.TemporaryDirectory[str], Path]:
-    temporary = tempfile.TemporaryDirectory(prefix=".source-validate-", dir=parent)
+    temporary = tempfile.TemporaryDirectory(
+        prefix=".source-validate-",
+        dir=parent,
+    )
     temporary_root = Path(temporary.name)
     try:
         content_root = _extract_source_archive(
@@ -2214,20 +2387,82 @@ def _expected_source_tree(
     return temporary, content_root
 
 
-def install_source_archive(
+def _source_receipt(
+    destination: Path,
+    artifact_id: str,
+) -> dict[str, Any]:
+    receipt_path = destination / SOURCE_RECEIPT
+    if _is_reparse_point(receipt_path) or not receipt_path.is_file():
+        raise LifecycleError(
+            f"source destination is unowned; {SOURCE_RECEIPT} is missing or unsafe"
+        )
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError("source destination has an invalid ownership receipt") from exc
+    required = {
+        "schema_version",
+        "artifact_id",
+        "requested_version",
+        "resolved_version",
+        "source_url",
+        "archive_sha256",
+        "tree_sha256",
+    }
+    if not isinstance(receipt, dict) or set(receipt) != required:
+        raise LifecycleError("source destination has an invalid ownership receipt")
+    if (
+        receipt.get("schema_version") != SCHEMA_VERSION
+        or receipt.get("artifact_id") != artifact_id
+        or not _is_exact_pin(str(receipt.get("resolved_version", "")))
+        or not SHA256_PATTERN.fullmatch(str(receipt.get("archive_sha256", "")))
+        or not SHA256_PATTERN.fullmatch(str(receipt.get("tree_sha256", "")))
+    ):
+        raise LifecycleError("source destination has an invalid ownership receipt")
+    parsed = urllib.parse.urlparse(str(receipt.get("source_url", "")))
+    if parsed.scheme not in {"https", "oci"} or parsed.username or parsed.password:
+        raise LifecycleError("source destination has an invalid ownership receipt")
+    if _source_tree_digest(destination) != receipt["tree_sha256"]:
+        raise LifecycleError(
+            "installed source tree digest mismatch; source destination was "
+            "modified after its owned fingerprint was recorded"
+        )
+    return receipt
+
+
+def _source_receipt_payload(
+    artifact_id: str,
+    record: ArtifactRecord,
+    tree_digest: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_id": artifact_id,
+        "requested_version": record.requested_version,
+        "resolved_version": record.resolved_version,
+        "source_url": record.source_url,
+        "archive_sha256": record.sha256,
+        "tree_sha256": tree_digest,
+    }
+
+
+def _source_install_preflight(
     root: Path,
     manifest_path: Path,
     cache_root: Path,
     artifact_id: str,
     destination: Path,
     *,
+    trusted_root: Path,
     expected_version: str,
     expected_requested_version: str,
-) -> Path:
-    """Replace a source checkout only from a policy-bound offline export."""
+) -> tuple[Path, ArtifactRecord, dict[str, Any] | None, str]:
+    """Validate policy, archive, containment, and prior ownership without mutation."""
 
     root = root.resolve()
-    destination = destination.absolute()
+    _trusted_root, destination = _guard_source_destination(
+        trusted_root, destination
+    )
     archive_path = resolve_cached_artifact(
         manifest_path,
         cache_root,
@@ -2241,45 +2476,140 @@ def install_source_archive(
     if errors:
         raise LifecycleError("; ".join(errors))
     record = records[artifact_id]
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if _is_reparse_point(destination):
-        raise LifecycleError(f"source destination is a reparse point: {destination}")
-    temporary, content_root = _expected_source_tree(
-        archive_path, destination.parent
+    previous = (
+        _source_receipt(destination, artifact_id)
+        if destination.exists()
+        else None
     )
+    temporary, expected_root = _expected_source_tree(archive_path)
     try:
-        tree_digest = _source_tree_digest(content_root)
-        staged = Path(temporary.name) / "staged"
-        shutil.copytree(content_root, staged)
-        receipt = {
-            "schema_version": SCHEMA_VERSION,
-            "artifact_id": artifact_id,
-            "resolved_version": record.resolved_version,
-            "source_url": record.source_url,
-            "archive_sha256": record.sha256,
-            "tree_sha256": tree_digest,
-        }
-        atomic_write_bytes(staged / SOURCE_RECEIPT, _json_bytes(receipt))
-        if destination.exists():
-            if not destination.is_dir():
-                raise LifecycleError(
-                    f"source destination is not a directory: {destination}"
-                )
-            shutil.rmtree(destination)
-        os.replace(staged, destination)
+        expected_tree_digest = _source_tree_digest(expected_root)
     finally:
         temporary.cleanup()
-    validation = validate_source_install(
+    return archive_path, record, previous, expected_tree_digest
+
+
+def preflight_source_install(
+    root: Path,
+    manifest_path: Path,
+    cache_root: Path,
+    artifact_id: str,
+    destination: Path,
+    *,
+    trusted_root: Path,
+    expected_version: str,
+    expected_requested_version: str,
+) -> Path:
+    """Validate a source install or upgrade before any target mutation."""
+
+    _source_install_preflight(
         root,
         manifest_path,
         cache_root,
         artifact_id,
         destination,
+        trusted_root=trusted_root,
         expected_version=expected_version,
         expected_requested_version=expected_requested_version,
     )
-    if validation:
-        raise LifecycleError("; ".join(validation))
+    return Path(os.path.abspath(os.fspath(destination)))
+
+
+def install_source_archive(
+    root: Path,
+    manifest_path: Path,
+    cache_root: Path,
+    artifact_id: str,
+    destination: Path,
+    *,
+    trusted_root: Path,
+    expected_version: str,
+    expected_requested_version: str,
+) -> Path:
+    """Install or safely upgrade a source tree from a policy-bound export."""
+
+    archive_path, record, previous, expected_tree_digest = _source_install_preflight(
+        root,
+        manifest_path,
+        cache_root,
+        artifact_id,
+        destination,
+        trusted_root=trusted_root,
+        expected_version=expected_version,
+        expected_requested_version=expected_requested_version,
+    )
+    trusted_root, destination = _guard_source_destination(
+        trusted_root, destination
+    )
+    desired_receipt = _source_receipt_payload(
+        artifact_id, record, expected_tree_digest
+    )
+    if previous == desired_receipt:
+        return destination
+    _create_source_parent(trusted_root, destination)
+    trusted_root, destination = _guard_source_destination(
+        trusted_root, destination
+    )
+    temporary, content_root = _expected_source_tree(archive_path, destination.parent)
+    backup_temporary: Path | None = None
+    backup: Path | None = None
+    try:
+        tree_digest = _source_tree_digest(content_root)
+        if tree_digest != expected_tree_digest:
+            raise LifecycleError("staged source tree differs from validated archive")
+        atomic_write_bytes(
+            content_root / SOURCE_RECEIPT,
+            _json_bytes(desired_receipt),
+        )
+        _guard_source_destination(trusted_root, destination)
+        if destination.exists():
+            current = _source_receipt(destination, artifact_id)
+            if current != previous:
+                raise LifecycleError(
+                    "source destination changed after upgrade preflight"
+                )
+            backup_temporary = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{destination.name}.backup-",
+                    dir=destination.parent,
+                )
+            )
+            _guard_source_destination(trusted_root, backup_temporary)
+            backup = backup_temporary / "previous"
+            os.replace(destination, backup)
+        try:
+            os.replace(content_root, destination)
+            validation = validate_source_install(
+                root,
+                manifest_path,
+                cache_root,
+                artifact_id,
+                destination,
+                trusted_root=trusted_root,
+                expected_version=expected_version,
+                expected_requested_version=expected_requested_version,
+            )
+            if validation:
+                raise LifecycleError("; ".join(validation))
+        except Exception:
+            if destination.exists() and not _is_reparse_point(destination):
+                os.replace(destination, content_root)
+            if backup is not None and backup.exists():
+                os.replace(backup, destination)
+            raise
+        if backup is not None and backup.exists():
+            if (
+                previous is None
+                or _source_tree_digest(backup) != previous["tree_sha256"]
+            ):
+                raise LifecycleError(
+                    f"previous owned source changed during upgrade; preserved at {backup}"
+                )
+            shutil.rmtree(backup)
+        if backup_temporary is not None and backup_temporary.exists():
+            backup_temporary.rmdir()
+    finally:
+        temporary.cleanup()
     return destination
 
 
@@ -2290,6 +2620,7 @@ def validate_source_install(
     artifact_id: str,
     destination: Path,
     *,
+    trusted_root: Path,
     expected_version: str,
     expected_requested_version: str,
 ) -> list[str]:
@@ -2297,6 +2628,9 @@ def validate_source_install(
 
     errors: list[str] = []
     try:
+        _trusted_root, destination = _guard_source_destination(
+            trusted_root, destination
+        )
         archive_path = resolve_cached_artifact(
             manifest_path,
             cache_root,
@@ -2310,31 +2644,19 @@ def validate_source_install(
         if record_errors:
             raise LifecycleError("; ".join(record_errors))
         record = records[artifact_id]
-        if _is_reparse_point(destination) or not destination.is_dir():
+        if not destination.is_dir():
             raise LifecycleError("installed source tree is missing or unsafe")
-        receipt_path = destination / SOURCE_RECEIPT
-        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
-        if not isinstance(receipt, dict):
-            raise LifecycleError("installed source receipt is not an object")
-        temporary, expected_root = _expected_source_tree(
-            archive_path, destination.parent
-        )
+        receipt = _source_receipt(destination, artifact_id)
+        temporary, expected_root = _expected_source_tree(archive_path)
         try:
             expected_tree_digest = _source_tree_digest(expected_root)
         finally:
             temporary.cleanup()
-        expected_receipt = {
-            "schema_version": SCHEMA_VERSION,
-            "artifact_id": artifact_id,
-            "resolved_version": record.resolved_version,
-            "source_url": record.source_url,
-            "archive_sha256": record.sha256,
-            "tree_sha256": expected_tree_digest,
-        }
+        expected_receipt = _source_receipt_payload(
+            artifact_id, record, expected_tree_digest
+        )
         if receipt != expected_receipt:
             errors.append(f"{artifact_id}: installed source receipt mismatch")
-        if _source_tree_digest(destination) != expected_tree_digest:
-            errors.append(f"{artifact_id}: installed source tree digest mismatch")
     except (
         LifecycleError,
         OSError,
@@ -2368,6 +2690,336 @@ def _load_dependency_policy(
     return versions, policy
 
 
+def _normalize_dependency_authority(
+    artifact_id: str,
+    raw: Mapping[str, Any],
+    *,
+    allow_file: bool = False,
+) -> dict[str, str]:
+    required = {
+        "kind",
+        "requested_version",
+        "resolved_version",
+        "source_url",
+        "sha256",
+    }
+    if set(raw) != required:
+        raise LifecycleError(
+            f"{artifact_id}: dependency authority fields are incomplete"
+        )
+    kind = raw.get("kind")
+    requested = raw.get("requested_version")
+    resolved = raw.get("resolved_version")
+    source_url = raw.get("source_url")
+    digest = str(raw.get("sha256", "")).lower()
+    if (
+        kind not in DEPENDENCY_KINDS
+        or not isinstance(requested, str)
+        or not requested
+        or not isinstance(resolved, str)
+        or not _is_exact_pin(resolved)
+        or not isinstance(source_url, str)
+        or not source_url
+        or not SHA256_PATTERN.fullmatch(digest)
+    ):
+        if not SHA256_PATTERN.fullmatch(digest):
+            raise LifecycleError(
+                f"{artifact_id}: independently expected SHA-256 is invalid"
+            )
+        raise LifecycleError(f"{artifact_id}: dependency authority is invalid")
+    parsed = urllib.parse.urlparse(source_url)
+    if parsed.username or parsed.password:
+        raise LifecycleError(
+            f"{artifact_id}: authority source URL embeds credentials"
+        )
+    if kind == "container":
+        if not re.fullmatch(
+            r"oci://[^@\s]+@sha256:[0-9a-f]{64}",
+            source_url,
+        ):
+            raise LifecycleError(
+                f"{artifact_id}: container authority is not digest-immutable"
+            )
+    elif parsed.scheme != "https" and not (
+        allow_file and parsed.scheme == "file"
+    ):
+        raise LifecycleError(
+            f"{artifact_id}: authority source URL must use HTTPS"
+        )
+    if kind == "git" and not COMMIT_PATTERN.fullmatch(resolved):
+        raise LifecycleError(
+            f"{artifact_id}: Git authority lacks an immutable commit"
+        )
+    return {
+        "kind": str(kind),
+        "requested_version": requested,
+        "resolved_version": resolved,
+        "source_url": source_url,
+        "sha256": digest,
+    }
+
+
+def _dependency_authorities_from_payload(
+    payload: Any,
+) -> dict[str, dict[str, str]]:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(payload.get("authorities"), dict)
+    ):
+        raise LifecycleError("dependency authority manifest has an unsupported schema")
+    authorities: dict[str, dict[str, str]] = {}
+    for artifact_id, raw in payload["authorities"].items():
+        if (
+            not isinstance(artifact_id, str)
+            or not PORTABLE_ID_PATTERN.fullmatch(artifact_id)
+            or not isinstance(raw, dict)
+        ):
+            raise LifecycleError(
+                "dependency authority manifest contains an invalid entry"
+            )
+        authorities[artifact_id] = _normalize_dependency_authority(
+            artifact_id, raw
+        )
+    return authorities
+
+
+def _load_dependency_authorities(
+    root: Path,
+) -> dict[str, dict[str, str]]:
+    path = root / DEPENDENCY_AUTHORITY_FILE
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError(f"dependency authority manifest is unreadable: {exc}") from exc
+    return _dependency_authorities_from_payload(payload)
+
+
+def _validate_dependency_authority_policy(
+    versions: Mapping[str, str],
+    raw: Mapping[str, Any],
+    authority: Mapping[str, Any],
+    *,
+    allow_file: bool = False,
+) -> dict[str, str]:
+    artifact_id = str(raw.get("id", ""))
+    normalized = _normalize_dependency_authority(
+        artifact_id,
+        authority,
+        allow_file=allow_file,
+    )
+    kind = str(raw.get("kind", ""))
+    version_key = str(raw.get("version_key", ""))
+    requested = versions.get(version_key, "")
+    if normalized["kind"] != kind:
+        raise LifecycleError(
+            f"{artifact_id}: promoted authority kind differs from policy"
+        )
+    if normalized["requested_version"] != requested:
+        raise LifecycleError(
+            f"{artifact_id}: promoted authority request differs from {version_key}"
+        )
+    source = raw.get("source")
+    if not isinstance(source, dict):
+        raise LifecycleError(
+            f"{artifact_id}: authoritative source policy is missing"
+        )
+    locked_digest = _trusted_digest(source, versions)
+    if (
+        SHA256_PATTERN.fullmatch(locked_digest)
+        and normalized["sha256"] != locked_digest
+    ):
+        raise LifecycleError(
+            f"{artifact_id}: promoted digest differs from VERSIONS.lock"
+        )
+    locked_resolved = _trusted_resolved_version(source, versions, requested)
+    if kind == "git":
+        locked_resolved = _trusted_revision(source, versions)
+    if (
+        _is_exact_pin(locked_resolved)
+        and normalized["resolved_version"] != locked_resolved
+    ):
+        raise LifecycleError(
+            f"{artifact_id}: promoted resolved identity differs from VERSIONS.lock"
+        )
+    identity = _source_identity(
+        source,
+        versions,
+        requested_version=requested,
+        resolved_version=normalized["resolved_version"],
+    )
+    expected_url = _authoritative_source_url(
+        source,
+        versions,
+        requested_version=requested,
+        resolved_version=normalized["resolved_version"],
+    )
+    unresolved_identity = (
+        not identity
+        or identity in UNRESOLVED_VALUES
+        or "unresolved" in identity
+        or "unresolved" in expected_url
+    )
+    if (
+        not unresolved_identity
+        and normalized["source_url"] != expected_url
+    ):
+        raise LifecycleError(
+            f"{artifact_id}: promoted source differs from VERSIONS.lock identity"
+        )
+    if kind == "container":
+        identity_digest_key = source.get("identity_digest_key")
+        locked_identity_digest = (
+            versions.get(identity_digest_key, "")
+            if isinstance(identity_digest_key, str)
+            else ""
+        )
+        if (
+            re.fullmatch(r"sha256:[0-9a-f]{64}", locked_identity_digest)
+            and not normalized["source_url"].endswith(
+                f"@{locked_identity_digest}"
+            )
+        ):
+            raise LifecycleError(
+                f"{artifact_id}: promoted container digest differs from VERSIONS.lock"
+            )
+    return normalized
+
+
+def _effective_dependency_authority(
+    root: Path,
+    versions: Mapping[str, str],
+    raw: Mapping[str, Any],
+    *,
+    authorities: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, str]:
+    artifact_id = str(raw.get("id", ""))
+    available = (
+        _load_dependency_authorities(root)
+        if authorities is None
+        else authorities
+    )
+    promoted = available.get(artifact_id)
+    if promoted is not None:
+        return _validate_dependency_authority_policy(
+            versions, raw, promoted
+        )
+    version_key = str(raw.get("version_key", ""))
+    requested = versions.get(version_key, "")
+    source = raw.get("source")
+    if not isinstance(source, dict):
+        raise LifecycleError(
+            f"{artifact_id}: authoritative source policy is missing"
+        )
+    digest = _trusted_digest(source, versions)
+    if not SHA256_PATTERN.fullmatch(digest):
+        raise LifecycleError(
+            f"{artifact_id}: immutable trusted digest is unresolved"
+        )
+    kind = str(raw.get("kind", ""))
+    resolved = _trusted_resolved_version(source, versions, requested)
+    if kind == "git":
+        resolved = _trusted_revision(source, versions)
+        if not COMMIT_PATTERN.fullmatch(resolved):
+            raise LifecycleError(
+                f"{artifact_id}: immutable trusted revision is unresolved"
+            )
+    elif not _is_exact_pin(resolved):
+        raise LifecycleError(
+            f"{artifact_id}: trusted resolved version is unresolved"
+        )
+    source_url = _authoritative_source_url(
+        source,
+        versions,
+        requested_version=requested,
+        resolved_version=resolved,
+    )
+    identity = _source_identity(
+        source,
+        versions,
+        requested_version=requested,
+        resolved_version=resolved,
+    )
+    if (
+        not identity
+        or identity in UNRESOLVED_VALUES
+        or "unresolved" in identity
+        or not source_url
+        or "unresolved" in source_url
+    ):
+        raise LifecycleError(
+            f"{artifact_id}: authoritative source identity is unresolved"
+        )
+    return _validate_dependency_authority_policy(
+        versions,
+        raw,
+        {
+            "kind": kind,
+            "requested_version": requested,
+            "resolved_version": resolved,
+            "source_url": source_url,
+            "sha256": digest,
+        },
+        allow_file=True,
+    )
+
+
+def promote_dependency_authority(
+    root: Path,
+    *,
+    artifact_id: str,
+    authority_file: Path,
+) -> dict[str, str]:
+    """Promote independently supplied identity/digest data, never artifact bytes."""
+
+    root = root.resolve()
+    tracked_path = root / DEPENDENCY_AUTHORITY_FILE
+    if authority_file.resolve() == tracked_path.resolve():
+        raise LifecycleError(
+            "promotion requires a separate independently supplied authority file"
+        )
+    try:
+        supplied_payload = json.loads(authority_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError(f"supplied dependency authority is unreadable: {exc}") from exc
+    supplied = _dependency_authorities_from_payload(supplied_payload).get(
+        artifact_id
+    )
+    if supplied is None:
+        raise LifecycleError(
+            f"supplied dependency authority lacks {artifact_id}"
+        )
+    versions, policy = _load_dependency_policy(root)
+    raw_inputs = policy.get("dependency_inputs", [])
+    raw = next(
+        (
+            item
+            for item in raw_inputs
+            if isinstance(item, dict) and item.get("id") == artifact_id
+        ),
+        None,
+    )
+    if raw is None:
+        raise LifecycleError(
+            f"{artifact_id}: absent from authoritative dependency policy"
+        )
+    promoted = _validate_dependency_authority_policy(
+        versions, raw, supplied
+    )
+    authorities = _load_dependency_authorities(root)
+    authorities[artifact_id] = promoted
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "authorities": {
+            key: authorities[key] for key in sorted(authorities)
+        },
+    }
+    atomic_write_bytes(tracked_path, _json_bytes(payload))
+    return promoted
+
+
 def _trusted_export_digest(
     root: Path,
     *,
@@ -2388,67 +3040,22 @@ def _trusted_export_digest(
     )
     if raw is None:
         raise LifecycleError(f"{artifact_id}: absent from authoritative dependency policy")
-    version_key = str(raw["version_key"])
-    locked_request = versions.get(version_key, "")
-    if requested_version != locked_request:
-        raise LifecycleError(
-            f"{artifact_id}: requested version differs from authoritative {version_key}"
-        )
-    source = raw["source"]
-    assert isinstance(source, dict)
-    trusted_resolved = _trusted_resolved_version(
-        source, versions, requested_version
+    authority = _effective_dependency_authority(
+        root.resolve(), versions, raw
     )
-    if raw.get("kind") == "git":
-        trusted_resolved = _trusted_revision(source, versions)
-        if not COMMIT_PATTERN.fullmatch(trusted_resolved):
-            raise LifecycleError(
-                f"{artifact_id}: immutable trusted revision is unresolved"
-            )
-    elif raw.get("kind") == "container":
-        identity_digest_key = source.get("identity_digest_key")
-        identity_digest = (
-            versions.get(identity_digest_key, "")
-            if isinstance(identity_digest_key, str)
-            else ""
-        )
-        if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity_digest):
-            raise LifecycleError(
-                f"{artifact_id}: immutable container identity digest is unresolved"
-            )
-    elif not _is_exact_pin(trusted_resolved):
+    if requested_version != authority["requested_version"]:
         raise LifecycleError(
-            f"{artifact_id}: trusted resolved version is unresolved"
+            f"{artifact_id}: requested version differs from authoritative policy"
         )
-    if resolved_version != trusted_resolved:
+    if resolved_version != authority["resolved_version"]:
         raise LifecycleError(
             f"{artifact_id}: resolved version differs from authoritative policy"
         )
-    identity = _source_identity(
-        source,
-        versions,
-        requested_version=requested_version,
-        resolved_version=resolved_version,
-    )
-    expected_url = _authoritative_source_url(
-        source,
-        versions,
-        requested_version=requested_version,
-        resolved_version=resolved_version,
-    )
-    if (
-        not identity
-        or identity in UNRESOLVED_VALUES
-        or not expected_url
-        or source_url != expected_url
-    ):
+    if source_url != authority["source_url"]:
         raise LifecycleError(
             f"{artifact_id}: URL differs from authoritative source identity"
         )
-    digest = _trusted_digest(source, versions)
-    if not SHA256_PATTERN.fullmatch(digest):
-        raise LifecycleError(f"{artifact_id}: immutable trusted digest is unresolved")
-    return digest
+    return authority["sha256"]
 
 
 def import_artifact(
@@ -2963,9 +3570,32 @@ def validate_dependency_inputs(
         )
 
     errors.extend(_dependency_policy_errors(versions, policy))
+    try:
+        authorities = _load_dependency_authorities(root)
+    except LifecycleError as exc:
+        authorities = {}
+        errors.append(str(exc))
     raw_inputs = policy.get("dependency_inputs", [])
     if not isinstance(raw_inputs, list):
         raw_inputs = []
+    raw_by_id = {
+        str(raw.get("id")): raw
+        for raw in raw_inputs
+        if isinstance(raw, dict) and isinstance(raw.get("id"), str)
+    }
+    for artifact_id, authority in authorities.items():
+        raw = raw_by_id.get(artifact_id)
+        if raw is None:
+            errors.append(
+                f"{artifact_id}: promoted authority has no dependency policy entry"
+            )
+            continue
+        try:
+            _validate_dependency_authority_policy(
+                versions, raw, authority
+            )
+        except LifecycleError as exc:
+            errors.append(str(exc))
     for raw in raw_inputs:
         if not isinstance(raw, dict):
             continue
@@ -2991,30 +3621,45 @@ def validate_dependency_inputs(
         dynamic = value in {"dynamic", "unresolved"}
         if reproducible:
             source = raw.get("source")
-            if not isinstance(source, dict):
-                continue
-            policy_digest = _trusted_digest(source, versions)
-            if not SHA256_PATTERN.fullmatch(policy_digest):
-                errors.append(
-                    f"{artifact_id}: immutable trusted digest is unresolved"
+            if (
+                artifact_id not in authorities
+                and isinstance(source, dict)
+                and raw.get("kind") == "git"
+                and not COMMIT_PATTERN.fullmatch(
+                    _trusted_revision(source, versions)
                 )
-            if raw.get("kind") == "git" and not COMMIT_PATTERN.fullmatch(
-                _trusted_revision(source, versions)
             ):
                 errors.append(
                     f"{artifact_id}: immutable trusted revision is unresolved"
                 )
-            if raw.get("kind") == "container":
+            if (
+                artifact_id not in authorities
+                and isinstance(source, dict)
+                and raw.get("kind") == "container"
+            ):
                 identity_digest_key = source.get("identity_digest_key")
                 identity_digest = (
                     versions.get(identity_digest_key, "")
                     if isinstance(identity_digest_key, str)
                     else ""
                 )
-                if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity_digest):
+                if not re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", identity_digest
+                ):
                     errors.append(
-                        f"{artifact_id}: immutable container identity digest is unresolved"
+                        f"{artifact_id}: immutable container identity "
+                        "digest is unresolved"
                     )
+            try:
+                authority = _effective_dependency_authority(
+                    root,
+                    versions,
+                    raw,
+                    authorities=authorities,
+                )
+            except LifecycleError as exc:
+                authority = None
+                errors.append(str(exc))
             record = records.get(artifact_id)
             if record is None:
                 errors.append(f"{artifact_id}: reproducible mode needs a resolved artifact")
@@ -3023,56 +3668,21 @@ def validate_dependency_inputs(
                 errors.append(
                     f"{artifact_id}: untrusted acquisition evidence is not reproducible"
                 )
-            expected_digest = policy_digest
-            if not SHA256_PATTERN.fullmatch(expected_digest):
-                errors.append(
-                    f"{artifact_id}: immutable trusted digest is unresolved"
-                )
-            elif record.sha256 != expected_digest:
+            if authority is None:
+                continue
+            if record.sha256 != authority["sha256"]:
                 errors.append(
                     f"{artifact_id}: cached content differs from trusted digest"
                 )
-            kind = raw.get("kind")
-            expected_resolved = _trusted_resolved_version(source, versions, value)
-            if kind == "git":
-                expected_resolved = _trusted_revision(source, versions)
-                if not COMMIT_PATTERN.fullmatch(expected_resolved):
-                    errors.append(
-                        f"{artifact_id}: immutable trusted revision is unresolved"
-                    )
-            elif not _is_exact_pin(expected_resolved):
-                errors.append(
-                    f"{artifact_id}: trusted resolved version is unresolved"
-                )
-            if (
-                _is_exact_pin(expected_resolved)
-                and record.resolved_version != expected_resolved
-            ):
+            if record.resolved_version != authority["resolved_version"]:
                 errors.append(
                     f"{artifact_id}: resolved version differs from authoritative policy"
                 )
-            identity = _source_identity(
-                source,
-                versions,
-                requested_version=value,
-                resolved_version=record.resolved_version,
-            )
-            expected_url = _authoritative_source_url(
-                source,
-                versions,
-                requested_version=value,
-                resolved_version=record.resolved_version,
-            )
-            if (
-                not identity
-                or identity in UNRESOLVED_VALUES
-                or not expected_url
-                or record.source_url != expected_url
-            ):
+            if record.source_url != authority["source_url"]:
                 errors.append(
                     f"{artifact_id}: cached URL differs from authoritative source"
                 )
-            elif dynamic and record.requested_version != value:
+            if dynamic and record.requested_version != value:
                 errors.append(
                     f"{artifact_id}: resolution did not record unresolved input"
                 )
@@ -3080,7 +3690,7 @@ def validate_dependency_inputs(
                 errors.append(f"{artifact_id}: requested version differs from {version_key}")
             elif (
                 not dynamic
-                and kind != "git"
+                and raw.get("kind") != "git"
                 and record.resolved_version != value
             ):
                 errors.append(f"{artifact_id}: resolved version differs from {version_key}")
@@ -3440,6 +4050,7 @@ def _input_digest(root: Path, source_revision: str) -> str:
         "serving/models.manifest",
         "serving/model-authorities.json",
         "verification/policy.json",
+        DEPENDENCY_AUTHORITY_FILE,
         "env/uv.lock",
         "ARTIFACTS.json",
         "incoming/dependency-cache/manifest.json",
@@ -4259,6 +4870,16 @@ def _command_import_artifact(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_promote_authority(args: argparse.Namespace) -> int:
+    authority = promote_dependency_authority(
+        args.root,
+        artifact_id=args.artifact_id,
+        authority_file=args.authority,
+    )
+    print(json.dumps(authority, sort_keys=True))
+    return 0
+
+
 def _command_artifact_path(args: argparse.Namespace) -> int:
     path = resolve_cached_artifact(
         args.manifest,
@@ -4311,6 +4932,22 @@ def _command_install_source(args: argparse.Namespace) -> int:
         args.cache,
         args.artifact_id,
         args.destination,
+        trusted_root=args.trusted_root,
+        expected_version=args.expected_version,
+        expected_requested_version=args.expected_requested_version,
+    )
+    print(path)
+    return 0
+
+
+def _command_preflight_source(args: argparse.Namespace) -> int:
+    path = preflight_source_install(
+        args.root,
+        args.manifest,
+        args.cache,
+        args.artifact_id,
+        args.destination,
+        trusted_root=args.trusted_root,
         expected_version=args.expected_version,
         expected_requested_version=args.expected_requested_version,
     )
@@ -4325,6 +4962,7 @@ def _command_validate_source(args: argparse.Namespace) -> int:
         args.cache,
         args.artifact_id,
         args.destination,
+        trusted_root=args.trusted_root,
         expected_version=args.expected_version,
         expected_requested_version=args.expected_requested_version,
     )
@@ -4474,6 +5112,12 @@ def build_parser() -> argparse.ArgumentParser:
     import_dependency.add_argument("--resolved-version", required=True)
     import_dependency.set_defaults(handler=_command_import_artifact)
 
+    promote_authority = subparsers.add_parser("promote-authority")
+    promote_authority.add_argument("--root", type=Path, required=True)
+    promote_authority.add_argument("--artifact-id", required=True)
+    promote_authority.add_argument("--authority", type=Path, required=True)
+    promote_authority.set_defaults(handler=_command_promote_authority)
+
     artifact_path = subparsers.add_parser("artifact-path")
     artifact_path.add_argument("--manifest", type=Path, required=True)
     artifact_path.add_argument("--cache", type=Path, required=True)
@@ -4509,6 +5153,7 @@ def build_parser() -> argparse.ArgumentParser:
     model_path.set_defaults(handler=_command_model_path)
 
     for command_name, handler in (
+        ("preflight-source", _command_preflight_source),
         ("install-source", _command_install_source),
         ("validate-source", _command_validate_source),
     ):
@@ -4518,6 +5163,7 @@ def build_parser() -> argparse.ArgumentParser:
         source_command.add_argument("--cache", type=Path, required=True)
         source_command.add_argument("--artifact-id", required=True)
         source_command.add_argument("--destination", type=Path, required=True)
+        source_command.add_argument("--trusted-root", type=Path, required=True)
         source_command.add_argument("--expected-version", required=True)
         source_command.add_argument("--expected-requested-version", required=True)
         source_command.set_defaults(handler=handler)

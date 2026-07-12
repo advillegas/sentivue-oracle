@@ -17,13 +17,17 @@ mkdir -p "$CC" "$OC" "$HERE/vendor"
 
 vendored() {  # vendored <name> <artifact-id> <requested> <resolved>
   local name="$1" artifact_id="$2" requested="$3" resolved="$4" v="$HERE/vendor/$1"
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" preflight-source \
+    --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+    --artifact-id "$artifact_id" --destination "$v" --trusted-root "$ROOT" \
+    --expected-version "$resolved" --expected-requested-version "$requested"
   "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" install-source \
     --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
-    --artifact-id "$artifact_id" --destination "$v" \
+    --artifact-id "$artifact_id" --destination "$v" --trusted-root "$ROOT" \
     --expected-version "$resolved" --expected-requested-version "$requested"
   "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-source \
     --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
-    --artifact-id "$artifact_id" --destination "$v" \
+    --artifact-id "$artifact_id" --destination "$v" --trusted-root "$ROOT" \
     --expected-version "$resolved" --expected-requested-version "$requested" >/dev/null
   echo "==> $name policy-bound vendor tree installed ($resolved)" >&2
   echo "$v"

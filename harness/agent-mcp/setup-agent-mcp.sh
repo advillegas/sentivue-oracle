@@ -32,7 +32,7 @@ local_env() {
 validate_vendor() {
   "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-source \
     --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
-    --artifact-id source-agent-mcp --destination "$VENDOR" \
+    --artifact-id source-agent-mcp --destination "$VENDOR" --trusted-root "$ROOT" \
     --expected-version "$AGENT_MCP_COMMIT" \
     --expected-requested-version "$AGENT_MCP_PIN" >/dev/null
 }
@@ -40,9 +40,14 @@ validate_vendor() {
 case "${1:-status}" in
   install)
     command -v uv >/dev/null || { echo "ERROR: uv missing - run bootstrap/ensure-tools.sh"; exit 1; }
+    "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" preflight-source \
+      --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+      --artifact-id source-agent-mcp --destination "$VENDOR" --trusted-root "$ROOT" \
+      --expected-version "$AGENT_MCP_COMMIT" \
+      --expected-requested-version "$AGENT_MCP_PIN" >/dev/null
     "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" install-source \
       --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
-      --artifact-id source-agent-mcp --destination "$VENDOR" \
+      --artifact-id source-agent-mcp --destination "$VENDOR" --trusted-root "$ROOT" \
       --expected-version "$AGENT_MCP_COMMIT" \
       --expected-requested-version "$AGENT_MCP_PIN" >/dev/null
     validate_vendor
