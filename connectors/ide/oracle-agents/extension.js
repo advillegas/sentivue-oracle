@@ -321,18 +321,11 @@ function buildLive() {
       ],
     }));
   }
-  if (!live.length && !chats.length) out.push(item("Nothing running", { icon: "info", desc: "open an agent or mission below" }));
-  out.push(item("New Agent Conversation", { icon: "comment-discussion", cmd: "oracleAgents.newConversation", tip: "Cursor-style chat: live thinking, expandable tool calls, full visibility" }));
-  out.push(item("New Agent Terminal (Claude Code)", { icon: "terminal", cmd: "oracleAgents.newClaude", tip: "Full engine TUI as an editor tab" }));
-  out.push(item("New Agent in Worktree", { icon: "git-branch", cmd: "oracleAgents.newClaudeWorktree", tip: "Isolated worktree + branch: parallel agents never collide" }));
-  out.push(item("New Agent (OpenCode)", { icon: "rocket", cmd: "oracleAgents.newOpenCode" }));
-  out.push(item("New Agent (Kilo Code)", { icon: "circuit-board", cmd: "oracleAgents.newKilo", tip: "Kilo CLI on the same local models and kilo.jsonc as the Kilo side panel" }));
-  out.push(item("Start Mission (autonomous loop)...", { icon: "play", cmd: "oracleAgents.startMission" }));
-  out.push(item("Orchestration Viewer (Agent-MCP)", {
-    icon: "type-hierarchy",
-    cmd: "oracleAgents.orchestrationViewer",
-    tip: "Watch how agents are orchestrated - agents, tasks, and shared context as a live graph (optional component; installs on first use)",
-  }));
+  // When nothing is running, return [] so the view's welcome content (action
+  // buttons) renders instead. The launchers used to be static tree rows here,
+  // but that made this top view tall enough to push Mission Status / Session
+  // Journals off-screen; they now live in the title-bar "+" menu and welcome
+  // view, keeping this section compact so the other views stay visible.
   return out;
 }
 

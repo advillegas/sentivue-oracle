@@ -2,7 +2,7 @@
   "name": "oracle-agents",
   "displayName": "SentiVue Oracle Agents",
   "description": "Agent sidebar in the Secondary Side Bar: open agents and missions, see everything running, jump between them - all on local models.",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "publisher": "sentivue",
   "license": "MIT",
   "engines": { "vscode": "^1.80.0" },
@@ -21,11 +21,17 @@
     },
     "views": {
       "oracle-agents": [
-        { "id": "oracleAgents.live", "name": "Agents & Missions", "icon": "media/oracle.svg" },
-        { "id": "oracleAgents.mission", "name": "Mission Status", "icon": "media/oracle.svg" },
-        { "id": "oracleAgents.sessions", "name": "Session Journals", "icon": "media/oracle.svg" }
+        { "id": "oracleAgents.live", "name": "Agents & Missions", "icon": "media/oracle.svg", "initialSize": 2, "visibility": "visible" },
+        { "id": "oracleAgents.mission", "name": "Mission Status", "icon": "media/oracle.svg", "initialSize": 1, "visibility": "visible" },
+        { "id": "oracleAgents.sessions", "name": "Session Journals", "icon": "media/oracle.svg", "initialSize": 1, "visibility": "collapsed" }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "oracleAgents.live",
+        "contents": "No agents or missions are running yet.\n[New Agent Conversation](command:oracleAgents.newConversation)\n[New Agent Terminal (Claude Code)](command:oracleAgents.newClaude)\n[New Agent in Worktree](command:oracleAgents.newClaudeWorktree)\n[New Agent (OpenCode)](command:oracleAgents.newOpenCode)\n[New Agent (Kilo Code)](command:oracleAgents.newKilo)\n[Start Mission (autonomous loop)](command:oracleAgents.startMission)\n[Orchestration Viewer (Agent-MCP)](command:oracleAgents.orchestrationViewer)\nUse the + menu in this view's title bar to open more at any time."
+      }
+    ],
     "commands": [
       { "command": "oracleAgents.newConversation", "title": "Oracle: New Agent Conversation", "icon": "$(comment-discussion)" },
       { "command": "oracleAgents.orchestrationViewer", "title": "Oracle: Orchestration Viewer (Agent-MCP)" },
@@ -41,13 +47,24 @@
       { "command": "oracleAgents.openLedger", "title": "Oracle: Open Ledger" },
       { "command": "oracleAgents.refresh", "title": "Oracle: Refresh Agents Sidebar", "icon": "$(refresh)" }
     ],
+    "submenus": [
+      { "id": "oracleAgents.newMenu", "label": "New Agent / Mission", "icon": "$(add)" }
+    ],
     "menus": {
       "view/title": [
-        { "command": "oracleAgents.newConversation", "when": "view == oracleAgents.live", "group": "navigation@1" },
-        { "command": "oracleAgents.startMission", "when": "view == oracleAgents.live", "group": "navigation@2" },
-        { "command": "oracleAgents.refresh", "when": "view == oracleAgents.live", "group": "navigation@3" },
+        { "submenu": "oracleAgents.newMenu", "when": "view == oracleAgents.live", "group": "navigation@1" },
+        { "command": "oracleAgents.refresh", "when": "view == oracleAgents.live", "group": "navigation@2" },
         { "command": "oracleAgents.refresh", "when": "view == oracleAgents.mission", "group": "navigation@1" },
         { "command": "oracleAgents.refresh", "when": "view == oracleAgents.sessions", "group": "navigation@1" }
+      ],
+      "oracleAgents.newMenu": [
+        { "command": "oracleAgents.newConversation", "group": "1_agents@1" },
+        { "command": "oracleAgents.newClaude", "group": "1_agents@2" },
+        { "command": "oracleAgents.newClaudeWorktree", "group": "1_agents@3" },
+        { "command": "oracleAgents.newOpenCode", "group": "1_agents@4" },
+        { "command": "oracleAgents.newKilo", "group": "1_agents@5" },
+        { "command": "oracleAgents.startMission", "group": "2_mission@1" },
+        { "command": "oracleAgents.orchestrationViewer", "group": "3_tools@1" }
       ],
       "view/item/context": [
         { "command": "oracleAgents.kill", "when": "view == oracleAgents.live && viewItem == runningAgent", "group": "inline" }
