@@ -1290,9 +1290,11 @@ def _is_obvious_secret_placeholder(value: str) -> bool:
         return True
 
     body = re.sub(
-        r"^(?:github_pat_|ghp_|hf_|sk-ant-|sk-|npm_|pypi-)",
+        r"^(?:pypi-AgEIcHlwaS5vcmcC|sk-ant-(?:api\d{2}-)?|"
+        r"github_pat_|ghp_|hf_|sk-|npm_|pypi-)",
         "",
         lowered,
+        flags=re.IGNORECASE,
     )
     alphanumeric = "".join(char for char in body if char.isalnum())
     if alphanumeric and len(set(alphanumeric)) <= 3:
@@ -1312,6 +1314,15 @@ def check_secrets(root: Path) -> CheckResult:
     patterns = [
         ("GitHub token", re.compile(r"\b(?:ghp|github_pat)_[A-Za-z0-9_]{30,}\b")),
         ("Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b")),
+        (
+            "Anthropic API key",
+            re.compile(r"\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{40,}\b"),
+        ),
+        ("npm access token", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
+        (
+            "PyPI API token",
+            re.compile(r"\bpypi-AgEIcHlwaS5vcmcC[A-Za-z0-9_-]{30,}\b"),
+        ),
         ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
         ("OpenAI-style key", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
         (
@@ -1454,6 +1465,56 @@ def _documented_path_variants(candidate: str) -> list[str]:
     return variants
 
 
+def _fenced_local_commands(text: str) -> list[tuple[int, str]]:
+    shell_languages = {
+        "bash",
+        "ksh",
+        "powershell",
+        "ps1",
+        "pwsh",
+        "sh",
+        "shell",
+        "zsh",
+    }
+    fence: tuple[str, int, bool] | None = None
+    opener = re.compile(r"^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_+-]*)\s*$")
+    command = re.compile(
+        r"^\s*(?:PS>\s+|\$\s+)?(?:&\s*)?[\"']?"
+        r"((?:\./|\.\\)?(?:bin|bootstrap|conductor|connectors|engines|harness|"
+        r"serving|verification)[\\/][A-Za-z0-9_./\\-]+)"
+        r"[\"']?(?:\s|$)",
+        re.IGNORECASE,
+    )
+    candidates = []
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if fence is not None:
+            marker, minimum_length, is_shell = fence
+            if re.fullmatch(
+                rf"\s*{re.escape(marker)}{{{minimum_length},}}\s*", line
+            ):
+                fence = None
+                continue
+            if is_shell:
+                match = command.match(line)
+                if match:
+                    candidates.extend(
+                        (line_number, candidate)
+                        for candidate in _documented_path_variants(match.group(1))
+                    )
+            continue
+
+        match = opener.match(line)
+        if match:
+            delimiter = match.group(1)
+            language = match.group(2).lower()
+            fence = (
+                delimiter[0],
+                len(delimiter),
+                language in shell_languages,
+            )
+    return candidates
+
+
 def check_docs_commands(root: Path) -> CheckResult:
     root = root.resolve()
     details = []
@@ -1496,8 +1557,11 @@ def check_docs_commands(root: Path) -> CheckResult:
             or relative_doc.startswith("docs/")
         )
         text = path.read_text(encoding="utf-8")
+        fenced_candidates: dict[int, set[str]] = {}
+        for line_number, candidate in _fenced_local_commands(text):
+            fenced_candidates.setdefault(line_number, set()).add(candidate)
         for line_number, line in enumerate(text.splitlines(), 1):
-            line_candidates = set()
+            line_candidates = set(fenced_candidates.get(line_number, set()))
             for pattern in command_patterns:
                 for match in pattern.finditer(line):
                     line_candidates.update(

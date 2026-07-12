@@ -581,6 +581,50 @@ def test_secret_gate_rejects_hugging_face_tokens_without_placeholder_false_posit
         assert check_secrets(tmp_path).status == PASS
 
 
+@pytest.mark.parametrize(
+    ("label", "token", "placeholder", "example"),
+    [
+        (
+            "Anthropic",
+            "sk-ant-" + "api03-" + ("a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8" * 2),
+            "sk-ant-" + "api03-" + ("x" * 64),
+            "sk-ant-your-key-here",
+        ),
+        (
+            "npm",
+            "npm_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8",
+            "npm_" + ("x" * 36),
+            "npm_your_token_here",
+        ),
+        (
+            "PyPI",
+            "pypi-"
+            + "AgEIcHlwaS5vcmcC"
+            + ("a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8" * 2),
+            "pypi-" + "AgEIcHlwaS5vcmcC" + ("x" * 40),
+            "pypi-your-token-here",
+        ),
+    ],
+)
+def test_secret_gate_rejects_package_service_tokens_without_example_false_positives(
+    tmp_path: Path,
+    label: str,
+    token: str,
+    placeholder: str,
+    example: str,
+) -> None:
+    source = put(tmp_path, "docs/package-auth.md", f"token={token}\n")
+
+    result = check_secrets(tmp_path)
+
+    assert result.status == FAIL
+    assert any(label in detail for detail in result.details)
+
+    for allowed in (placeholder, example):
+        source.write_text(f"token={allowed}\n", encoding="utf-8")
+        assert check_secrets(tmp_path).status == PASS
+
+
 def test_host_generated_gate_rejects_generated_files(tmp_path: Path) -> None:
     generated = put(tmp_path, "src/.DS_Store", b"host state")
     assert check_host_generated(tmp_path).status == FAIL
@@ -651,6 +695,43 @@ def test_documentation_gate_ignores_noncommand_local_path_references(
         "Sources are installed under `harness/tool/vendor/`.\n",
     )
 
+    assert check_docs_commands(tmp_path).status == PASS
+
+
+@pytest.mark.parametrize(
+    ("language", "command", "candidate"),
+    [
+        ("bash", "bin/missing-tool --help", "bin/missing-tool"),
+        (
+            "powershell",
+            r"& .\bin\missing-tool.ps1 -Help",
+            "bin/missing-tool.ps1",
+        ),
+    ],
+)
+def test_documentation_gate_resolves_bare_local_commands_in_shell_fences(
+    tmp_path: Path, language: str, command: str, candidate: str
+) -> None:
+    put(
+        tmp_path,
+        "README.md",
+        "Prose output mentions bin/prose-only --help.\n"
+        "```text\n"
+        "bin/output-only --help\n"
+        "```\n"
+        f"```{language}\n"
+        f"{command}\n"
+        "```\n",
+    )
+
+    result = check_docs_commands(tmp_path)
+
+    assert result.status == FAIL
+    assert any(candidate in detail for detail in result.details)
+    assert not any("prose-only" in detail for detail in result.details)
+    assert not any("output-only" in detail for detail in result.details)
+
+    put(tmp_path, candidate, "#!/usr/bin/env bash\ntrue\n")
     assert check_docs_commands(tmp_path).status == PASS
 
 
@@ -865,7 +946,7 @@ def test_checkpoint_twin_commits_from_a_path_with_spaces(
 
 @pytest.mark.parametrize("entrypoint", ["powershell", "bash"])
 def test_checkpoint_twins_reject_exactly_50_mib(
-    tmp_path: Path, entrypoint: str
+    tmp_path: Path, entrypoint: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     if entrypoint == "powershell" and not powershell_executable():
         pytest.skip("PowerShell is unavailable on this platform")
@@ -874,9 +955,11 @@ def test_checkpoint_twins_reject_exactly_50_mib(
 
     repo = tmp_path / f"{entrypoint} boundary repository"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    env = isolated_checkpoint_env(repo)
+    subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True)
     subprocess.run(
         ["git", "-C", str(repo), "config", "user.name", "Verifier Fixture"],
+        env=env,
         check=True,
     )
     subprocess.run(
@@ -888,6 +971,7 @@ def test_checkpoint_twins_reject_exactly_50_mib(
             "user.email",
             "verifier@example.invalid",
         ],
+        env=env,
         check=True,
     )
     source_entrypoint = (
@@ -902,6 +986,13 @@ def test_checkpoint_twins_reject_exactly_50_mib(
     with boundary.open("wb") as handle:
         handle.seek((50 * 1024 * 1024) - 1)
         handle.write(b"\0")
+
+    other_checkout = tmp_path / "other checkout"
+    other_checkout.mkdir()
+    monkeypatch.setenv("ORACLE_ROOT", str(other_checkout))
+    monkeypatch.setenv("GIT_DIR", str(other_checkout / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other_checkout))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(other_checkout / "index"))
 
     if entrypoint == "powershell":
         command = [
@@ -918,6 +1009,7 @@ def test_checkpoint_twins_reject_exactly_50_mib(
     completed = subprocess.run(
         command,
         cwd=repo,
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -926,6 +1018,7 @@ def test_checkpoint_twins_reject_exactly_50_mib(
     assert "REFUSED" in completed.stdout + completed.stderr
     head = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"],
+        env=env,
         capture_output=True,
         check=False,
     )
