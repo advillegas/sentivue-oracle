@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tarfile
@@ -16,6 +17,7 @@ from verification.lifecycle import (
     ArtifactRecord,
     LifecycleError,
     atomic_write_text,
+    begin_install_phase,
     build_source_archives,
     export_artifact,
     initialize_install_state,
@@ -366,13 +368,13 @@ def test_existing_release_version_is_immutable(
 
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         commands.append(argv)
-        if argv[:3] == ["git", "show-ref", "--verify"]:
-            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(argv, 0, "c" * 40 + "\n", "")
         return subprocess.CompletedProcess(argv, 1, "", "")
 
     monkeypatch.setattr(lifecycle, "_run", fake_run)
 
-    with pytest.raises(LifecycleError, match="already exists"):
+    with pytest.raises(LifecycleError, match="different revision"):
         publish_release(tmp_path, "v1.2.3", output)
 
     flattened = [" ".join(command) for command in commands]
@@ -424,10 +426,10 @@ def test_release_publication_is_create_only_after_verified_preflight(
 
     def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
         commands.append(argv)
-        if argv[:3] in (
-            ["git", "show-ref", "--verify"],
-            ["git", "ls-remote", "--exit-code"],
-            ["gh", "release", "view"],
+        if (
+            argv[:2] == ["git", "rev-parse"]
+            or argv[:2] == ["git", "ls-remote"]
+            or argv[:3] == ["gh", "release", "view"]
         ):
             return subprocess.CompletedProcess(argv, 1, "", "")
         return subprocess.CompletedProcess(argv, 0, "", "")
@@ -445,12 +447,20 @@ def test_release_publication_is_create_only_after_verified_preflight(
 
 def dependency_fixture(root: Path, dynamic: bool = True) -> None:
     continue_version = "dynamic" if dynamic else "1.2.3"
+    digests = {
+        name: hashlib.sha256(name.encode("ascii")).hexdigest()
+        for name in ("llama-swap", "continue-vsix", "kilo-vsix")
+    }
     put(
         root,
         "VERSIONS.lock",
         "LLAMA_SWAP_VERSION=v236\n"
+        f"LLAMA_SWAP_SHA256={digests['llama-swap']}\n"
         f"CONTINUE_VSIX_VERSION={continue_version}\n"
-        "KILO_VSIX_VERSION=7.4.5\n",
+        "CONTINUE_VSIX_RESOLVED_VERSION=1.2.3\n"
+        f"CONTINUE_VSIX_SHA256={digests['continue-vsix']}\n"
+        "KILO_VSIX_VERSION=7.4.5\n"
+        f"KILO_VSIX_SHA256={digests['kilo-vsix']}\n",
     )
     put(
         root,
@@ -466,18 +476,34 @@ def dependency_fixture(root: Path, dynamic: bool = True) -> None:
                 "dependency_inputs": [
                     {
                         "id": "llama-swap",
+                        "kind": "native",
                         "version_key": "LLAMA_SWAP_VERSION",
                         "allow_dynamic": False,
+                        "source": {
+                            "identity": "https://example.invalid/llama-swap",
+                            "digest_key": "LLAMA_SWAP_SHA256",
+                        },
                     },
                     {
                         "id": "continue-vsix",
+                        "kind": "ide-extension",
                         "version_key": "CONTINUE_VSIX_VERSION",
                         "allow_dynamic": True,
+                        "source": {
+                            "identity": "https://example.invalid/continue-vsix",
+                            "resolved_version_key": "CONTINUE_VSIX_RESOLVED_VERSION",
+                            "digest_key": "CONTINUE_VSIX_SHA256",
+                        },
                     },
                     {
                         "id": "kilo-vsix",
+                        "kind": "ide-extension",
                         "version_key": "KILO_VSIX_VERSION",
                         "allow_dynamic": False,
+                        "source": {
+                            "identity": "https://example.invalid/kilo-vsix",
+                            "digest_key": "KILO_VSIX_SHA256",
+                        },
                     },
                 ]
             },
@@ -570,6 +596,35 @@ def test_cached_artifact_resolution_requires_matching_version_and_hash(
             "tool",
             expected_requested_version="dynamic",
         )
+
+
+def test_policy_bound_artifact_resolution_is_scoped_to_requested_input(
+    tmp_path: Path,
+) -> None:
+    dependency_fixture(tmp_path)
+    cache = tmp_path / "cache"
+    source = put(tmp_path, "download/llama-swap", b"llama-swap")
+    record_cached_artifact(
+        cache,
+        artifact_id="llama-swap",
+        source_file=source,
+        source_url="https://example.invalid/llama-swap",
+        requested_version="v236",
+        resolved_version="v236",
+        trust="policy-bound",
+    )
+
+    resolved = resolve_cached_artifact(
+        cache / "manifest.json",
+        cache,
+        "llama-swap",
+        expected_version="v236",
+        expected_requested_version="v236",
+        policy_root=tmp_path,
+        require_policy_bound=True,
+    )
+
+    assert resolved.read_bytes() == b"llama-swap"
 
 
 def test_dependency_export_fetches_local_fixture_and_rejects_wrong_expected_hash(
@@ -681,14 +736,22 @@ def test_reproducible_inputs_accept_resolved_hashed_artifacts(
             source_url=f"https://example.invalid/{artifact_id}",
             requested_version="dynamic" if artifact_id in {"continue-vsix", "model:chat"} else resolved,
             resolved_version=resolved,
+            trust="policy-bound",
         )
+    models_manifest = tmp_path / "serving" / "models.manifest"
+    models_manifest.write_text(
+        models_manifest.read_text(encoding="utf-8").replace(
+            "| dynamic\n", f"| {'f' * 40}\n"
+        ),
+        encoding="utf-8",
+    )
     put(tmp_path, "models/chat/model.gguf", b"GGUF model")
     record_model_snapshot(
         tmp_path,
         cache,
         model_name="chat",
         repository="example/chat",
-        requested_revision="dynamic",
+        requested_revision="f" * 40,
         resolved_revision="f" * 40,
     )
 
@@ -720,6 +783,8 @@ def test_install_state_hashes_inputs_and_invalidates_only_stale_phases(
     assert second["input_sha256"] == first["input_sha256"]
     assert phase_is_current(root, "bootstrap")
     assert len(second["owned_paths"]) == 1
+    owned.write_text("later phase changed this path\n", encoding="utf-8")
+    assert phase_is_current(root, "bootstrap")
 
     put(
         root,
@@ -736,6 +801,26 @@ def test_install_state_hashes_inputs_and_invalidates_only_stale_phases(
     assert upgraded["input_sha256"] != first["input_sha256"]
     assert not phase_is_current(root, "bootstrap")
     assert len(upgraded["owned_paths"]) == 1
+
+
+def test_install_phase_validates_only_paths_owned_by_that_phase(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    home = tmp_path / "home"
+    initialize_install_state(root, home, source_revision="a" * 40)
+    begin_install_phase(root, "bootstrap")
+    tool = put(root, ".tools/bin/tool", "v1\n")
+    register_owned_path(root, home, tool)
+    mark_install_phase(root, "bootstrap")
+
+    generated = put(root, "state/generated/config.json", "{}\n")
+    register_owned_path(root, home, generated)
+    generated.write_text('{"later": true}\n', encoding="utf-8")
+    assert phase_is_current(root, "bootstrap")
+
+    tool.write_text("v2\n", encoding="utf-8")
+    assert not phase_is_current(root, "bootstrap")
 
 
 def test_install_state_safely_migrates_legacy_phase_file(tmp_path: Path) -> None:
@@ -841,6 +926,19 @@ def test_uninstall_removes_unchanged_owned_files_but_preserves_modified_files(
     )
 
 
+def test_uninstall_removes_owned_tree_children_before_parents(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    home = tmp_path / "home"
+    tree = root / ".tools"
+    put(tree, "bin/tool", "owned\n")
+    initialize_install_state(root, home, source_revision="a" * 40)
+    lifecycle.register_owned_tree(root, home, tree)
+
+    uninstall(root, home, apply=True)
+
+    assert not tree.exists()
+
+
 def test_uninstall_rejects_malicious_state_paths_without_touching_victim(
     tmp_path: Path,
 ) -> None:
@@ -890,6 +988,7 @@ def test_purge_requires_confirmation_and_never_deletes_user_config_trees(
     plan = uninstall(root, home, apply=True, purge=True, confirm_purge=True)
 
     assert not (root / "models").exists()
+    assert not (root / ".install-state").exists()
     assert user_continue.exists()
     assert user_kilo.exists()
     assert any(entry.action == "purge" for entry in plan.entries)
@@ -998,8 +1097,8 @@ def test_generated_model_configs_are_atomic_owned_and_preserve_user_files(
     assert {path: path.read_bytes() for path in written_again} == first_bytes
     assert user_continue.read_text(encoding="utf-8") == "name: User Config\n"
     assert user_kilo.read_text(encoding="utf-8") == '{"user": true}\n'
-    assert (home / ".continue/config.oracle.yaml").is_file()
-    assert (home / ".config/kilo/kilo.oracle.jsonc").is_file()
+    assert (root / "state/generated/continue/config.yaml").is_file()
+    assert (root / "state/generated/kilo/kilo.jsonc").is_file()
     assert (root / "state/generated/claude-code/settings.json").is_file()
     assert (root / "state/generated/opencode/opencode.json").is_file()
     assert (root / "serving/tiers.env").read_text(encoding="utf-8") == (
@@ -1016,8 +1115,8 @@ def test_generated_model_configs_are_atomic_owned_and_preserve_user_files(
         (root / ".install-state/state.json").read_text(encoding="utf-8")
     )
     owned = {(item["scope"], item["path"]) for item in state["owned_paths"]}
-    assert ("home", ".continue/config.oracle.yaml") in owned
-    assert ("home", ".config/kilo/kilo.oracle.jsonc") in owned
+    assert ("install", "state/generated/continue/config.yaml") in owned
+    assert ("install", "state/generated/kilo/kilo.jsonc") in owned
     assert len(owned) == len(state["owned_paths"])
 
 
@@ -1035,16 +1134,16 @@ def test_generated_configs_refuse_symbolic_link_parent(
         "chat | example/chat | model.gguf | fast | 32768 | | " + "a" * 40 + "\n",
     )
     put(root, "models/chat/model.gguf", b"GGUF")
-    original_is_symlink = Path.is_symlink
-    linked_parent = home / ".continue"
+    original_is_reparse = lifecycle._is_reparse_point
+    linked_parent = root / "state"
 
-    def fake_is_symlink(self: Path) -> bool:
-        return self == linked_parent or original_is_symlink(self)
+    def fake_is_reparse(path: Path) -> bool:
+        return path == linked_parent or original_is_reparse(path)
 
-    monkeypatch.setattr(Path, "is_symlink", fake_is_symlink)
+    monkeypatch.setattr(lifecycle, "_is_reparse_point", fake_is_reparse)
     with pytest.raises(LifecycleError, match="symbolic-link parent"):
         sync_model_configs(root, home)
-    assert not (home / ".continue/config.yaml").exists()
+    assert not (root / "state/generated/continue/config.yaml").exists()
 
 
 def test_lifecycle_scripts_have_cross_platform_twins_and_protected_builder_is_unchanged() -> None:
@@ -1106,6 +1205,15 @@ def test_install_consumers_use_export_cache_instead_of_dynamic_network_resolutio
         "llama-swap-darwin-arm64",
         "llama-swap-windows-amd64",
         "llama-cpp-windows-vulkan",
+        "brew-llama-cpp",
+        "node-darwin-arm64",
+        "node-windows-x64",
+        "uv-darwin-arm64",
+        "uv-windows-x64",
+        "jq-darwin-arm64",
+        "vscodium-darwin-arm64",
+        "vscodium-darwin-x64",
+        "vscodium-windows-x64",
         "npm-claude-code",
         "npm-opencode",
         "npm-kilo-cli",
@@ -1163,3 +1271,691 @@ def test_model_downloaders_resolve_revision_and_record_local_hashes() -> None:
         encoding="utf-8"
     )
     assert "read -r name repo include slot ctx flags revision" in render_source
+
+
+def test_review_trust_rejects_self_asserted_hash_url_and_content(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    cache = tmp_path / "cache"
+    root.mkdir()
+    trusted = put(tmp_path, "sources/trusted.bin", b"trusted bytes")
+    attacker = put(tmp_path, "sources/attacker.bin", b"attacker bytes")
+    trusted_digest = hashlib.sha256(trusted.read_bytes()).hexdigest()
+    attacker_digest = hashlib.sha256(attacker.read_bytes()).hexdigest()
+    put(
+        root,
+        "VERSIONS.lock",
+        "TOOL_VERSION=1.2.3\n"
+        f"TOOL_SHA256={trusted_digest}\n",
+    )
+    put(root, "serving/models.manifest", "# fixture\n")
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "dependency_inputs": [
+                    {
+                        "id": "trusted-tool",
+                        "kind": "native",
+                        "version_key": "TOOL_VERSION",
+                        "allow_dynamic": False,
+                        "source": {
+                            "identity": trusted.as_uri(),
+                            "digest_key": "TOOL_SHA256",
+                        },
+                    }
+                ]
+            }
+        )
+        + "\n",
+    )
+    export_artifact(
+        cache,
+        artifact_id="trusted-tool",
+        source_url=attacker.as_uri(),
+        requested_version="1.2.3",
+        resolved_version="1.2.3",
+        expected_sha256=attacker_digest,
+    )
+
+    errors = validate_dependency_inputs(
+        root,
+        artifact_manifest=cache / "manifest.json",
+        cache_root=cache,
+        reproducible=True,
+    )
+
+    assert any("authoritative source" in error for error in errors)
+    assert any("trusted digest" in error for error in errors)
+
+
+def test_review_trust_accepts_only_policy_bound_bytes(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    cache = tmp_path / "cache"
+    root.mkdir()
+    trusted = put(tmp_path, "sources/trusted.bin", b"trusted bytes")
+    trusted_digest = hashlib.sha256(trusted.read_bytes()).hexdigest()
+    put(
+        root,
+        "VERSIONS.lock",
+        "TOOL_VERSION=1.2.3\n"
+        f"TOOL_SHA256={trusted_digest}\n",
+    )
+    put(root, "serving/models.manifest", "# fixture\n")
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "dependency_inputs": [
+                    {
+                        "id": "trusted-tool",
+                        "kind": "native",
+                        "version_key": "TOOL_VERSION",
+                        "allow_dynamic": False,
+                        "source": {
+                            "identity": trusted.as_uri(),
+                            "digest_key": "TOOL_SHA256",
+                        },
+                    }
+                ]
+            }
+        )
+        + "\n",
+    )
+    export_artifact(
+        cache,
+        artifact_id="trusted-tool",
+        source_url=trusted.as_uri(),
+        requested_version="1.2.3",
+        resolved_version="1.2.3",
+        policy_root=root,
+        trusted=True,
+    )
+
+    assert (
+        validate_dependency_inputs(
+            root,
+            artifact_manifest=cache / "manifest.json",
+            cache_root=cache,
+            reproducible=True,
+        )
+        == []
+    )
+
+
+def test_review_kind_aware_trust_rejects_tags_and_unresolved_digests(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    put(
+        root,
+        "VERSIONS.lock",
+        "SOURCE_VERSION=v1.0.0\n"
+        "SOURCE_REPO=https://example.invalid/source.git\n"
+        "SOURCE_COMMIT=unresolved\n"
+        "IMAGE_VERSION=example/image:1.0\n"
+        "IMAGE_DIGEST=unresolved\n",
+    )
+    put(root, "serving/models.manifest", "# fixture\n")
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "dependency_inputs": [
+                    {
+                        "id": "source",
+                        "kind": "git",
+                        "version_key": "SOURCE_VERSION",
+                        "allow_dynamic": False,
+                        "source": {
+                            "identity_key": "SOURCE_REPO",
+                            "revision_key": "SOURCE_COMMIT",
+                        },
+                    },
+                    {
+                        "id": "image",
+                        "kind": "container",
+                        "version_key": "IMAGE_VERSION",
+                        "allow_dynamic": False,
+                        "source": {
+                            "identity": "oci://example/image",
+                            "digest_key": "IMAGE_DIGEST",
+                        },
+                    },
+                ]
+            }
+        )
+        + "\n",
+    )
+
+    errors = validate_dependency_inputs(root, reproducible=True)
+
+    assert any("immutable trusted revision" in error for error in errors)
+    assert any("immutable trusted digest" in error for error in errors)
+
+
+def test_review_reproducible_models_reject_dynamic_revision_even_if_self_recorded(
+    tmp_path: Path,
+) -> None:
+    dependency_fixture(tmp_path)
+    cache = tmp_path / "cache"
+    put(tmp_path, "models/chat/model.gguf", b"GGUF")
+    record_model_snapshot(
+        tmp_path,
+        cache,
+        model_name="chat",
+        repository="example/chat",
+        requested_revision="dynamic",
+        resolved_revision="f" * 40,
+    )
+
+    errors = validate_dependency_inputs(
+        tmp_path,
+        artifact_manifest=cache / "manifest.json",
+        cache_root=cache,
+        reproducible=True,
+    )
+
+    assert any("model:chat" in error and "trusted revision" in error for error in errors)
+
+
+def test_review_offline_install_has_no_implicit_network_resolution() -> None:
+    install_sources = {
+        relative: (REPO_ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            "install",
+            "bin/oracle",
+            "bin/oracle.ps1",
+            "bootstrap/install.sh",
+            "connectors/ide/setup-ide.sh",
+            "connectors/ide/setup-ide.ps1",
+            "harness/ecc/install-ecc.sh",
+            "harness/skill-packs/install-skill-packs.sh",
+        )
+    }
+    forbidden = (
+        "brew install",
+        "winget install",
+        "git clone",
+        "xcode-select --install",
+        "uv run",
+        "opencode\" models",
+    )
+    for relative, source in install_sources.items():
+        for needle in forbidden:
+            assert needle not in source, f"{relative} still contains {needle!r}"
+    assert "--reproducible" in install_sources["bootstrap/install.sh"]
+    assert "bootstrap/download-models.sh" not in install_sources["install"]
+    assert "bootstrap/download-models.sh" not in install_sources["bootstrap/install.sh"]
+    for relative in ("bootstrap/doctor.sh", "bootstrap/doctor.ps1"):
+        source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        assert "--reproducible" in source
+
+
+def test_review_uninstall_refuses_symlink_ancestor_escape(tmp_path: Path) -> None:
+    root = tmp_path / "install"
+    home = tmp_path / "home"
+    outside = tmp_path / "outside"
+    owned = put(root, "managed/deep/owned.txt", "owned")
+    victim = put(outside, "deep/owned.txt", "real user data")
+    initialize_install_state(root, home, source_revision="a" * 40)
+    register_owned_path(root, home, owned)
+    (root / "managed" / "deep" / "owned.txt").unlink()
+    (root / "managed" / "deep").rmdir()
+    (root / "managed").rmdir()
+    try:
+        (root / "managed").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"host cannot create directory symlinks: {exc}")
+
+    with pytest.raises(LifecycleError, match="symlink or reparse ancestor"):
+        uninstall(root, home, apply=True)
+
+    assert victim.read_text(encoding="utf-8") == "real user data"
+
+
+def test_review_purge_refuses_junction_like_ancestor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "install"
+    home = tmp_path / "home"
+    victim = put(tmp_path, "outside/skill-packs/vendor/user.txt", "real user data")
+    initialize_install_state(root, home, source_revision="b" * 40)
+    (root / "harness" / "skill-packs" / "vendor").mkdir(parents=True)
+    real_check = lifecycle._is_reparse_point
+
+    def junction_like(path: Path) -> bool:
+        if path == root / "harness":
+            return True
+        return real_check(path)
+
+    monkeypatch.setattr(lifecycle, "_is_reparse_point", junction_like)
+
+    with pytest.raises(LifecycleError, match="symlink or reparse ancestor"):
+        uninstall(root, home, apply=True, purge=True, confirm_purge=True)
+
+    assert victim.read_text(encoding="utf-8") == "real user data"
+
+
+def test_review_purge_unlinks_final_junction_without_tree_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "install"
+    home = tmp_path / "home"
+    initialize_install_state(root, home, source_revision="2" * 40)
+    junction = root / ".tools"
+    junction.mkdir()
+    real_check = lifecycle._is_reparse_point
+    real_rmtree = lifecycle.shutil.rmtree
+
+    monkeypatch.setattr(
+        lifecycle,
+        "_is_reparse_point",
+        lambda path: path == junction or real_check(path),
+    )
+
+    def guarded_rmtree(path: Path, *args: object, **kwargs: object) -> None:
+        if Path(path) == junction:
+            pytest.fail("purge traversed a final junction")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(lifecycle.shutil, "rmtree", guarded_rmtree)
+
+    uninstall(root, home, apply=True, purge=True, confirm_purge=True)
+
+    assert not junction.exists()
+
+
+def test_review_purge_confirmation_uses_exact_true_or_one_semantics() -> None:
+    makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    assert "$(filter 1 true,$(CONFIRM_PURGE))" in makefile
+    assert "$(if $(CONFIRM_PURGE),--confirm-purge,)" not in makefile
+
+
+def test_review_apply_uninstall_stops_owned_service_before_files(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "install"
+    home = tmp_path / "home"
+    owned = put(root, "runtime/service.cfg", "owned")
+    initialize_install_state(root, home, source_revision="c" * 40)
+    register_owned_path(root, home, owned)
+    lifecycle.register_owned_service(
+        root, kind="launchd-user", identifier="com.sentivue.llamaswap"
+    )
+    observations: list[tuple[str, bool]] = []
+
+    def stop(service: dict[str, object]) -> None:
+        observations.append((str(service["identifier"]), owned.exists()))
+
+    uninstall(root, home, apply=True, service_stopper=stop)
+
+    assert observations == [("com.sentivue.llamaswap", True)]
+    assert not owned.exists()
+    state = json.loads((root / ".install-state/state.json").read_text(encoding="utf-8"))
+    assert state["owned_services"] == []
+
+
+def test_review_windows_process_ownership_is_narrowly_registered(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "install"
+    home = tmp_path / "home"
+    initialize_install_state(root, home, source_revision="c" * 40)
+
+    lifecycle.register_owned_service(
+        root,
+        kind="windows-pid-file",
+        identifier="state/llama-swap.pid",
+    )
+    with pytest.raises(LifecycleError, match="unsafe owned service"):
+        lifecycle.register_owned_service(
+            root,
+            kind="windows-pid-file",
+            identifier="../victim.pid",
+        )
+
+    state = json.loads((root / ".install-state/state.json").read_text(encoding="utf-8"))
+    assert state["owned_services"] == [
+        {"identifier": "state/llama-swap.pid", "kind": "windows-pid-file"}
+    ]
+    serving = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
+    assert 'own-service --root $Root' in serving
+    assert '--service-kind "windows-pid-file"' in serving
+    assert "Write-Utf8NoBomAtomic $PidFile" in serving
+
+
+def test_review_generated_engine_configs_are_selected_by_launchers() -> None:
+    sources = {
+        relative: (REPO_ROOT / relative).read_text(encoding="utf-8")
+        for relative in (
+            "engines/claude-code/launch.sh",
+            "engines/claude-code/launch.ps1",
+            "engines/opencode/launch.sh",
+            "engines/opencode/launch.ps1",
+            "engines/kilo/launch.sh",
+            "engines/kilo/launch.ps1",
+        )
+    }
+
+    assert "state/generated/claude-code/settings.json" in sources[
+        "engines/claude-code/launch.sh"
+    ]
+    assert "--settings" in sources["engines/claude-code/launch.sh"]
+    assert "state\\generated\\claude-code\\settings.json" in sources[
+        "engines/claude-code/launch.ps1"
+    ]
+    assert "--settings" in sources["engines/claude-code/launch.ps1"]
+    assert "OPENCODE_CONFIG" in sources["engines/opencode/launch.sh"]
+    assert "state/generated/opencode/opencode.json" in sources[
+        "engines/opencode/launch.sh"
+    ]
+    assert "OPENCODE_CONFIG" in sources["engines/opencode/launch.ps1"]
+    assert "state\\generated\\opencode\\opencode.json" in sources[
+        "engines/opencode/launch.ps1"
+    ]
+    for relative in ("engines/kilo/launch.sh", "engines/kilo/launch.ps1"):
+        assert "KILO_CONFIG" in sources[relative]
+        assert "state/generated/kilo/kilo.jsonc" in sources[relative].replace("\\", "/")
+
+
+def test_review_generated_ide_configs_are_explicitly_selected() -> None:
+    shell = (REPO_ROOT / "connectors/ide/setup-ide.sh").read_text(encoding="utf-8")
+    powershell = (REPO_ROOT / "connectors/ide/setup-ide.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    for source in (shell, powershell):
+        assert "CONTINUE_GLOBAL_DIR" in source
+        assert "KILO_CONFIG" in source
+        assert "state" in source
+        assert "generated" in source
+        assert "--user-data-dir" in source
+        assert "--extensions-dir" in source
+        assert ".tools" in source
+        assert "vscodium" in source.lower()
+        assert "continue.configPath" not in source
+        assert "kilo-code.configPath" not in source
+    assert "Application Support/VSCodium" not in shell
+    assert "$env:APPDATA" not in powershell
+
+
+def test_review_owned_tree_tracks_every_path_and_invalidates_changed_phase(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "install"
+    home = tmp_path / "home"
+    tree = root / ".tools"
+    first = put(tree, "bin/tool", "version one")
+    second = put(tree, "share/data.txt", "data")
+    initialize_install_state(root, home, source_revision="d" * 40)
+
+    lifecycle.register_owned_tree(root, home, tree)
+    mark_install_phase(root, "toolchain")
+
+    state = json.loads((root / ".install-state/state.json").read_text(encoding="utf-8"))
+    owned = {(item["kind"], item["path"]) for item in state["owned_paths"]}
+    assert ("directory", ".tools") in owned
+    assert ("directory", ".tools/bin") in owned
+    assert ("file", ".tools/bin/tool") in owned
+    assert ("file", ".tools/share/data.txt") in owned
+    assert phase_is_current(root, "toolchain")
+
+    first.write_text("version two", encoding="utf-8")
+    assert not phase_is_current(root, "toolchain")
+    assert second.read_text(encoding="utf-8") == "data"
+
+
+def test_review_installers_check_native_failures_and_replace_stale_tools() -> None:
+    windows = (REPO_ROOT / "bin/oracle.ps1").read_text(encoding="utf-8")
+    serving = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
+    mac = (REPO_ROOT / "bootstrap/install.sh").read_text(encoding="utf-8")
+
+    assert "function Invoke-NativeChecked" in windows
+    assert 'Invoke-NativeChecked "npm"' in windows
+    assert 'Invoke-NativeChecked "sync-skills"' in windows
+    assert 'state own-tree' in windows
+    assert "if (-not (Test-Path $swapExe))" not in serving
+    assert "if (-not (Test-Path $serverExe))" not in serving
+    assert "state own-tree" in mac
+
+
+def test_review_protected_installer_transform_is_atomic_utf8_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    mac = put(
+        tmp_path,
+        "SentiVue-Oracle-Installer-v1.2.3.command",
+        b"#!/bin/bash\nbash install || true\n__PAYLOAD_BELOW__\nPAYLOAD",
+    )
+    windows_script = """@echo off
+#==PSPAYLOAD==#
+$ErrorActionPreference = "Stop"
+if ($sel.Name -eq "full") { Remove-Item (Join-Path $dest "serving\\models.profile") -ErrorAction SilentlyContinue }
+else { Set-Content -Path (Join-Path $dest "serving\\models.profile") -Value (($sel.Models -split ",") -join "`n") }
+Set-Content -Path (Join-Path $dest "serving\\tiers.env") -Value @("OPUS_MODEL=$($sel.Opus)", "SONNET_MODEL=$($sel.Sonnet)", "HAIKU_MODEL=$($sel.Haiku)")
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "connectors\\ide\\setup-ide.ps1") install
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\\download-models.ps1")
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bin\\oracle.ps1") setup
+#==B64PAYLOAD==#
+UEFZTE9BRA==
+"""
+    windows = put(
+        tmp_path,
+        "SentiVue-Oracle-Setup-v1.2.3.cmd",
+        windows_script.encode("ascii"),
+    )
+
+    mac_record = lifecycle._harden_built_installer(mac)
+    windows_record = lifecycle._harden_built_installer(windows)
+
+    assert mac_record["id"] == lifecycle.INSTALLER_HARDENING_TRANSFORM
+    assert b"bash install || true" not in mac.read_bytes()
+    assert lifecycle.INSTALLER_HARDENING_TRANSFORM.encode("ascii") in mac.read_bytes()
+    hardened = windows.read_text(encoding="ascii")
+    assert "Set-Content -Path" not in hardened
+    assert "Write-Utf8NoBomAtomic" in hardened
+    assert "New-Object Text.UTF8Encoding($false)" in hardened
+    assert "Move-Item -LiteralPath $temporary" in hardened
+    assert "download-models.ps1" not in hardened
+    assert "Model acquisition is a separate explicit operation" in hardened
+    assert hardened.count("if ($LASTEXITCODE -ne 0) { throw") == 2
+
+    malformed = put(tmp_path, "malformed.cmd", b"@echo off\n")
+    with pytest.raises(LifecycleError, match="protected installer"):
+        lifecycle._harden_built_installer(malformed)
+
+
+def test_review_source_provenance_discloses_protected_builder_transform(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    add_package_policy(root, ["bootstrap"])
+    put(root, "README.md", "fixture\n")
+    builder = put(root, "bootstrap/build-installers.ps1", "# protected fixture\n")
+    revision = init_repository(root)
+
+    bundle = build_source_archives(root, revision, tmp_path / "out", "v1.2.3")
+    with tarfile.open(bundle.archives[0], "r:gz") as archive:
+        member = archive.extractfile(
+            "sentivue-oracle/SOURCE-PROVENANCE.json"
+        )
+        assert member is not None
+        provenance = json.loads(member.read().decode("utf-8"))
+
+    disclosure = provenance["protected_builder_transform"]
+    assert disclosure["id"] == lifecycle.INSTALLER_HARDENING_TRANSFORM
+    assert disclosure["source_sha256"] == hashlib.sha256(builder.read_bytes()).hexdigest()
+    assert disclosure["required_after_protected_builder"] is True
+    assert "applied_after_protected_builder" not in disclosure
+
+
+def test_review_posix_rendered_arguments_round_trip_shell_parsing() -> None:
+    executable = "/Applications/Oracle Tools/bin/llama-server $(touch nope)"
+    model = "/Volumes/Models & Data/model 'final'.gguf"
+    rendered = " ".join(
+        (
+            lifecycle.quote_command_argument(executable, "posix"),
+            "-m",
+            lifecycle.quote_command_argument(model, "posix"),
+        )
+    )
+
+    assert shlex.split(rendered) == [executable, "-m", model]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="uses the Windows command-line parser")
+def test_review_windows_rendered_arguments_round_trip_command_line_to_argv() -> None:
+    import ctypes
+
+    executable = r"C:\Program Files\Oracle & Co\llama-server.exe"
+    model = r"C:\Models & Data\model ^&! final.gguf"
+    rendered = " ".join(
+        (
+            lifecycle.quote_command_argument(executable, "windows"),
+            "-m",
+            lifecycle.quote_command_argument(model, "windows"),
+        )
+    )
+    argc = ctypes.c_int()
+    parser = ctypes.windll.shell32.CommandLineToArgvW
+    parser.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    argv = parser(rendered, ctypes.byref(argc))
+    try:
+        parsed = [argv[index] for index in range(argc.value)]
+    finally:
+        ctypes.windll.kernel32.LocalFree(argv)
+
+    assert parsed == [executable, "-m", model]
+
+
+def test_review_renderers_use_platform_argument_quoting() -> None:
+    posix = (REPO_ROOT / "bootstrap/render-config.sh").read_text(encoding="utf-8")
+    windows = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
+
+    assert "quote-argument --platform posix" in posix
+    assert "-m $ROOT/$path" not in posix
+    assert "quote-argument --platform windows" in windows
+    assert "$server $common -m $mp" not in windows
+
+
+@pytest.mark.parametrize("remote_tag_exists", [False, True])
+def test_review_publication_resumes_tag_only_and_pushed_tag_states(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    remote_tag_exists: bool,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    output = tmp_path / "out"
+    output.mkdir()
+    revision = "e" * 40
+    asset = put(output, "asset.zip", b"asset")
+    checksums = put(output, "SHA256SUMS", "fixture\n")
+    provenance = put(output, "PROVENANCE.json", "{}\n")
+    bundle = lifecycle.ReleaseBundle(
+        version="v1.2.3",
+        revision=revision,
+        output_dir=output,
+        archives=[asset],
+        checksums=checksums,
+        provenance=provenance,
+    )
+    monkeypatch.setattr(lifecycle, "preflight_release", lambda *_a, **_k: bundle)
+    monkeypatch.setattr(lifecycle, "verify_release_bundle", lambda *_a, **_k: bundle)
+    commands: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(argv)
+        if argv[:2] == ["git", "rev-parse"]:
+            return subprocess.CompletedProcess(argv, 0, revision + "\n", "")
+        if argv[:2] == ["git", "ls-remote"]:
+            if remote_tag_exists:
+                return subprocess.CompletedProcess(
+                    argv, 0, f"{revision}\trefs/tags/v1.2.3\n", ""
+                )
+            return subprocess.CompletedProcess(argv, 2, "", "")
+        if argv[:3] == ["gh", "release", "view"]:
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(lifecycle, "_run", fake_run)
+
+    publish_release(root, "v1.2.3", output)
+
+    assert not any(command[:2] == ["git", "tag"] for command in commands)
+    pushes = [command for command in commands if command[:2] == ["git", "push"]]
+    assert bool(pushes) is (not remote_tag_exists)
+    assert any(command[:3] == ["gh", "release", "create"] for command in commands)
+    assert not any(
+        "--force" in command or "--clobber" in command or "delete" in command
+        for command in commands
+    )
+
+
+def test_review_release_preflight_reuses_complete_verified_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    output = tmp_path / "out"
+    output.mkdir()
+    revision = "f" * 40
+    artifacts = [
+        put(output, "sentivue-oracle-v1.2.3.tar.gz", b"source"),
+        put(output, "sentivue-oracle-v1.2.3.zip", b"source"),
+        put(output, "SentiVue-Oracle-Installer-v1.2.3.command", b"installer"),
+        put(output, "SentiVue-Oracle-Setup-v1.2.3.cmd", b"installer"),
+    ]
+    bundle = lifecycle.ReleaseBundle(
+        version="v1.2.3",
+        revision=revision,
+        output_dir=output,
+        archives=artifacts,
+        checksums=put(output, "SHA256SUMS", "verified\n"),
+        provenance=put(output, "PROVENANCE.json", "{}\n"),
+    )
+    monkeypatch.setattr(lifecycle, "_resolve_revision", lambda *_a: revision)
+    monkeypatch.setattr(lifecycle, "_current_revision", lambda *_a: revision)
+    monkeypatch.setattr(
+        lifecycle, "_require_release_inputs_match_revision", lambda *_a: None
+    )
+    monkeypatch.setattr(lifecycle, "validate_dependency_inputs", lambda *_a, **_k: [])
+    monkeypatch.setattr(lifecycle, "verify_release_bundle", lambda *_a: bundle)
+    monkeypatch.setattr(
+        lifecycle,
+        "build_source_archives",
+        lambda *_a, **_k: pytest.fail("verified bundle should be reused"),
+    )
+
+    resumed = lifecycle.preflight_release(root, "v1.2.3", output, revision)
+
+    assert resumed == bundle
+
+
+def test_review_release_rejects_dirty_dependency_authority(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    add_package_policy(root, ["serving", "env"])
+    put(root, "README.md", "fixture\n")
+    put(root, "VERSIONS.lock", "TOOL_VERSION=1.0.0\n")
+    put(root, "serving/models.manifest", "# fixture\n")
+    put(root, "env/uv.lock", "version = 1\nrevision = 3\n")
+    revision = init_repository(root)
+    (root / "VERSIONS.lock").write_text(
+        "TOOL_VERSION=attacker\n", encoding="utf-8"
+    )
+
+    with pytest.raises(LifecycleError, match="differs from immutable revision"):
+        lifecycle._require_release_inputs_match_revision(root, revision)

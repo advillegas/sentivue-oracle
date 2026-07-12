@@ -8,12 +8,13 @@
 #    ./install --no-models        everything except model downloads
 #
 #  Phases are idempotent and checkpointed in .install-state — if anything
-#  fails (or you lose the network mid-download), just re-run ./install and
+#  fails, just re-run ./install and
 #  it resumes where it stopped.
 # ============================================================================
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
+DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
 YES=0; PROFILE=""; NO_MODELS=0
 
 while [[ $# -gt 0 ]]; do
@@ -50,9 +51,14 @@ init_state() {
   STATE_READY=1
 }
 phase_done() {
-  [[ "$STATE_READY" -eq 1 ]] &&
-    "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state phase-current \
-      --root "$ROOT" --home "$HOME" --phase "$1" >/dev/null
+  [[ "$STATE_READY" -eq 1 ]] || return 1
+  if "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state phase-current \
+      --root "$ROOT" --home "$HOME" --phase "$1" >/dev/null; then
+    return 0
+  fi
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state begin-phase \
+    --root "$ROOT" --home "$HOME" --phase "$1" >/dev/null
+  return 1
 }
 mark_done() {
   [[ "$STATE_READY" -eq 1 ]] || return 0
@@ -60,9 +66,22 @@ mark_done() {
     --root "$ROOT" --home "$HOME" --phase "$1"
 }
 own_path() {
-  [[ "$STATE_READY" -eq 1 && -e "$1" ]] || return 0
+  [[ "$STATE_READY" -eq 1 ]] || die "install state is unavailable while registering $1"
+  [[ -e "$1" || -L "$1" ]] || die "cannot register missing owned path: $1"
   "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state own \
     --root "$ROOT" --home "$HOME" --path "$1"
+}
+own_tree() {
+  [[ "$STATE_READY" -eq 1 ]] || die "install state is unavailable while registering $1"
+  [[ -d "$1" ]] || die "cannot register missing owned tree: $1"
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state own-tree \
+    --root "$ROOT" --home "$HOME" --path "$1"
+}
+own_service() {
+  [[ "$STATE_READY" -eq 1 ]] || die "install state is unavailable while registering service $2"
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state own-service \
+    --root "$ROOT" --home "$HOME" \
+    --service-kind "$1" --identifier "$2"
 }
 atomic_from_stdin() {
   local target="$1" temporary
@@ -78,25 +97,24 @@ atomic_from_stdin() {
   fi
 }
 
-init_state || true
+init_state || die "Pinned Python is required before offline installation can begin."
 
 # ---------------------------------------------------------------- preflight
 if ! phase_done preflight; then
   say "Preflight"
   [[ "$(uname -s)/$(uname -m)" == "Darwin/arm64" ]] \
     || die "This installer targets macOS on Apple Silicon (Mac Studio)."
-  command -v brew >/dev/null \
-    || die 'Homebrew missing. Install it first: /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
-  xcode-select -p >/dev/null 2>&1 || { warn "Installing Xcode Command Line Tools…"; xcode-select --install || true; }
+  xcode-select -p >/dev/null 2>&1 \
+    || die "Xcode Command Line Tools are a platform prerequisite; provision them before offline install."
   ram_gb=$(( $(sysctl -n hw.memsize) / 1073741824 ))
-  ok "macOS arm64, ${ram_gb} GB unified memory, Homebrew present"
+  ok "macOS arm64, ${ram_gb} GB unified memory"
   [[ $ram_gb -lt 500 ]] && warn "Less than 512 GB RAM — pick the 'coder' or 'minimal' profile."
   mark_done preflight
 fi
 
 # ---------------------------------------------------------------- bootstrap
 if ! phase_done bootstrap; then
-  say "Bootstrap (brew packages, pinned engines, python env, skills, ECC)"
+  say "Bootstrap (policy-bound tools, pinned engines, python env, skills, ECC)"
   bash bootstrap/install.sh
   init_state || die "Python 3.12 is unavailable after bootstrap; install state cannot be recorded."
   mark_done bootstrap
@@ -150,7 +168,7 @@ else ok "profile already chosen ($(cat serving/tiers.env 2>/dev/null | tr '\n' '
 
 # ---------------------------------------------------------------- models
 if [[ $NO_MODELS -eq 0 ]] && ! phase_done models; then
-  say "Model downloads (resumable — re-run ./install if interrupted)"
+  say "Validate policy-bound local model snapshot"
   free_gb=$(df -g . | awk 'NR==2 {print $4}')
   case "$(head -1 serving/tiers.env)" in
     OPUS_MODEL=kimi*) need=800 ;;
@@ -159,13 +177,24 @@ if [[ $NO_MODELS -eq 0 ]] && ! phase_done models; then
     *) need=35 ;;
   esac
   [[ $free_gb -lt $need ]] && die "Only ${free_gb} GB free; this profile needs ~${need} GB. Free space and re-run."
-  bash bootstrap/download-models.sh
-  # Model acquisition resolves dynamic revisions into the hashed export manifest,
-  # so refresh the input hash and mark every phase that reached this point current.
-  init_state || die "Could not refresh install state after model export."
-  for completed_phase in preflight bootstrap profile models; do
-    mark_done "$completed_phase"
+  IFS=',' read -r -a selected_models <<< "$MODELS"
+  for model_name in "${selected_models[@]}"; do
+    model_name="$(echo "$model_name" | xargs)"
+    revision="$(awk -F'|' -v name="$model_name" \
+      '$1 ~ "^[[:space:]]*" name "[[:space:]]*$" {gsub(/[[:space:]]/, "", $7); print $7; exit}' \
+      serving/models.manifest)"
+    [[ "$revision" =~ ^[0-9a-f]{40}$ ]] ||
+      die "Model $model_name has no promoted immutable revision."
+    "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" artifact-path \
+      --manifest "$DEPENDENCY_CACHE/manifest.json" --cache "$DEPENDENCY_CACHE" \
+      --artifact-id "model:$model_name" --expected-version "$revision" \
+      --expected-requested-version "$revision" --root "$ROOT" --reproducible \
+      >/dev/null ||
+      die "Model $model_name is not a trusted offline snapshot."
   done
+  init_state || die "Could not refresh install state after model validation."
+  own_tree "$ROOT/models"
+  mark_done models
 elif [[ $NO_MODELS -eq 1 ]]; then warn "skipping model downloads (--no-models)"
 else ok "models already downloaded"; fi
 
@@ -173,16 +202,25 @@ else ok "models already downloaded"; fi
 if [[ $NO_MODELS -eq 0 ]]; then
   say "Render config + start serving"
   bash connectors/ide/sync-models.sh
+  own_tree "$ROOT/state/generated"
   bash bootstrap/render-config.sh
   own_path "$ROOT/serving/llama-swap.rendered.yaml"
   bash serving/service.sh start
   own_path "$HOME/Library/LaunchAgents/com.sentivue.llamaswap.plist"
+  own_service launchd-user com.sentivue.llamaswap
+  own_path "$ROOT/logs"
   say "Waiting for llama-swap health…"
+  healthy=0
   for _ in $(seq 1 30); do
-    curl -sf -m 2 http://127.0.0.1:9099/health >/dev/null 2>&1 && break; sleep 2
+    if curl -sf -m 2 http://127.0.0.1:9099/health >/dev/null 2>&1; then
+      healthy=1
+      break
+    fi
+    sleep 2
   done
+  [[ "$healthy" -eq 1 ]] || die "llama-swap did not become healthy"
   say "Offline verification"
-  bash bootstrap/verify-offline.sh || warn "verify reported failures — run 'oracle doctor' for diagnosis"
+  bash bootstrap/verify-offline.sh
 fi
 
 # ---------------------------------------------------------------- desktop shortcut

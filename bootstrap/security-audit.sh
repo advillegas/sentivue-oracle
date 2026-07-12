@@ -42,8 +42,9 @@ for k in KILO_TELEMETRY_LEVEL KILO_DISABLE_SHARE KILO_DISABLE_AUTOUPDATE KILO_DI
   has "engines/kilo/hardened-env.sh" "$k" && ok "defang: $k" || badf "defang missing: $k"
 done
 has "connectors/ide/sync-models.sh" '"\$schema":[[:space:]]*"https://app\.kilo\.ai' && badf "generated kilo.jsonc still sets remote schema (sh)" || ok "no remote schema key in generated kilo.jsonc (sh)"
-if [[ -f "$HOME/.config/kilo/kilo.jsonc" ]]; then
-  grep -q 'app\.kilo\.ai' "$HOME/.config/kilo/kilo.jsonc" && badf "live kilo.jsonc references app.kilo.ai (re-run sync-models)" || ok "live kilo.jsonc has no kilo.ai references"
+kilo_cfg="$ROOT/state/generated/kilo/kilo.jsonc"
+if [[ -f "$kilo_cfg" ]]; then
+  grep -q 'app\.kilo\.ai' "$kilo_cfg" && badf "generated kilo.jsonc references app.kilo.ai (re-run sync-models)" || ok "generated kilo.jsonc has no kilo.ai references"
 fi
 
 echo

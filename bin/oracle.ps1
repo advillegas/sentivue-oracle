@@ -11,14 +11,20 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
+$env:PATH = (Join-Path $Root ".tools\bin") + ";" +
+    (Join-Path $Root ".tools\npm") + ";" + $env:PATH
+$env:UV_OFFLINE = "1"
+$env:UV_CACHE_DIR = Join-Path $Root "incoming\dependency-cache\uv"
 
 function Find-CodiumInstalled {
-    if (Get-Command codium -ErrorAction SilentlyContinue) { return $true }
-    return (Test-Path "$env:LOCALAPPDATA\Programs\VSCodium\bin\codium.cmd") -or
-           (Test-Path "$env:ProgramFiles\VSCodium\bin\codium.cmd")
+    return [bool](Get-ChildItem (Join-Path $Root ".tools\vscodium\app") `
+        -Recurse -Filter "codium.cmd" -ErrorAction SilentlyContinue |
+        Select-Object -First 1)
 }
 
 function Find-RealPython {
+    $venv = Join-Path $Root "env\.venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $venv) { return $venv }
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Source -notmatch "WindowsApps") { return $cmd.Source }
     $c = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
@@ -43,9 +49,12 @@ function Get-CachedArtifact {
         (Join-Path $Root "verification\lifecycle.py"), "artifact-path",
         "--manifest", $manifest, "--cache", $cache,
         "--artifact-id", $ArtifactId,
-        "--expected-version", $ExpectedVersion,
-        "--expected-requested-version", $ExpectedVersion
+        "--expected-requested-version", $ExpectedVersion,
+        "--root", $Root, "--reproducible"
     )
+    if ($ExpectedVersion -notin @("dynamic", "unresolved")) {
+        $lifecycleArgs += @("--expected-version", $ExpectedVersion)
+    }
     $path = (& $Python @lifecycleArgs)
     if ($LASTEXITCODE -ne 0) {
         throw "cached artifact validation failed: $ArtifactId"
@@ -53,13 +62,24 @@ function Get-CachedArtifact {
     return $path.Trim()
 }
 
+function Invoke-NativeChecked {
+    param(
+        [string]$Name,
+        [scriptblock]$Action
+    )
+    & $Action
+    $code = $LASTEXITCODE
+    if ($null -ne $code -and $code -ne 0) {
+        throw "$Name failed with exit code $code"
+    }
+}
+
 function Invoke-Conductor {
     param([string[]]$CondArgs)
     $python = Find-RealPython
     if (-not $python) {
-        & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\ensure-tools.ps1")
-        $python = Find-RealPython
-        if (-not $python) { Write-Host "ERROR: no Python and self-provisioning failed"; exit 1 }
+        Write-Host "ERROR: pinned Python is not provisioned"
+        exit 1
     }
     $pyDir = Split-Path -Parent $python
     $env:PATH = "$pyDir;$pyDir\Scripts;$env:PATH"
@@ -78,18 +98,24 @@ switch ($Cmd) {
         $pins = @{}
         foreach ($l in $lock) { $kv = $l -split "=", 2; $pins[$kv[0].Trim()] = ($kv[1] -split "#")[0].Trim() }
         $python = Find-RealPython
-        if (-not $python) {
-            & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\ensure-tools.ps1")
-            $python = Find-RealPython
+        if (-not $python) { throw "Python 3.12 is a platform prerequisite for offline cache validation" }
+        $actualPython = (& $python -c "import platform; print(platform.python_version())").Trim()
+        if ($LASTEXITCODE -ne 0 -or $actualPython -ne $pins["PYTHON_VERSION"]) {
+            throw "bootstrap trust root requires Python $($pins['PYTHON_VERSION']), found $actualPython"
         }
-        if (-not $python) { throw "Python is required to validate the dependency cache" }
         $lifecycle = Join-Path $Root "verification\lifecycle.py"
-        & $python $lifecycle state init --root $Root --home $env:USERPROFILE | Out-Null
+        Invoke-NativeChecked "state init" {
+            & $python $lifecycle state init --root $Root --home $env:USERPROFILE | Out-Null
+        }
         & $python $lifecycle state phase-current --root $Root `
             --home $env:USERPROFILE --phase "windows-setup" *> $null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "==> setup already current for this source and dependency export"
             break
+        }
+        Invoke-NativeChecked "state begin-phase" {
+            & $python $lifecycle state begin-phase --root $Root `
+                --home $env:USERPROFILE --phase "windows-setup" | Out-Null
         }
         $cache = if ($env:ORACLE_DEPENDENCY_CACHE) {
             $env:ORACLE_DEPENDENCY_CACHE
@@ -100,16 +126,101 @@ switch ($Cmd) {
         $env:npm_config_cache = Join-Path $cache "npm"
         $env:npm_config_offline = "true"
         New-Item -ItemType Directory -Force -Path $env:npm_config_prefix | Out-Null
+        $nodeArchive = Get-CachedArtifact "node-windows-x64" $pins["NODE_VERSION"] $python
+        $nodeRoot = Join-Path $Root ".tools\node"
+        $nodeStage = Join-Path $Root (".node-stage-" + [Guid]::NewGuid().ToString("N"))
+        try {
+            Expand-Archive -LiteralPath $nodeArchive -DestinationPath $nodeStage -Force
+            $npmCommand = Get-ChildItem $nodeStage -Recurse -Filter "npm.cmd" |
+                Select-Object -First 1
+            if (-not $npmCommand) { throw "cached Node export has no npm.cmd" }
+            $stagedNodeRoot = Split-Path -Parent (Split-Path -Parent $npmCommand.FullName)
+            Remove-Item -LiteralPath $nodeRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item -LiteralPath $stagedNodeRoot -Destination $nodeRoot -Recurse -Force
+        } finally {
+            Remove-Item -LiteralPath $nodeStage -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $npmCommand = Get-ChildItem $nodeRoot -Recurse -Filter "npm.cmd" |
+            Select-Object -First 1
+        if (-not $npmCommand) { throw "installed cached Node tree has no npm.cmd" }
+        $toolsBin = Join-Path $Root ".tools\bin"
+        New-Item -ItemType Directory -Force -Path $toolsBin | Out-Null
+        $uvArchive = Get-CachedArtifact "uv-windows-x64" $pins["UV_VERSION"] $python
+        if ([IO.Path]::GetExtension($uvArchive) -ne ".zip") {
+            throw "validated Windows uv export must be a .zip"
+        }
+        $uvStage = Join-Path $Root (".uv-stage-" + [Guid]::NewGuid().ToString("N"))
+        try {
+            Expand-Archive -LiteralPath $uvArchive -DestinationPath $uvStage -Force
+            foreach ($name in @("uv.exe", "uvx.exe")) {
+                $source = Get-ChildItem $uvStage -Recurse -Filter $name |
+                    Select-Object -First 1
+                if (-not $source) { throw "cached uv export has no $name" }
+                Copy-Item -LiteralPath $source.FullName `
+                    -Destination (Join-Path $toolsBin ($name + ".new")) -Force
+                Move-Item -LiteralPath (Join-Path $toolsBin ($name + ".new")) `
+                    -Destination (Join-Path $toolsBin $name) -Force
+            }
+        } finally {
+            Remove-Item -LiteralPath $uvStage -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $env:PATH = $toolsBin + ";" + (Split-Path -Parent $npmCommand.FullName) + ";" + $env:PATH
+        $env:UV_CACHE_DIR = Join-Path $cache "uv"
+        Invoke-NativeChecked "uv sync" {
+            & (Join-Path $toolsBin "uv.exe") sync --offline --frozen `
+                --project (Join-Path $Root "env")
+        }
+        $mcpDuckdb = Get-CachedArtifact "python-mcp-duckdb" $pins["MCP_DUCKDB"] $python
+        $mcpPostgres = Get-CachedArtifact "python-mcp-postgres" $pins["MCP_POSTGRES"] $python
+        $hfCli = Get-CachedArtifact "hf-cli" $pins["HF_CLI_VERSION"] $python
+        Invoke-NativeChecked "MCP cache warmup" {
+            & (Join-Path $toolsBin "uvx.exe") --offline --from $mcpDuckdb `
+                mcp-server-duckdb --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "DuckDB MCP cache warmup failed" }
+            & (Join-Path $toolsBin "uvx.exe") --offline --from $mcpPostgres `
+                postgres-mcp --help | Out-Null
+        }
+        $env:UV_TOOL_DIR = Join-Path $Root ".tools\uv-tools"
+        $env:UV_TOOL_BIN_DIR = $toolsBin
+        Invoke-NativeChecked "HF CLI install" {
+            & (Join-Path $toolsBin "uv.exe") tool install --offline $hfCli
+        }
         Write-Host "==> engines: claude-code@$($pins['CLAUDE_CODE_NPM_VERSION']) + opencode@$($pins['OPENCODE_NPM_VERSION']) + kilo@$($pins['KILO_CLI_NPM_VERSION'])"
         $claudeArchive = Get-CachedArtifact "npm-claude-code" $pins["CLAUDE_CODE_NPM_VERSION"] $python
         $opencodeArchive = Get-CachedArtifact "npm-opencode" $pins["OPENCODE_NPM_VERSION"] $python
         $kiloArchive = Get-CachedArtifact "npm-kilo-cli" $pins["KILO_CLI_NPM_VERSION"] $python
-        npm install -g $claudeArchive $opencodeArchive $kiloArchive
-        & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\sync-skills.ps1")
-        & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "harness\skill-packs\install-skill-packs.ps1")
-        & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") setup
-        & $python $lifecycle state mark-phase --root $Root `
-            --home $env:USERPROFILE --phase "windows-setup" | Out-Null
+        Invoke-NativeChecked "npm" {
+            & $npmCommand.FullName install -g $claudeArchive $opencodeArchive $kiloArchive
+        }
+        Invoke-NativeChecked "sync-skills" {
+            & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\sync-skills.ps1")
+        }
+        Invoke-NativeChecked "skill-packs" {
+            & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "harness\skill-packs\install-skill-packs.ps1")
+        }
+        Invoke-NativeChecked "serving setup" {
+            & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") setup
+        }
+        foreach ($ownedTree in @(
+            (Join-Path $Root ".tools\bin"),
+            (Join-Path $Root ".tools\npm"),
+            (Join-Path $Root ".tools\node"),
+            (Join-Path $Root ".tools\win"),
+            (Join-Path $Root "env\.venv"),
+            (Join-Path $Root "harness\skill-packs\vendor")
+        )) {
+            if (-not (Test-Path -LiteralPath $ownedTree -PathType Container)) {
+                throw "expected owned tree is missing: $ownedTree"
+            }
+            Invoke-NativeChecked "state own-tree" {
+                & $python $lifecycle state own-tree --root $Root `
+                    --home $env:USERPROFILE --path $ownedTree | Out-Null
+            }
+        }
+        Invoke-NativeChecked "state mark-phase" {
+            & $python $lifecycle state mark-phase --root $Root `
+                --home $env:USERPROFILE --phase "windows-setup" | Out-Null
+        }
         Write-Host "==> setup complete: 'oracle.ps1 serve' then 'oracle.ps1 claude'"
     }
     "harden" {
@@ -129,8 +240,7 @@ switch ($Cmd) {
         # Obsidian over the repo: the operator's lens on memory/doctrine/reports
         $exe = "$env:LOCALAPPDATA\Programs\Obsidian\Obsidian.exe"
         if (-not (Test-Path $exe)) {
-            Write-Host "==> installing Obsidian (winget, one time)"
-            winget install --id Obsidian.Obsidian -e --silent --accept-package-agreements --accept-source-agreements
+            throw "Obsidian is optional and must be provisioned separately"
         }
         if (Test-Path $exe) { Start-Process $exe "obsidian://open?path=$([uri]::EscapeDataString($Root))" }
         else { Write-Host "Obsidian installed - launch it once from the Start menu, then open this folder as a vault: $Root" }

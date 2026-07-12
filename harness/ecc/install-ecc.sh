@@ -11,12 +11,11 @@ CC_DIR="$ROOT/engines/claude-code/home/skills"
 OC_DIR="$ROOT/engines/opencode/xdg/opencode/skill"
 mkdir -p "$CC_DIR" "$OC_DIR"
 
-if [[ ! -d "$VENDOR/.git" ]]; then
-  echo "==> cloning ECC ${ECC_PIN} (shallow, pinned)"
-  git clone --depth 1 --branch "$ECC_PIN" "$ECC_REPO" "$VENDOR"
-else
-  echo "==> ECC vendor checkout present ($(git -C "$VENDOR" describe --tags --always))"
-fi
+[[ -d "$VENDOR" ]] || {
+  echo "ERROR: ECC vendor tree is absent from the validated dependency export." >&2
+  exit 1
+}
+echo "==> ECC policy-bound vendor tree present (${ECC_PIN})"
 
 # Catalog every skill directory (any depth: <name>/SKILL.md) as "name<TAB>dir".
 CATALOG="$(mktemp)"

@@ -64,7 +64,7 @@ dist:
 	bash bootstrap/package.sh --version "$(VERSION)"
 
 uninstall:
-	bash bootstrap/uninstall.sh $(if $(APPLY),--apply,) $(if $(PURGE),--purge,) $(if $(CONFIRM_PURGE),--confirm-purge,)
+	bash bootstrap/uninstall.sh $(if $(filter 1 true,$(APPLY)),--apply,) $(if $(filter 1 true,$(PURGE)),--purge,) $(if $(filter 1 true,$(CONFIRM_PURGE)),--confirm-purge,)
 
 harden:
 	sudo bash bootstrap/harden-offline.sh

@@ -872,7 +872,74 @@ def check_dependency_provenance(root: Path) -> CheckResult:
     return CheckResult(
         "dependency_provenance",
         PASS,
-        "Dependency inputs are centralized, exact, or explicitly export-resolved",
+        "Dependency inputs declare authoritative sources and independent trust pins",
+    )
+
+
+def check_uv_lock(root: Path) -> CheckResult:
+    """Require the pinned uv binary to prove pyproject/lock equivalence."""
+
+    root = root.resolve()
+    versions_path = root / "VERSIONS.lock"
+    try:
+        versions_text = versions_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return CheckResult("uv_lock", FAIL, "Cannot read UV_VERSION", [str(exc)])
+    match = re.search(r"(?m)^UV_VERSION=([^\s#]+)", versions_text)
+    if not match:
+        return CheckResult(
+            "uv_lock", FAIL, "UV_VERSION is absent from VERSIONS.lock"
+        )
+    expected_version = match.group(1)
+    executable = shutil.which("uv")
+    if not executable:
+        return CheckResult(
+            "uv_lock",
+            FAIL,
+            "Pinned uv is required for lock equivalence",
+            [f"install uv {expected_version} and run: cd env && uv lock --check"],
+        )
+    version_command = _run_command(["uv", "--version"], root)
+    commands = [version_command]
+    version_match = re.search(r"\buv\s+([0-9][^\s]*)", version_command.stdout)
+    actual_version = version_match.group(1) if version_match else ""
+    if version_command.exit_code != 0 or actual_version != expected_version:
+        return CheckResult(
+            "uv_lock",
+            FAIL,
+            "Installed uv does not match the repository pin",
+            [
+                f"expected uv {expected_version}, got "
+                f"{actual_version or _short_command_error(version_command, root)}"
+            ],
+            commands,
+        )
+    environment = root / "env"
+    if not (environment / "pyproject.toml").is_file() or not (
+        environment / "uv.lock"
+    ).is_file():
+        return CheckResult(
+            "uv_lock",
+            FAIL,
+            "Python project or uv.lock is missing",
+            ["env/pyproject.toml and env/uv.lock are both required"],
+            commands,
+        )
+    lock_command = _run_command(["uv", "lock", "--check"], environment)
+    commands.append(lock_command)
+    if lock_command.exit_code != 0:
+        return CheckResult(
+            "uv_lock",
+            FAIL,
+            "env/uv.lock is not equivalent to env/pyproject.toml",
+            [_short_command_error(lock_command, root)],
+            commands,
+        )
+    return CheckResult(
+        "uv_lock",
+        PASS,
+        f"uv {expected_version} confirms lock equivalence",
+        commands=commands,
     )
 
 
@@ -1834,6 +1901,7 @@ def _execute_static_checks(
         ("line_policy", lambda: check_line_policy(root)),
         ("platform_twins", lambda: check_platform_twins(root, policy)),
         ("dependency_provenance", lambda: check_dependency_provenance(root)),
+        ("uv_lock", lambda: check_uv_lock(root)),
         ("model_integrity", lambda: check_model_integrity(root)),
         ("config_formats", lambda: check_config_formats(root)),
         ("path_safety", lambda: check_path_safety(root, report_dir / "artifacts")),

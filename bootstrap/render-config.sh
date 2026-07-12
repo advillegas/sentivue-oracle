@@ -7,6 +7,22 @@ cd "$ROOT"
 MANIFEST="serving/models.manifest"
 PROFILE="serving/models.profile"
 OUT="serving/llama-swap.rendered.yaml"
+PYTHON_BIN="${ORACLE_PYTHON:-python3}"
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
+  echo "ERROR: Python is required for safe command rendering." >&2
+  exit 1
+}
+SERVER="$(command -v llama-server || true)"
+[[ -n "$SERVER" ]] || {
+  echo "ERROR: llama-server is not installed." >&2
+  exit 1
+}
+
+quote_argument() {
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" quote-argument --platform posix --value "$1"
+}
+SERVER_ARG="$(quote_argument "$SERVER")"
 
 is_active() {  # active if profiled OR already downloaded (no profile file => all)
   [[ ! -f "$PROFILE" ]] && return 0
@@ -58,6 +74,7 @@ while IFS='|' read -r name repo include slot ctx flags revision; do
   if [[ -z "$path" ]]; then
     echo "MISSING: models/$name — run 'make models' (or ./install)"; missing=1; continue
   fi
+  MODEL_ARG="$(quote_argument "$ROOT/$path")"
   echo "  $name -> $path"
   case "$slot" in
     big)
@@ -65,8 +82,8 @@ while IFS='|' read -r name repo include slot ctx flags revision; do
       cat >> "$TMP" <<EOF
   "$name":
     cmd: |
-      llama-server \${common}
-      -m $ROOT/$path
+      $SERVER_ARG \${common}
+      -m $MODEL_ARG
       --ctx-size $ctx --parallel 1
       $flags
     ttl: 0
@@ -77,8 +94,8 @@ EOF
       cat >> "$TMP" <<EOF
   "$name":
     cmd: |
-      llama-server \${common}
-      -m $ROOT/$path
+      $SERVER_ARG \${common}
+      -m $MODEL_ARG
       --ctx-size $ctx --parallel 2 --mlock
       $flags
     ttl: 0
@@ -97,8 +114,8 @@ EOF
       cat >> "$TMP" <<EOF
   "$name":
     cmd: |
-      llama-server --host 127.0.0.1 --port \${PORT}
-      -m $ROOT/$path
+      $SERVER_ARG --host 127.0.0.1 --port \${PORT}
+      -m $MODEL_ARG
       --n-gpu-layers 999 --embeddings --pooling last
       --ctx-size $ctx --mlock
     ttl: 0

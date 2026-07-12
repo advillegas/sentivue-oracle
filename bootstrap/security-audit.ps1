@@ -43,10 +43,10 @@ foreach ($k in @("KILO_TELEMETRY_LEVEL", "KILO_DISABLE_SHARE", "KILO_DISABLE_AUT
 # the schema KEY assignment (not a comment mentioning the URL)
 if (Has "connectors\ide\sync-models.ps1" "schema'\s*=.*app\.kilo\.ai") { BAD "generated kilo.jsonc still sets a remote schema key (ps1)" } else { OK "no remote schema key in generated kilo.jsonc (ps1)" }
 if (Has "connectors\ide\sync-models.sh" '"\$schema":\s*"https://app\.kilo\.ai') { BAD "generated kilo.jsonc still sets a remote schema key (sh)" } else { OK "no remote schema key in generated kilo.jsonc (sh)" }
-$kiloCfg = Join-Path $env:USERPROFILE ".config\kilo\kilo.jsonc"
+$kiloCfg = Join-Path $Root "state\generated\kilo\kilo.jsonc"
 if (Test-Path $kiloCfg) {
-    if (Select-String -Path $kiloCfg -Pattern 'app\.kilo\.ai' -Quiet) { BAD "live kilo.jsonc references app.kilo.ai (re-run sync-models)" } else { OK "live kilo.jsonc has no kilo.ai references" }
-    if (Select-String -Path $kiloCfg -Pattern '"webfetch":\s*"deny"' -Quiet) { OK "live kilo.jsonc denies webfetch" } else { WARN "live kilo.jsonc missing webfetch deny (re-run sync-models)" }
+    if (Select-String -Path $kiloCfg -Pattern 'app\.kilo\.ai' -Quiet) { BAD "generated kilo.jsonc references app.kilo.ai (re-run sync-models)" } else { OK "generated kilo.jsonc has no kilo.ai references" }
+    if (Select-String -Path $kiloCfg -Pattern '"webfetch":\s*"deny"' -Quiet) { OK "generated kilo.jsonc denies webfetch" } else { WARN "generated kilo.jsonc missing webfetch deny (re-run sync-models)" }
 }
 
 Write-Host "`n== egress default-deny guard =="

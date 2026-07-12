@@ -5,6 +5,9 @@ SELF="${BASH_SOURCE[0]}"
 [[ -L "$SELF" ]] && SELF="$(readlink -f "$SELF")"
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 cd "$ROOT"
+export PATH="$ROOT/.tools/bin:$ROOT/.tools/npm/bin:$PATH"
+export UV_OFFLINE=1
+export UV_CACHE_DIR="$ROOT/incoming/dependency-cache/uv"
 
 cmd="${1:-help}"; shift || true
 case "$cmd" in
@@ -28,20 +31,23 @@ case "$cmd" in
     if [[ "${1:-}" == "ui" ]]; then exec bash connectors/gitea/setup-gitea.sh "${2:-status}"; fi
     exec bash bootstrap/vault.sh "$@" ;;
   envoy)      exec bash bootstrap/envoy.sh "$@" ;;
-  console)    exec uv run --project env python conductor/console.py ;;
+  console)    exec "$ROOT/env/.venv/bin/python" conductor/console.py ;;
   ide)        exec bash connectors/ide/setup-ide.sh "${1:-launch}" ;;
   desk)
     BIN="desk/target/release/oracle-desk"
     if [[ ! -x "$BIN" ]]; then
-      command -v cargo >/dev/null || { echo "==> installing rust (one time)"; brew install rust && brew pin rust; }
+      command -v cargo >/dev/null || {
+        echo "ERROR: the pinned Rust toolchain must be acquired and validated separately" >&2
+        exit 1
+      }
       echo "==> building oracle-desk (one time, ~2 min)"
       ( cd desk && cargo build --release )
     fi
     exec "$BIN" ;;
   notes)      # Obsidian over the repo: the operator's lens on memory/doctrine/reports
     if [[ ! -d "/Applications/Obsidian.app" ]]; then
-      echo "==> installing Obsidian (brew cask, one time)"
-      brew install --cask obsidian
+      echo "ERROR: Obsidian is optional and must be provisioned separately" >&2
+      exit 1
     fi
     open "obsidian://open?path=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$ROOT" 2>/dev/null || echo "$ROOT")" \
       || open -a Obsidian "$ROOT"
@@ -65,9 +71,9 @@ case "$cmd" in
   mission)    # oracle mission <mission.toml> [claude|opencode|kilo] [hours]
     m="${1:?usage: oracle mission <mission.toml> [engine] [hours]}"
     eng="${2:-claude}"; hrs="${3:-24}"
-    exec uv run --project env python conductor/conductor.py run "$m" --engine "$eng" --hours "$hrs" ;;
-  retro)      exec uv run --project env python conductor/conductor.py retro --engine "${1:-claude}" ;;
-  state)      uv run --project env python conductor/conductor.py status ;;
+    exec "$ROOT/env/.venv/bin/python" conductor/conductor.py run "$m" --engine "$eng" --hours "$hrs" ;;
+  retro)      exec "$ROOT/env/.venv/bin/python" conductor/conductor.py retro --engine "${1:-claude}" ;;
+  state)      "$ROOT/env/.venv/bin/python" conductor/conductor.py status ;;
   report)     ls -1t reports/ 2>/dev/null | head -5 || echo "no reports yet" ;;
   ledger)     tail -n "${1:-20}" memory/LEDGER.md 2>/dev/null || echo "no ledger yet" ;;
   uninstall)  exec bash bootstrap/uninstall.sh "$@" ;;

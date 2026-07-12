@@ -24,18 +24,29 @@ if (-not $python) {
         Sort-Object FullName -Descending | Select-Object -First 1
     if ($c) { $python = $c.FullName }
 }
-if ($python) { OK "python: $python" } else { BAD "real python missing (Store stub does not count)" "bootstrap\ensure-tools.ps1" }
+if ($python) { OK "python: $python" } else { BAD "real python missing (Store stub does not count)" "provision the VERSIONS.lock Python trust root" }
 if ($python) {
     & $python -m pytest --version *> $null
-    if ($LASTEXITCODE -eq 0) { OK "pytest importable" } else { BAD "pytest missing" "bootstrap\ensure-tools.ps1" }
+    if ($LASTEXITCODE -eq 0) { OK "pytest importable" } else { MEH "pytest missing" "required only for source verification" }
 }
-if (Get-Command node -ErrorAction SilentlyContinue) { OK "node: $(node --version)" } else { BAD "node missing" "bootstrap\ensure-tools.ps1" }
+$cachedNode = Get-ChildItem (Join-Path $Root ".tools\node") -Recurse -Filter "node.exe" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+if ($cachedNode) { OK "cached node: $($cachedNode.FullName)" } else { BAD "cached node missing" "run bin\oracle.ps1 setup with the policy-bound cache" }
 foreach ($eng in @("claude.cmd", "opencode.cmd", "kilo.cmd")) {
     if (Test-Path ".tools\npm\$eng") { OK "engine: $eng" } else { BAD "engine missing: $eng" "bin\oracle.ps1 setup" }
 }
 
 Write-Host "== lifecycle =="
 if ($python) {
+    $lockedPythonLine = Get-Content (Join-Path $Root "VERSIONS.lock") |
+        Where-Object { $_ -match "^PYTHON_VERSION=" } | Select-Object -First 1
+    $lockedPython = (($lockedPythonLine -split "=", 2)[1] -split "#")[0].Trim()
+    $actualPython = (& $python -c "import platform; print(platform.python_version())").Trim()
+    if ($LASTEXITCODE -eq 0 -and $actualPython -eq $lockedPython) {
+        OK "bootstrap Python trust root matches $lockedPython"
+    } else {
+        BAD "bootstrap Python is $actualPython, expected $lockedPython" "provision the pinned Python runtime"
+    }
     $lifecycle = Join-Path $Root "verification\lifecycle.py"
     & $python $lifecycle validate-dependencies --root $Root *> $null
     if ($LASTEXITCODE -eq 0) {
@@ -50,9 +61,9 @@ if ($python) {
     }
     $manifest = Join-Path $cache "manifest.json"
     if (Test-Path -LiteralPath $manifest) {
-        & $python $lifecycle validate-dependencies --root $Root --manifest $manifest --cache $cache *> $null
+        & $python $lifecycle validate-dependencies --root $Root --manifest $manifest --cache $cache --reproducible *> $null
         if ($LASTEXITCODE -eq 0) {
-            OK "dependency-cache manifest and hashes valid"
+            OK "dependency-cache is policy-bound and reproducible"
         } else {
             BAD "dependency-cache validation failed" "re-export dependencies with bootstrap\export-dependencies.ps1"
         }
@@ -60,7 +71,7 @@ if ($python) {
         MEH "dependency-cache manifest missing" "export online artifacts before reproducible/offline install"
     }
 } else {
-    BAD "lifecycle checks need Python" "bootstrap\ensure-tools.ps1"
+    BAD "lifecycle checks need pinned Python" "provision the VERSIONS.lock Python trust root"
 }
 $statePath = Join-Path $Root ".install-state\state.json"
 if (Test-Path -LiteralPath $statePath) {
@@ -129,9 +140,9 @@ Write-Host "== security posture =="
 if (Test-Path "engines\kilo\hardened-env.ps1") { OK "Kilo hardening profile present" } else { BAD "Kilo hardening profile missing" "restore engines\kilo\hardened-env.ps1" }
 if (Get-NetFirewallRule -Group "SentiVue Oracle Egress" -ErrorAction SilentlyContinue) { OK "egress default-deny ACTIVE" }
 else { MEH "egress default-deny inactive (opt-in)" "bin\oracle.ps1 harden" }
-$kiloCfg = Join-Path $env:USERPROFILE ".config\kilo\kilo.jsonc"
-if ((Test-Path $kiloCfg) -and (Select-String -Path $kiloCfg -Pattern 'app\.kilo\.ai' -Quiet)) { BAD "live kilo.jsonc calls app.kilo.ai" "connectors\ide\sync-models.ps1" }
-elseif (Test-Path $kiloCfg) { OK "live kilo.jsonc has no cloud references" }
+$kiloCfg = Join-Path $Root "state\generated\kilo\kilo.jsonc"
+if ((Test-Path $kiloCfg) -and (Select-String -Path $kiloCfg -Pattern 'app\.kilo\.ai' -Quiet)) { BAD "generated kilo.jsonc calls app.kilo.ai" "connectors\ide\sync-models.ps1" }
+elseif (Test-Path $kiloCfg) { OK "generated kilo.jsonc has no cloud references" }
 
 Write-Host "== git vault =="
 $vault = git remote get-url vault 2>$null

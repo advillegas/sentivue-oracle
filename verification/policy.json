@@ -37,216 +37,436 @@
       "connectors/ide/oracle-agents/media/*.svg"
     ]
   },
+  "bootstrap_trust_roots": [
+    {
+      "id": "python",
+      "version_key": "PYTHON_VERSION",
+      "platforms": ["darwin-arm64", "windows-x64"],
+      "reason": "Python runs the standard-library validator before cached artifacts can be trusted."
+    },
+    {
+      "id": "os-tooling",
+      "commands": ["git", "tar"],
+      "platforms": ["darwin-arm64", "windows-x64"],
+      "reason": "Git and archive primitives are supplied by the host operating-system toolchain."
+    }
+  ],
   "dependency_inputs": [
     {
       "id": "npm-claude-code",
       "kind": "npm",
       "version_key": "CLAUDE_CODE_NPM_VERSION",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-{resolved}.tgz",
+        "digest_key": "CLAUDE_CODE_NPM_SHA256"
+      }
     },
     {
       "id": "npm-opencode",
       "kind": "npm",
       "version_key": "OPENCODE_NPM_VERSION",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://registry.npmjs.org/opencode-ai/-/opencode-ai-{resolved}.tgz",
+        "digest_key": "OPENCODE_NPM_SHA256"
+      }
     },
     {
       "id": "npm-kilo-cli",
       "kind": "npm",
       "version_key": "KILO_CLI_NPM_VERSION",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://registry.npmjs.org/@kilocode/cli/-/cli-{resolved}.tgz",
+        "digest_key": "KILO_CLI_NPM_SHA256"
+      }
     },
     {
       "id": "source-ecc",
       "kind": "git",
       "version_key": "ECC_PIN",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity_key": "ECC_REPO",
+        "url": "{identity}/archive/{resolved}.tar.gz",
+        "revision_key": "ECC_COMMIT",
+        "digest_key": "ECC_ARCHIVE_SHA256"
+      }
     },
     {
       "id": "source-agent-mcp",
       "kind": "git",
       "version_key": "AGENT_MCP_PIN",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity_key": "AGENT_MCP_REPO",
+        "url": "{identity}/archive/{resolved}.tar.gz",
+        "revision_key": "AGENT_MCP_COMMIT",
+        "digest_key": "AGENT_MCP_ARCHIVE_SHA256"
+      }
     },
     {
       "id": "source-loop-engineering",
       "kind": "git",
       "version_key": "LOOP_ENG_PIN",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity_key": "LOOP_ENG_REPO",
+        "url": "{identity}/archive/{resolved}.tar.gz",
+        "revision_key": "LOOP_ENG_COMMIT",
+        "digest_key": "LOOP_ENG_ARCHIVE_SHA256"
+      }
     },
     {
       "id": "npm-loop-audit",
       "kind": "npm",
       "version_key": "LOOP_AUDIT_NPM",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://registry.npmjs.org/@cobusgreyling/loop-audit/-/loop-audit-{resolved}.tgz",
+        "digest_key": "LOOP_AUDIT_NPM_SHA256"
+      }
     },
     {
       "id": "npm-loop-init",
       "kind": "npm",
       "version_key": "LOOP_INIT_NPM",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://registry.npmjs.org/@cobusgreyling/loop-init/-/loop-init-{resolved}.tgz",
+        "digest_key": "LOOP_INIT_NPM_SHA256"
+      }
     },
     {
       "id": "npm-loop-cost",
       "kind": "npm",
       "version_key": "LOOP_COST_NPM",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://registry.npmjs.org/@cobusgreyling/loop-cost/-/loop-cost-{resolved}.tgz",
+        "digest_key": "LOOP_COST_NPM_SHA256"
+      }
     },
     {
       "id": "npm-loop-sync",
       "kind": "npm",
       "version_key": "LOOP_SYNC_NPM",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://registry.npmjs.org/@cobusgreyling/loop-sync/-/loop-sync-{resolved}.tgz",
+        "digest_key": "LOOP_SYNC_NPM_SHA256"
+      }
     },
     {
       "id": "source-superpowers",
       "kind": "git",
       "version_key": "SUPERPOWERS_PIN",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity_key": "SUPERPOWERS_REPO",
+        "url": "{identity}/archive/{resolved}.tar.gz",
+        "revision_key": "SUPERPOWERS_COMMIT",
+        "digest_key": "SUPERPOWERS_ARCHIVE_SHA256"
+      }
     },
     {
       "id": "source-gstack",
       "kind": "git",
       "version_key": "GSTACK_PIN",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity_key": "GSTACK_REPO",
+        "url": "{identity}/archive/{resolved}.tar.gz",
+        "revision_key": "GSTACK_COMMIT",
+        "digest_key": "GSTACK_ARCHIVE_SHA256"
+      }
     },
     {
       "id": "brew-llama-cpp",
       "kind": "native",
       "version_key": "LLAMA_CPP_BREW_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "LLAMA_CPP_BREW_RESOLVED_VERSION",
+        "digest_key": "LLAMA_CPP_BREW_SHA256"
+      }
     },
     {
       "id": "llama-swap-darwin-arm64",
       "kind": "native",
       "version_key": "LLAMA_SWAP_VERSION",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://github.com/mostlygeek/llama-swap/releases/download/{version}/llama-swap_{version}_darwin_arm64.tar.gz",
+        "digest_key": "LLAMA_SWAP_DARWIN_ARM64_SHA256"
+      }
     },
     {
       "id": "llama-swap-windows-amd64",
       "kind": "native",
       "version_key": "LLAMA_SWAP_VERSION",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://github.com/mostlygeek/llama-swap/releases/download/{version}/llama-swap_{version}_windows_amd64.zip",
+        "digest_key": "LLAMA_SWAP_WINDOWS_AMD64_SHA256"
+      }
     },
     {
       "id": "llama-cpp-windows-vulkan",
       "kind": "native",
       "version_key": "LLAMA_CPP_WIN_TAG",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "https://github.com/ggml-org/llama.cpp/releases/download/{version}/llama-{version}-bin-win-vulkan-x64.zip",
+        "digest_key": "LLAMA_CPP_WINDOWS_VULKAN_SHA256"
+      }
     },
     {
-      "id": "python-runtime",
-      "kind": "toolchain",
-      "version_key": "PYTHON_VERSION",
-      "allow_dynamic": false
-    },
-    {
-      "id": "uv",
+      "id": "uv-darwin-arm64",
       "kind": "toolchain",
       "version_key": "UV_VERSION",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "unresolved",
+        "digest_key": "UV_DARWIN_ARM64_SHA256"
+      }
     },
     {
-      "id": "node",
+      "id": "uv-windows-x64",
+      "kind": "toolchain",
+      "version_key": "UV_VERSION",
+      "allow_dynamic": false,
+      "source": {
+        "identity": "unresolved",
+        "digest_key": "UV_WINDOWS_X64_SHA256"
+      }
+    },
+    {
+      "id": "node-darwin-arm64",
       "kind": "toolchain",
       "version_key": "NODE_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "NODE_RESOLVED_VERSION",
+        "digest_key": "NODE_DARWIN_ARM64_SHA256"
+      }
     },
     {
-      "id": "vscodium",
+      "id": "node-windows-x64",
+      "kind": "toolchain",
+      "version_key": "NODE_VERSION",
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "NODE_RESOLVED_VERSION",
+        "digest_key": "NODE_WINDOWS_X64_SHA256"
+      }
+    },
+    {
+      "id": "jq-darwin-arm64",
+      "kind": "toolchain",
+      "version_key": "JQ_VERSION",
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "JQ_RESOLVED_VERSION",
+        "digest_key": "JQ_DARWIN_ARM64_SHA256"
+      }
+    },
+    {
+      "id": "vscodium-darwin-arm64",
       "kind": "ide",
       "version_key": "VSCODIUM_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "VSCODIUM_RESOLVED_VERSION",
+        "digest_key": "VSCODIUM_DARWIN_ARM64_SHA256"
+      }
+    },
+    {
+      "id": "vscodium-darwin-x64",
+      "kind": "ide",
+      "version_key": "VSCODIUM_VERSION",
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "VSCODIUM_RESOLVED_VERSION",
+        "digest_key": "VSCODIUM_DARWIN_X64_SHA256"
+      }
+    },
+    {
+      "id": "vscodium-windows-x64",
+      "kind": "ide",
+      "version_key": "VSCODIUM_VERSION",
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "VSCODIUM_RESOLVED_VERSION",
+        "digest_key": "VSCODIUM_WINDOWS_X64_SHA256"
+      }
     },
     {
       "id": "continue-vsix-darwin-arm64",
       "kind": "ide-extension",
       "version_key": "CONTINUE_VSIX_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "CONTINUE_VSIX_RESOLVED_VERSION",
+        "digest_key": "CONTINUE_VSIX_DARWIN_ARM64_SHA256"
+      }
     },
     {
       "id": "continue-vsix-darwin-x64",
       "kind": "ide-extension",
       "version_key": "CONTINUE_VSIX_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "CONTINUE_VSIX_RESOLVED_VERSION",
+        "digest_key": "CONTINUE_VSIX_DARWIN_X64_SHA256"
+      }
     },
     {
       "id": "continue-vsix-windows-x64",
       "kind": "ide-extension",
       "version_key": "CONTINUE_VSIX_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "CONTINUE_VSIX_RESOLVED_VERSION",
+        "digest_key": "CONTINUE_VSIX_WINDOWS_X64_SHA256"
+      }
     },
     {
       "id": "kilo-vsix-darwin-arm64",
       "kind": "ide-extension",
       "version_key": "KILO_VSIX_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "KILO_VSIX_RESOLVED_VERSION",
+        "digest_key": "KILO_VSIX_DARWIN_ARM64_SHA256"
+      }
     },
     {
       "id": "kilo-vsix-darwin-x64",
       "kind": "ide-extension",
       "version_key": "KILO_VSIX_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "KILO_VSIX_RESOLVED_VERSION",
+        "digest_key": "KILO_VSIX_DARWIN_X64_SHA256"
+      }
     },
     {
       "id": "kilo-vsix-windows-x64",
       "kind": "ide-extension",
       "version_key": "KILO_VSIX_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "KILO_VSIX_RESOLVED_VERSION",
+        "digest_key": "KILO_VSIX_WINDOWS_X64_SHA256"
+      }
     },
     {
       "id": "hf-cli",
       "kind": "python",
       "version_key": "HF_CLI_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "HF_CLI_RESOLVED_VERSION",
+        "digest_key": "HF_CLI_ARCHIVE_SHA256"
+      }
     },
     {
       "id": "brew-gitea",
       "kind": "native",
       "version_key": "GITEA_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "GITEA_RESOLVED_VERSION",
+        "digest_key": "GITEA_BREW_SHA256"
+      }
     },
     {
       "id": "brew-rust",
       "kind": "toolchain",
       "version_key": "RUST_VERSION",
-      "allow_dynamic": true
+      "allow_dynamic": true,
+      "source": {
+        "identity": "unresolved",
+        "resolved_version_key": "RUST_RESOLVED_VERSION",
+        "digest_key": "RUST_BREW_SHA256"
+      }
     },
     {
       "id": "docker-supabase-postgres",
       "kind": "container",
       "version_key": "SUPABASE_POSTGRES_IMAGE",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity_key": "SUPABASE_POSTGRES_IMAGE",
+        "digest_key": "SUPABASE_POSTGRES_DIGEST"
+      }
     },
     {
       "id": "docker-postgrest",
       "kind": "container",
       "version_key": "POSTGREST_IMAGE",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity_key": "POSTGREST_IMAGE",
+        "digest_key": "POSTGREST_DIGEST"
+      }
     },
     {
       "id": "docker-postgres-meta",
       "kind": "container",
       "version_key": "POSTGRES_META_IMAGE",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity_key": "POSTGRES_META_IMAGE",
+        "digest_key": "POSTGRES_META_DIGEST"
+      }
     },
     {
       "id": "docker-supabase-studio",
       "kind": "container",
       "version_key": "SUPABASE_STUDIO_IMAGE",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity_key": "SUPABASE_STUDIO_IMAGE",
+        "digest_key": "SUPABASE_STUDIO_DIGEST"
+      }
     },
     {
       "id": "python-mcp-duckdb",
       "kind": "python",
       "version_key": "MCP_DUCKDB",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "unresolved",
+        "digest_key": "MCP_DUCKDB_SHA256"
+      }
     },
     {
       "id": "python-mcp-postgres",
       "kind": "python",
       "version_key": "MCP_POSTGRES",
-      "allow_dynamic": false
+      "allow_dynamic": false,
+      "source": {
+        "identity": "unresolved",
+        "digest_key": "MCP_POSTGRES_SHA256"
+      }
     }
   ],
   "platform_twins": [
@@ -285,7 +505,7 @@
     {
       "path": "install",
       "platform": "macos",
-      "reason": "Runs the guided macOS Homebrew and launchd installation flow."
+      "reason": "Runs the guided macOS arm64 offline installation flow."
     },
     {
       "path": "bootstrap/build-installers.ps1",
@@ -310,7 +530,7 @@
     {
       "path": "bootstrap/install.sh",
       "platform": "macos",
-      "reason": "Installs macOS Homebrew and launchd dependencies."
+      "reason": "Installs policy-bound macOS arm64 cache artifacts without acquisition."
     },
     {
       "path": "bootstrap/render-config.sh",

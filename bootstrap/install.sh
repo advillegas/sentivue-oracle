@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# SentiVue Oracle — one-time ONLINE bootstrap for the Mac Studio.
-# Everything after this (plus `make models`) runs fully offline.
+# SentiVue Oracle offline bootstrap for the Mac Studio.
+# Network acquisition is a separate export operation and is never implicit here.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -20,15 +20,60 @@ find_python() {
 }
 
 artifact_path() {
-  local artifact_id="$1" expected_version="$2" python_bin
+  local artifact_id="$1" expected_request="$2" expected_resolved="${3:-}" python_bin
+  local args
   python_bin="$(find_python)" || {
     echo "ERROR: Python is required to validate the dependency cache." >&2
     return 1
   }
-  "$python_bin" "$ROOT/verification/lifecycle.py" artifact-path \
-    --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
-    --artifact-id "$artifact_id" --expected-version "$expected_version" \
-    --expected-requested-version "$expected_version"
+  args=(artifact-path --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE"
+    --artifact-id "$artifact_id" --expected-requested-version "$expected_request"
+    --root "$ROOT" --reproducible)
+  [[ -z "$expected_resolved" ]] || args+=(--expected-version "$expected_resolved")
+  "$python_bin" "$ROOT/verification/lifecycle.py" "${args[@]}"
+}
+
+install_source_tree() {
+  local artifact_id="$1" requested="$2" resolved="$3" destination="$4"
+  local archive stage source
+  archive="$(artifact_path "$artifact_id" "$requested" "$resolved")"
+  stage="$(mktemp -d "$ROOT/.source-stage.XXXXXX")"
+  if ! tar -xf "$archive" -C "$stage"; then
+    rm -rf "$stage"
+    return 1
+  fi
+  source="$stage"
+  if [[ "$(find "$stage" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 1 ]]; then
+    source="$(find "$stage" -mindepth 1 -maxdepth 1 | head -1)"
+  fi
+  rm -rf "$destination"
+  mkdir -p "$(dirname "$destination")"
+  cp -R "$source" "$destination"
+  rm -rf "$stage"
+}
+
+install_cached_binary() {
+  local artifact_id="$1" requested="$2" resolved="$3" binary_name="$4" destination="$5"
+  local archive stage candidate temporary
+  archive="$(artifact_path "$artifact_id" "$requested" "$resolved")"
+  stage="$(mktemp -d "$ROOT/.binary-stage.XXXXXX")"
+  case "$archive" in
+    *.zip) ditto -x -k "$archive" "$stage" ;;
+    *.tar|*.tar.gz|*.tgz) tar -xf "$archive" -C "$stage" ;;
+    *) cp "$archive" "$stage/$binary_name" ;;
+  esac
+  candidate="$(find "$stage" -type f -name "$binary_name" | head -1)"
+  [[ -n "$candidate" ]] || {
+    rm -rf "$stage"
+    echo "ERROR: $artifact_id has no $binary_name" >&2
+    return 1
+  }
+  mkdir -p "$(dirname "$destination")"
+  temporary="${destination}.new"
+  cp "$candidate" "$temporary"
+  chmod +x "$temporary"
+  mv -f "$temporary" "$destination"
+  rm -rf "$stage"
 }
 
 if [[ "$(uname -s)/$(uname -m)" != "Darwin/arm64" && -z "${ORACLE_SKIP_OS_CHECK:-}" ]]; then
@@ -37,30 +82,54 @@ if [[ "$(uname -s)/$(uname -m)" != "Darwin/arm64" && -z "${ORACLE_SKIP_OS_CHECK:
   exit 1
 fi
 
-echo "==> [1/8] Homebrew packages"
-command -v brew >/dev/null || { echo "ERROR: install Homebrew first: https://brew.sh"; exit 1; }
-export HOMEBREW_CACHE="$DEPENDENCY_CACHE/homebrew"
+PYTHON_BIN="$(find_python)" || {
+  echo "ERROR: Python 3.12+ is a platform prerequisite for offline validation." >&2
+  exit 1
+}
+ACTUAL_PYTHON_VERSION="$("$PYTHON_BIN" -c 'import platform; print(platform.python_version())')"
+[[ "$ACTUAL_PYTHON_VERSION" == "$PYTHON_VERSION" ]] || {
+  echo "ERROR: bootstrap trust root requires Python $PYTHON_VERSION, found $ACTUAL_PYTHON_VERSION." >&2
+  exit 1
+}
+"$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-dependencies \
+  --root "$ROOT"
+
+echo "==> [1/8] Offline tool prerequisites"
 export HOMEBREW_NO_AUTO_UPDATE=1
-brew install "$LLAMA_CPP_BREW_FORMULA" "node@${NODE_MAJOR}" uv jq git gettext || true
-brew pin "$LLAMA_CPP_BREW_FORMULA" || true
-# node@N is keg-only: without linking, npm/node are NOT on PATH on a clean Mac
-if ! command -v node >/dev/null; then
-  brew link --overwrite --force "node@${NODE_MAJOR}" || true
-fi
-command -v node >/dev/null || export PATH="$(brew --prefix)/opt/node@${NODE_MAJOR}/bin:$PATH"
-command -v npm >/dev/null || { echo "ERROR: npm still not on PATH after linking node@${NODE_MAJOR}"; exit 1; }
+export HOMEBREW_NO_INSTALL_FROM_API=1
+export UV_CACHE_DIR="$DEPENDENCY_CACHE/uv"
+export UV_TOOL_DIR="$ROOT/.tools/uv-tools"
+export UV_TOOL_BIN_DIR="$ROOT/.tools/bin"
+install_source_tree "node-darwin-arm64" "$NODE_VERSION" "$NODE_RESOLVED_VERSION" \
+  "$ROOT/.tools/node"
+node_binary="$(find "$ROOT/.tools/node" -type f -path '*/bin/node' | head -1)"
+[[ -n "$node_binary" ]] || { echo "ERROR: cached Node tree has no bin/node" >&2; exit 1; }
+export PATH="$(dirname "$node_binary"):$ROOT/.tools/bin:$PATH"
+install_cached_binary "uv-darwin-arm64" "$UV_VERSION" "$UV_VERSION" uv \
+  "$ROOT/.tools/bin/uv"
+install_cached_binary "uv-darwin-arm64" "$UV_VERSION" "$UV_VERSION" uvx \
+  "$ROOT/.tools/bin/uvx"
+install_cached_binary "jq-darwin-arm64" "$JQ_VERSION" "$JQ_RESOLVED_VERSION" jq \
+  "$ROOT/.tools/bin/jq"
+install_cached_binary "brew-llama-cpp" "$LLAMA_CPP_BREW_VERSION" \
+  "$LLAMA_CPP_BREW_RESOLVED_VERSION" llama-server "$ROOT/.tools/bin/llama-server"
+for required in tar node npm uv uvx jq git llama-server; do
+  command -v "$required" >/dev/null || {
+    echo "ERROR: $required is absent; install it from the validated platform export." >&2
+    exit 1
+  }
+done
 chmod +x bootstrap/*.sh serving/service.sh engines/*/launch.sh harness/ecc/install-ecc.sh \
-         bin/* connectors/ide/*.sh connectors/gitea/*.sh 2>/dev/null || true
+         bin/* connectors/ide/*.sh connectors/gitea/*.sh
 
 echo "==> [2/8] llama-swap ${LLAMA_SWAP_VERSION} (pinned release binary)"
 mkdir -p .tools/bin
-if [[ ! -x .tools/bin/llama-swap ]]; then
-  LLAMA_SWAP_ARCHIVE="$(
-    artifact_path "llama-swap-darwin-arm64" "$LLAMA_SWAP_VERSION"
-  )"
-  tar -xzf "$LLAMA_SWAP_ARCHIVE" -C .tools/bin llama-swap
-  chmod +x .tools/bin/llama-swap
-fi
+LLAMA_SWAP_ARCHIVE="$(
+  artifact_path "llama-swap-darwin-arm64" "$LLAMA_SWAP_VERSION"
+)"
+rm -f .tools/bin/llama-swap
+tar -xzf "$LLAMA_SWAP_ARCHIVE" -C .tools/bin llama-swap
+chmod +x .tools/bin/llama-swap
 
 echo "==> [3/8] Engines (pinned, repo-local npm prefix — nothing global)"
 # npm install of Claude Code is deprecated upstream in favor of the native installer,
@@ -76,59 +145,69 @@ npm install -g "$CLAUDE_ARCHIVE" "$OPENCODE_ARCHIVE" "$KILO_ARCHIVE"
 
 echo "==> [3b/8] 'oracle' CLI on PATH"
 chmod +x bin/oracle
-BREW_BIN="$(brew --prefix)/bin"
-if ln -sf "$ROOT/bin/oracle" "$BREW_BIN/oracle" 2>/dev/null; then
-  echo "    linked $BREW_BIN/oracle"
-else
-  mkdir -p "$HOME/.local/bin" && ln -sf "$ROOT/bin/oracle" "$HOME/.local/bin/oracle"
-  echo "    linked ~/.local/bin/oracle (ensure ~/.local/bin is on PATH)"
-fi
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$ROOT/bin/oracle" "$HOME/.local/bin/oracle"
+echo "    linked ~/.local/bin/oracle (ensure ~/.local/bin is on PATH)"
 
 echo "==> [4/8] Python quant environment (uv)"
 ( cd env && uv sync --offline --frozen )
-# Warm uvx caches for the MCP servers so they launch offline later.
-uvx --offline --from "$MCP_DUCKDB" mcp-server-duckdb --help >/dev/null 2>&1 || true
-uvx --offline --from "$MCP_POSTGRES" postgres-mcp --help  >/dev/null 2>&1 || true
-uv tool install --offline "${HF_CLI}" 2>/dev/null || true
+# Warm uvx caches only from policy-bound root artifacts; transitive wheels are
+# resolved from the offline uv cache populated during explicit export.
+MCP_DUCKDB_ARCHIVE="$(artifact_path "python-mcp-duckdb" "$MCP_DUCKDB")"
+MCP_POSTGRES_ARCHIVE="$(artifact_path "python-mcp-postgres" "$MCP_POSTGRES")"
+HF_CLI_ARCHIVE="$(
+  artifact_path "hf-cli" "$HF_CLI_VERSION" "$HF_CLI_RESOLVED_VERSION"
+)"
+uvx --offline --from "$MCP_DUCKDB_ARCHIVE" mcp-server-duckdb --help >/dev/null
+uvx --offline --from "$MCP_POSTGRES_ARCHIVE" postgres-mcp --help >/dev/null
+uv tool install --offline "$HF_CLI_ARCHIVE"
 
 echo "==> [5/8] Skills -> both engines"
 bash bootstrap/sync-skills.sh
 
 echo "==> [6/8] ECC ${ECC_PIN} curated subset"
+install_source_tree "source-ecc" "$ECC_PIN" "$ECC_COMMIT" "$ROOT/harness/ecc/vendor"
 bash harness/ecc/install-ecc.sh
 echo "==> [6b/8] Skill packs: superpowers ${SUPERPOWERS_PIN} + gstack (pinned)"
+install_source_tree "source-superpowers" "$SUPERPOWERS_PIN" "$SUPERPOWERS_COMMIT" \
+  "$ROOT/harness/skill-packs/vendor/superpowers"
+install_source_tree "source-gstack" "$GSTACK_PIN" "$GSTACK_COMMIT" \
+  "$ROOT/harness/skill-packs/vendor/gstack"
 bash harness/skill-packs/install-skill-packs.sh
 
-echo "==> [7/8] Warm OpenCode model catalog cache (offline use later)"
-export XDG_CONFIG_HOME="$ROOT/engines/opencode/xdg"
-export XDG_DATA_HOME="$ROOT/engines/opencode/xdg-data"
-"$npm_config_prefix/bin/opencode" models >/dev/null 2>&1 || true
+echo "==> [7/8] Generated engine configuration deferred until model validation"
 
-echo "==> [8/8] GPU wired limit (448 GB for models, needs sudo; persists via LaunchDaemon)"
-if sudo -n true 2>/dev/null || sudo -v; then
-  sudo sysctl "iogpu.wired_limit_mb=458752" || true
-  sudo tee /Library/LaunchDaemons/com.sentivue.wiredlimit.plist >/dev/null <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>com.sentivue.wiredlimit</string>
-  <key>ProgramArguments</key><array>
-    <string>/usr/sbin/sysctl</string><string>iogpu.wired_limit_mb=458752</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-</dict></plist>
-EOF
-  sudo launchctl bootstrap system /Library/LaunchDaemons/com.sentivue.wiredlimit.plist 2>/dev/null || true
-else
-  echo "WARN: skipped wired-limit (no sudo). Run manually: sudo sysctl iogpu.wired_limit_mb=458752"
+echo "==> [8/8] GPU wired-limit prerequisite"
+WIRED_LIMIT="$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)"
+if [[ "$WIRED_LIMIT" -lt 458752 ]]; then
+  echo "ERROR: iogpu.wired_limit_mb must be provisioned to at least 458752 before install." >&2
+  echo "       No unowned system daemon is created automatically." >&2
+  exit 1
 fi
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
   echo "==> [8b/8] Local git vault (offline private remote + auto-backup target)"
-  bash bootstrap/vault.sh init || echo "WARN: vault init failed — run 'oracle vault init' later"
+  bash bootstrap/vault.sh init
 fi
 
 mkdir -p memory logs reports state && touch memory/.gitkeep
+"$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state init \
+  --root "$ROOT" --home "$HOME" >/dev/null
+for owned_tree in "$ROOT/.tools" "$ROOT/env/.venv" \
+  "$ROOT/harness/ecc/vendor" "$ROOT/harness/skill-packs/vendor"; do
+  [[ -d "$owned_tree" ]] || {
+    echo "ERROR: expected owned tree is missing: $owned_tree" >&2
+    exit 1
+  }
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state own-tree \
+    --root "$ROOT" --home "$HOME" --path "$owned_tree"
+done
+[[ -e "$HOME/.local/bin/oracle" || -L "$HOME/.local/bin/oracle" ]] || {
+  echo "ERROR: expected Oracle CLI link is missing" >&2
+  exit 1
+}
+"$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state own \
+  --root "$ROOT" --home "$HOME" --path "$HOME/.local/bin/oracle"
 echo
 echo "Bootstrap complete. Next:"
 echo "  make models   (~700 GB download, resumable)"

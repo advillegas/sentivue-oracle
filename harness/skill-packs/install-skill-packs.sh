@@ -12,17 +12,11 @@ mkdir -p "$CC" "$OC" "$HERE/vendor"
 
 vendored() {  # vendored <name> <repo> <pin>
   local v="$HERE/vendor/$1"
-  if [[ ! -d "$v/.git" ]]; then
-    echo "==> cloning $1 @ $3 (pinned)" >&2
-    if [[ "$3" =~ ^[0-9a-f]{40}$ ]]; then
-      git clone --filter=blob:none "$2" "$v" >&2
-      git -C "$v" checkout --quiet "$3"
-    else
-      git clone --depth 1 --branch "$3" "$2" "$v" >&2
-    fi
-  else
-    echo "==> $1 vendor checkout present" >&2
-  fi
+  [[ -d "$v" ]] || {
+    echo "ERROR: $1 vendor tree is absent from the validated dependency export." >&2
+    return 1
+  }
+  echo "==> $1 policy-bound vendor tree present ($3)" >&2
   echo "$v"
 }
 

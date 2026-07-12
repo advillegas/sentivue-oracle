@@ -15,22 +15,23 @@ free_gb=$(df -g . 2>/dev/null | awk 'NR==2 {print $4}')
 [[ "${free_gb:-0}" -gt 100 ]] && ok "disk free: ${free_gb} GB" \
   || meh "disk free: ${free_gb:-?} GB" "models + artifacts need headroom; consider pruning"
 wired=$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)
-[[ "$wired" -ge 400000 ]] && ok "GPU wired limit: ${wired} MB" \
-  || meh "GPU wired limit: ${wired} MB (default)" "big models may not fit: sudo sysctl iogpu.wired_limit_mb=458752"
+[[ "$wired" -ge 458752 ]] && ok "GPU wired limit: ${wired} MB" \
+  || bad "GPU wired limit: ${wired} MB" "provision before install: sudo sysctl iogpu.wired_limit_mb=458752"
 
 echo "== binaries =="
-for spec in "llama-server:brew install llama.cpp" \
+for spec in ".tools/bin/llama-server:re-run ./install with the policy-bound cache" \
             ".tools/bin/llama-swap:re-run ./install (bootstrap phase)" \
             ".tools/npm/bin/claude:re-run ./install (bootstrap phase)" \
             ".tools/npm/bin/opencode:re-run ./install (bootstrap phase)" \
             ".tools/npm/bin/kilo:re-run ./install (bootstrap phase)" \
-            "uv:brew install uv" "jq:brew install jq"; do
+            ".tools/bin/uv:re-run ./install with the policy-bound cache" \
+            ".tools/bin/jq:re-run ./install with the policy-bound cache"; do
   b="${spec%%:*}"; fix="${spec#*:}"
   if [[ "$b" == */* ]]; then [[ -x "$b" ]] && ok "$b" || bad "$b missing" "$fix"
   else command -v "$b" >/dev/null && ok "$b" || bad "$b missing" "$fix"; fi
 done
 command -v oracle >/dev/null && ok "oracle on PATH" \
-  || meh "oracle not on PATH" "ln -sf $ROOT/bin/oracle \$(brew --prefix)/bin/oracle"
+  || meh "oracle not on PATH" "add $HOME/.local/bin to PATH and re-run ./install"
 
 echo "== lifecycle =="
 python_bin=""
@@ -41,6 +42,13 @@ for candidate in "$ROOT/env/.venv/bin/python" python3 python; do
   fi
 done
 if [[ -n "$python_bin" ]]; then
+  locked_python="$(awk -F= '$1 == "PYTHON_VERSION" {print $2}' "$ROOT/VERSIONS.lock" | awk '{print $1}')"
+  actual_python="$("$python_bin" -c 'import platform; print(platform.python_version())')"
+  if [[ "$actual_python" == "$locked_python" ]]; then
+    ok "bootstrap Python trust root matches $locked_python"
+  else
+    bad "bootstrap Python is $actual_python, expected $locked_python" "provision the pinned Python runtime"
+  fi
   if "$python_bin" verification/lifecycle.py validate-dependencies \
       --root "$ROOT" >/dev/null 2>&1; then
     ok "dependency pin policy valid"
@@ -53,8 +61,8 @@ if [[ -n "$python_bin" ]]; then
   if [[ -f "$artifact_manifest" ]]; then
     if "$python_bin" verification/lifecycle.py validate-dependencies \
         --root "$ROOT" --manifest "$artifact_manifest" \
-        --cache "$dependency_cache" >/dev/null 2>&1; then
-      ok "dependency-cache manifest and hashes valid"
+        --cache "$dependency_cache" --reproducible >/dev/null 2>&1; then
+      ok "dependency-cache is policy-bound and reproducible"
     else
       bad "dependency-cache validation failed" \
         "re-export dependencies with bootstrap/export-dependencies.sh"
@@ -64,7 +72,7 @@ if [[ -n "$python_bin" ]]; then
       "export online artifacts before reproducible/offline install"
   fi
 else
-  bad "lifecycle checks need Python" "bootstrap/ensure-tools.sh"
+  bad "lifecycle checks need pinned Python" "provision the VERSIONS.lock Python trust root"
 fi
 state_path="$ROOT/.install-state/state.json"
 if [[ -f "$state_path" ]]; then
@@ -172,9 +180,10 @@ echo "== privacy =="
 if sudo -n pfctl -sr 2>/dev/null | grep -q "block drop out"; then ok "pf egress block ACTIVE (air-gapped)"
 else meh "pf egress block not active" "optional: oracle harden"; fi
 [[ -f engines/kilo/hardened-env.sh ]] && ok "Kilo hardening profile present" || bad "Kilo hardening profile missing" "restore engines/kilo/hardened-env.sh"
-if [[ -f "$HOME/.config/kilo/kilo.jsonc" ]] && grep -q 'app\.kilo\.ai' "$HOME/.config/kilo/kilo.jsonc" 2>/dev/null; then
-  bad "live kilo.jsonc calls app.kilo.ai" "bash connectors/ide/sync-models.sh"
-elif [[ -f "$HOME/.config/kilo/kilo.jsonc" ]]; then ok "live kilo.jsonc has no cloud references"; fi
+kilo_cfg="$ROOT/state/generated/kilo/kilo.jsonc"
+if [[ -f "$kilo_cfg" ]] && grep -q 'app\.kilo\.ai' "$kilo_cfg" 2>/dev/null; then
+  bad "generated kilo.jsonc calls app.kilo.ai" "bash connectors/ide/sync-models.sh"
+elif [[ -f "$kilo_cfg" ]]; then ok "generated kilo.jsonc has no cloud references"; fi
 
 echo "== supabase (optional) =="
 if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q sentivue-supabase; then

@@ -23,7 +23,7 @@ function Get-LockedVersion([string]$Name) {
         Where-Object { $_ -match "^$([regex]::Escape($Name))=" } |
         Select-Object -First 1
     if (-not $line) { throw "missing $Name in VERSIONS.lock" }
-    return ($line -split "=", 2)[1].Trim()
+    return ((($line -split "=", 2)[1]) -split "#", 2)[0].Trim()
 }
 
 function Get-CachedArtifact([string]$Id, [string]$Version) {
@@ -35,7 +35,8 @@ function Get-CachedArtifact([string]$Id, [string]$Version) {
         (Join-Path $Root "verification\lifecycle.py"), "artifact-path",
         "--manifest", $ArtifactManifest, "--cache", $DependencyCache,
         "--artifact-id", $Id, "--expected-version", $Version,
-        "--expected-requested-version", $Version
+        "--expected-requested-version", $Version,
+        "--root", $Root, "--reproducible"
     )
     $path = (& $python @lifecycleArgs)
     if ($LASTEXITCODE -ne 0) { throw "cached artifact validation failed: $Id" }
@@ -55,6 +56,16 @@ function Write-Utf8NoBomAtomic([string]$Path, [string]$Text) {
     } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Quote-CommandArgument([string]$Value) {
+    $python = Join-Path $Root "env\.venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $python)) {
+        $python = (Get-Command python -ErrorAction Stop).Source
+    }
+    $quoted = & $python (Join-Path $Root "verification\lifecycle.py") quote-argument --platform windows --value $Value
+    if ($LASTEXITCODE -ne 0) { throw "safe command quoting failed" }
+    return $quoted.Trim()
 }
 
 $LlamaTag = Get-LockedVersion "LLAMA_CPP_WIN_TAG"
@@ -87,21 +98,42 @@ switch ($Cmd) {
     "setup" {
         New-Item -ItemType Directory -Force -Path $Tools | Out-Null
         $swapExe = Join-Path $Tools "llama-swap.exe"
-        if (-not (Test-Path $swapExe)) {
-            Write-Host "==> llama-swap v$SwapVer (windows_amd64)"
-            $z = Get-CachedArtifact "llama-swap-windows-amd64" $SwapVer
-            Expand-Archive -LiteralPath $z -DestinationPath $Tools -Force
+        Write-Host "==> llama-swap v$SwapVer (windows_amd64)"
+        $z = Get-CachedArtifact "llama-swap-windows-amd64" $SwapVer
+        $swapStage = Join-Path $Tools (".swap-stage-" + [Guid]::NewGuid().ToString("N"))
+        try {
+            Expand-Archive -LiteralPath $z -DestinationPath $swapStage -Force
+            $stagedSwap = Get-ChildItem $swapStage -Recurse -Filter "llama-swap.exe" |
+                Select-Object -First 1
+            if (-not $stagedSwap) { throw "llama-swap archive has no llama-swap.exe" }
+            Copy-Item -LiteralPath $stagedSwap.FullName -Destination ($swapExe + ".new") -Force
+            Move-Item -LiteralPath ($swapExe + ".new") -Destination $swapExe -Force
+        } finally {
+            Remove-Item -LiteralPath $swapStage -Recurse -Force -ErrorAction SilentlyContinue
         }
         $serverExe = Join-Path $Tools "llama\llama-server.exe"
-        if (-not (Test-Path $serverExe)) {
-            Write-Host "==> llama.cpp $LlamaTag (win-vulkan-x64: AMD/Intel/NVIDIA GPU accel)"
-            $z = Get-CachedArtifact "llama-cpp-windows-vulkan" $LlamaTag
-            Expand-Archive -LiteralPath $z -DestinationPath (Join-Path $Tools "llama") -Force
+        Write-Host "==> llama.cpp $LlamaTag (win-vulkan-x64: AMD/Intel/NVIDIA GPU accel)"
+        $z = Get-CachedArtifact "llama-cpp-windows-vulkan" $LlamaTag
+        $serverStage = Join-Path $Tools (".server-stage-" + [Guid]::NewGuid().ToString("N"))
+        try {
+            Expand-Archive -LiteralPath $z -DestinationPath $serverStage -Force
+            $stagedServer = Get-ChildItem $serverStage -Recurse -Filter "llama-server.exe" |
+                Select-Object -First 1
+            if (-not $stagedServer) { throw "llama.cpp archive has no llama-server.exe" }
+            $stagedRoot = Split-Path -Parent $stagedServer.FullName
+            $newServer = Join-Path $Tools "llama.new"
+            Remove-Item -LiteralPath $newServer -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item -LiteralPath $stagedRoot -Destination $newServer -Recurse -Force
+            Remove-Item -LiteralPath (Join-Path $Tools "llama") -Recurse -Force -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $newServer -Destination (Join-Path $Tools "llama")
+        } finally {
+            Remove-Item -LiteralPath $serverStage -Recurse -Force -ErrorAction SilentlyContinue
         }
         Write-Host "serving toolchain ready under .tools\win"
     }
     "render" {
-        $server = (Join-Path $Tools "llama\llama-server.exe") -replace "\\", "/"
+        $server = Join-Path $Tools "llama\llama-server.exe"
+        $serverArg = Quote-CommandArgument $server
         # Hardware-adaptive placement: models larger than the GPU's dedicated
         # VRAM run pure-CPU (--n-gpu-layers 0) - on iGPU boxes Vulkan otherwise
         # dies allocating weights or KV cache (ErrorOutOfDeviceMemory). Smaller
@@ -121,7 +153,8 @@ switch ($Cmd) {
             $all = Get-ChildItem $dir -Recurse -Filter "*.gguf" -ErrorAction SilentlyContinue | Sort-Object Name
             $gguf = $all | Select-Object -First 1
             if (-not $gguf) { $missing += $r.Name; continue }
-            $mp = $gguf.FullName -replace "\\", "/"
+            $mp = $gguf.FullName
+            $modelArg = Quote-CommandArgument $mp
             $sizeGB = ($all | Measure-Object Length -Sum).Sum / 1GB
             $gpu = ""
             if ($sizeGB -gt [Math]::Max(1.0, $vramGB * 0.8)) { $gpu = " --n-gpu-layers 0" }
@@ -146,9 +179,9 @@ switch ($Cmd) {
             $common = "--host 127.0.0.1 --port `${PORT} --jinja --cache-reuse 256$gpu$kv"
             $ttl = 0
             switch ($r.Slot) {
-                "embed" { $cmdline = "$server $common -m $mp --embeddings --pooling last --ctx-size $ctx" }
-                "fast"  { $cmdline = "$server $common -m $mp --ctx-size $ctx --parallel $par $($r.Flags)" }
-                default { $cmdline = "$server $common -m $mp --ctx-size $ctx --parallel 1 $($r.Flags)" }
+                "embed" { $cmdline = "$serverArg $common -m $modelArg --embeddings --pooling last --ctx-size $ctx" }
+                "fast"  { $cmdline = "$serverArg $common -m $modelArg --ctx-size $ctx --parallel $par $($r.Flags)" }
+                default { $cmdline = "$serverArg $common -m $modelArg --ctx-size $ctx --parallel 1 $($r.Flags)" }
             }
             if ($r.InProfile -and $r.Slot -ne "big") { $resident += $r.Name }
             else { $big += $r.Name; $ttl = 600 }   # extras: on-demand, evicted after idle
@@ -189,19 +222,48 @@ switch ($Cmd) {
         & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath render
         if ($LASTEXITCODE -ne 0) { exit 1 }
         & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath stop 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "could not safely stop the previous serving process" }
         New-Item -ItemType Directory -Force -Path (Join-Path $Root "state"), (Join-Path $Root "logs") | Out-Null
+        $python = Join-Path $Root "env\.venv\Scripts\python.exe"
+        if (-not (Test-Path -LiteralPath $python)) {
+            $python = (Get-Command python -ErrorAction Stop).Source
+        }
+        $lifecycle = Join-Path $Root "verification\lifecycle.py"
+        & $python $lifecycle state init --root $Root --home $env:USERPROFILE | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "install state initialization failed" }
         $p = Start-Process -FilePath (Join-Path $Tools "llama-swap.exe") `
             -ArgumentList "--config", $Rendered, "--listen", "127.0.0.1:9099" -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $Root "logs\llama-swap.win.out.log") `
             -RedirectStandardError (Join-Path $Root "logs\llama-swap.win.err.log")
-        Set-Content -Path $PidFile -Value $p.Id
+        try {
+            Write-Utf8NoBomAtomic $PidFile ("{0}`n" -f $p.Id)
+            & $python $lifecycle state own --root $Root --home $env:USERPROFILE `
+                --path $PidFile | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "PID ownership registration failed" }
+            & $python $lifecycle state own-service --root $Root `
+                --home $env:USERPROFILE --service-kind "windows-pid-file" `
+                --identifier "state/llama-swap.pid" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "process ownership registration failed" }
+        } catch {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
+            throw
+        }
         Write-Host "llama-swap starting on http://127.0.0.1:9099 (pid $($p.Id))"
     }
     "stop" {
         if (Test-Path $PidFile) {
-            $procId = Get-Content $PidFile
-            Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-            Remove-Item $PidFile -ErrorAction SilentlyContinue
+            [int]$procId = (Get-Content $PidFile -Raw).Trim()
+            $process = Get-Process -Id $procId -ErrorAction SilentlyContinue
+            if ($process) {
+                $expected = [IO.Path]::GetFullPath((Join-Path $Tools "llama-swap.exe"))
+                if (-not $process.Path -or
+                    -not $process.Path.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "refusing to stop PID $procId because it is not Oracle llama-swap"
+                }
+                Stop-Process -Id $procId -Force -ErrorAction Stop
+            }
+            Remove-Item -LiteralPath $PidFile -Force -ErrorAction Stop
             Write-Host "stopped"
         } else { Write-Host "not running (no pidfile)" }
     }

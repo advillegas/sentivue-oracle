@@ -15,7 +15,12 @@
 # Models are auto-detected from the machine on every launch (sync-models.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-VSIX_DIR="$ROOT/incoming/vsix"
+VSCODIUM_ROOT="$ROOT/.tools/vscodium"
+VSCODIUM_APP="$VSCODIUM_ROOT/VSCodium.app"
+CODIUM_BIN="$VSCODIUM_APP/Contents/Resources/app/bin/codium"
+EXTENSIONS_DIR="$VSCODIUM_ROOT/extensions"
+USER_DATA_DIR="$ROOT/state/generated/vscodium"
+VSIX_DIR="$VSCODIUM_ROOT/vsix"
 source "$ROOT/VERSIONS.lock"
 DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
 ARTIFACT_MANIFEST="$DEPENDENCY_CACHE/manifest.json"
@@ -37,6 +42,7 @@ artifact_path() {
     --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE"
     --artifact-id "$artifact_id"
     --expected-requested-version "$expected_version"
+    --root "$ROOT" --reproducible
   )
   if [[ "$expected_version" != "dynamic" ]]; then
     args+=(--expected-version "$expected_version")
@@ -58,14 +64,74 @@ atomic_from_stdin() {
   fi
 }
 
+register_ide_ownership() {
+  local python_bin
+  for python_bin in "$ROOT/env/.venv/bin/python" python3 python; do
+    command -v "$python_bin" >/dev/null 2>&1 && break
+    python_bin=""
+  done
+  [[ -n "$python_bin" ]] || {
+    echo "ERROR: Python is required to register IDE ownership" >&2
+    return 1
+  }
+  "$python_bin" "$ROOT/verification/lifecycle.py" state init \
+    --root "$ROOT" --home "$HOME" >/dev/null
+  "$python_bin" "$ROOT/verification/lifecycle.py" state own-tree \
+    --root "$ROOT" --home "$HOME" --path "$VSCODIUM_ROOT" >/dev/null
+  "$python_bin" "$ROOT/verification/lifecycle.py" state own-tree \
+    --root "$ROOT" --home "$HOME" --path "$ROOT/state/generated" >/dev/null
+}
+
+install_codium_from_cache() {
+  local archive stage app mount artifact_id
+  if [[ "$(uname -m)" == "x86_64" ]]; then
+    artifact_id="vscodium-darwin-x64"
+  else
+    artifact_id="vscodium-darwin-arm64"
+  fi
+  archive="$(artifact_path "$artifact_id" "$VSCODIUM_VERSION")"
+  stage="$(mktemp -d)"
+  case "$archive" in
+    *.zip)
+      ditto -x -k "$archive" "$stage"
+      app="$(find "$stage" -maxdepth 3 -name 'VSCodium.app' -type d | head -1)"
+      ;;
+    *.dmg)
+      mount="$(hdiutil attach -nobrowse -readonly "$archive" |
+        awk '/Apple_HFS|Apple_APFS/ {print $NF; exit}')"
+      [[ -n "$mount" ]] || { rm -rf "$stage"; return 1; }
+      app="$mount/VSCodium.app"
+      ;;
+    *)
+      rm -rf "$stage"
+      echo "ERROR: validated VSCodium export must be a .zip or .dmg" >&2
+      return 1
+      ;;
+  esac
+  [[ -d "$app" ]] || {
+    [[ -z "${mount:-}" ]] || hdiutil detach "$mount" >/dev/null
+    rm -rf "$stage"
+    echo "ERROR: VSCodium.app is absent from the validated export" >&2
+    return 1
+  }
+  rm -rf "$VSCODIUM_APP"
+  mkdir -p "$VSCODIUM_ROOT"
+  ditto "$app" "$VSCODIUM_APP"
+  [[ -z "${mount:-}" ]] || hdiutil detach "$mount" >/dev/null
+  rm -rf "$stage"
+}
+
 install_oracle_agents_extension() {
   # The agents sidebar is a local extension shipped with the repo. It MUST be
   # packed as a .vsix and installed via the codium CLI - a folder copied into
   # .vscode-oss/extensions is ignored (extensions.json is the registry).
   local src="$ROOT/connectors/ide/oracle-agents"
-  [[ -f "$src/package.json" ]] || return 0
+  [[ -f "$src/package.json" ]] || {
+    echo "ERROR: bundled Oracle agents extension source is missing" >&2
+    return 1
+  }
   local ver stage vsix
-  ver="$(jq -r .version "$src/package.json" 2>/dev/null || echo 0.2.0)"
+  ver="$(jq -er .version "$src/package.json")"
   stage="$(mktemp -d)"
   mkdir -p "$stage/extension/media" "$VSIX_DIR"
   sed "s/Id=\"oracle-agents\" Version=\"[^\"]*\"/Id=\"oracle-agents\" Version=\"$ver\"/" \
@@ -87,7 +153,8 @@ EOF
   rm -f "$vsix"
   (cd "$stage" && zip -qr "$vsix" "[Content_Types].xml" extension.vsixmanifest extension)
   rm -rf "$stage"
-  codium --install-extension "$vsix" --force >/dev/null
+  "$CODIUM_BIN" --user-data-dir "$USER_DATA_DIR" \
+    --extensions-dir "$EXTENSIONS_DIR" --install-extension "$vsix" --force >/dev/null
   echo "==> installed agents sidebar extension (sentivue.oracle-agents-$ver)"
 }
 
@@ -95,28 +162,34 @@ graft_ripgrep() {
   # Open VSX builds of Continue ship without the ripgrep binary and die on
   # activation with "Could not find ripgrep binary" - graft VSCodium's own rg in.
   local ext rg dest
-  ext="$(ls -d "$HOME/.vscode-oss/extensions"/continue.continue-* 2>/dev/null | sort | tail -1)"
-  [[ -n "$ext" ]] || return 0
+  ext="$(ls -d "$EXTENSIONS_DIR"/continue.continue-* 2>/dev/null | sort | tail -1)"
+  [[ -n "$ext" ]] || {
+    echo "ERROR: installed Continue extension is missing" >&2
+    return 1
+  }
   dest="$ext/out/node_modules/@vscode/ripgrep/bin"
   [[ -x "$dest/rg" ]] && return 0
-  rg="$(find "/Applications/VSCodium.app/Contents/Resources/app/node_modules/@vscode" -name rg -type f 2>/dev/null | head -1)"
+  rg="$(find "$VSCODIUM_APP/Contents/Resources/app/node_modules/@vscode" -name rg -type f 2>/dev/null | head -1)"
   [[ -n "$rg" ]] || rg="$(command -v rg || true)"
-  [[ -n "$rg" ]] || return 0
+  [[ -n "$rg" ]] || {
+    echo "ERROR: no policy-bound ripgrep binary is available for Continue" >&2
+    return 1
+  }
   mkdir -p "$dest"
   cp "$rg" "$dest/rg" && chmod +x "$dest/rg"
   echo "==> grafted ripgrep into Continue (Open VSX build ships without it)"
 }
 
 update_user_config() {
-  # Merge (never clobber) the Oracle keys into VSCodium user settings:
-  # telemetry off, Roo auto-import path, and the agent-tab terminal profiles.
-  local dir="$HOME/Library/Application Support/VSCodium/User"
+  # This dedicated user-data directory is Oracle-owned; canonical user settings
+  # remain untouched.
+  local dir="$USER_DATA_DIR/User"
   mkdir -p "$dir"
   local settings="$dir/settings.json"
   [[ -f "$settings" ]] || echo '{}' > "$settings"
   if ! command -v jq >/dev/null; then
-    echo "WARN: jq not found - skipping user settings merge"
-    return 0
+    echo "ERROR: jq is required to write Oracle VSCodium settings" >&2
+    return 1
   fi
   local tab="$ROOT/connectors/ide/agent-tab.sh"
   local merged
@@ -149,8 +222,8 @@ update_user_config() {
         }
       })
     }' "$settings")"; then
-    echo "WARN: could not parse existing settings.json - leaving it untouched"
-    return 0
+    echo "ERROR: Oracle VSCodium settings are malformed" >&2
+    return 1
   fi
   printf '%s\n' "$merged" | atomic_from_stdin "$settings"
   echo "==> merged VSCodium user settings (agent-tab profiles, telemetry off)"
@@ -189,7 +262,12 @@ EOF
 
 case "${1:-launch}" in
   install)
-    command -v codium >/dev/null || { echo "==> brew install --cask vscodium"; brew install --cask vscodium; }
+    echo "==> installing VSCodium from policy-bound offline export"
+    install_codium_from_cache
+    [[ -x "$CODIUM_BIN" ]] || {
+      echo "ERROR: cached VSCodium install did not provide the codium CLI" >&2
+      exit 1
+    }
     mkdir -p "$VSIX_DIR"
     if [[ "$(uname -m)" == "x86_64" ]]; then
       continue_id="continue-vsix-darwin-x64"
@@ -199,18 +277,23 @@ case "${1:-launch}" in
       kilo_id="kilo-vsix-darwin-arm64"
     fi
     # migration: Roo Code was discontinued (May 2026) - replace it with Kilo
-    codium --uninstall-extension RooVeterinaryInc.roo-cline >/dev/null 2>&1 || true
+    "$CODIUM_BIN" --user-data-dir "$USER_DATA_DIR" \
+      --extensions-dir "$EXTENSIONS_DIR" \
+      --uninstall-extension RooVeterinaryInc.roo-cline >/dev/null 2>&1 || true
     cont="$(artifact_path "$continue_id" "$CONTINUE_VSIX_VERSION")"
     kilo="$(artifact_path "$kilo_id" "$KILO_VSIX_VERSION")"
-    codium --install-extension "$cont" --force
-    codium --install-extension "$kilo" --force
+    "$CODIUM_BIN" --user-data-dir "$USER_DATA_DIR" \
+      --extensions-dir "$EXTENSIONS_DIR" --install-extension "$cont" --force
+    "$CODIUM_BIN" --user-data-dir "$USER_DATA_DIR" \
+      --extensions-dir "$EXTENSIONS_DIR" --install-extension "$kilo" --force
     install_oracle_agents_extension
     graft_ripgrep
     bash "$ROOT/connectors/ide/sync-models.sh"
     update_user_config
+    register_ide_ownership
     echo
     echo "IDE ready. Models are auto-detected on every launch; Kilo Code reads"
-    echo "its generated config from ~/.config/kilo/kilo.jsonc (local provider only)."
+    echo "its generated config from state/generated/kilo/kilo.jsonc (local provider only)."
     echo "Agent tabs: Cmd+Shift+A (Claude Code), Cmd+Shift+Alt+A (worktree),"
     echo "Cmd+Alt+O (OpenCode) - or the terminal '+' dropdown, 'Oracle Agent' profiles"
     echo "(Claude Code, OpenCode, Kilo Code)."
@@ -220,11 +303,15 @@ case "${1:-launch}" in
     exec bash "$ROOT/connectors/ide/sync-models.sh"
     ;;
   launch)
-    command -v codium >/dev/null || { echo "IDE not installed — run: bash connectors/ide/setup-ide.sh install"; exit 1; }
-    # refresh model detection + profile paths on every launch (best effort)
-    bash "$ROOT/connectors/ide/sync-models.sh" || true
-    update_user_config || true
-    exec codium "$ROOT"
+    [[ -x "$CODIUM_BIN" ]] || { echo "IDE not installed - run: bash connectors/ide/setup-ide.sh install"; exit 1; }
+    # Refresh model detection + profile paths before selecting generated configs.
+    bash "$ROOT/connectors/ide/sync-models.sh"
+    export CONTINUE_GLOBAL_DIR="$ROOT/state/generated/continue"
+    export KILO_CONFIG="$ROOT/state/generated/kilo/kilo.jsonc"
+    export OPENCODE_CONFIG="$KILO_CONFIG"
+    update_user_config
+    exec "$CODIUM_BIN" --user-data-dir "$USER_DATA_DIR" \
+      --extensions-dir "$EXTENSIONS_DIR" "$ROOT"
     ;;
   *) echo "usage: setup-ide.sh {install|sync|launch}"; exit 1 ;;
 esac

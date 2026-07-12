@@ -104,7 +104,10 @@ only; publishing requires `bootstrap/release.ps1 -Version vX.Y.Z -Publish`.
 
 For offline transfer, `make dist VERSION=vX.Y.Z` produces checksummed source
 archives. Exported online dependencies live separately under
-`incoming/dependency-cache/`; carry that cache with the source archive. A plain
+`incoming/dependency-cache/`; carry that cache with the source archive. Acquisition
+records are untrusted evidence until their source identity, resolved revision, and
+digest are independently verified and promoted into `VERSIONS.lock`; reproducible
+install/release reject anything less. A plain
 `git clone` from the vault remains available for source-only transfer.
 
 ### Pre-downloading the models on Windows (optional, saves a night)
@@ -162,9 +165,9 @@ purge requires a second confirmation flag.)
 | Conductor support | `claude -p` headless | `opencode run` headless | `kilo run --auto` headless |
 
 All three engines read the same skills, subagents, conventions (`AGENTS.md`), and MCP
-connectors; Kilo additionally shares `~/.config/kilo/kilo.jsonc` with the IDE panel,
-so CLI, missions, and side panel always agree on models and permissions. Switching
-engines is a per-session decision, not a migration.
+connectors. Kilo's CLI and IDE panel explicitly select the same generated
+`state/generated/kilo/kilo.jsonc`, so they agree without replacing a user's Kilo
+configuration. Switching engines is a per-session decision, not a migration.
 
 ## Local git vault (the ecosystem's own "origin" — on every node)
 
@@ -247,8 +250,9 @@ to the ecosystem through its real interfaces:
 - **Models** — llama-swap health + resident/running models over localhost.
 - **Vault** — repository inventory and this repo's sync currency.
 
-First run builds it (`brew install rust` + `cargo build --release`, once); after
-that it's a native binary. The desktop-shortcut menu has it as option `0`.
+First run builds it with the separately provisioned, pinned Rust toolchain
+(`cargo build --release`, once); after that it is a native binary. The
+desktop-shortcut menu has it as option `0`.
 
 ## Supporting UIs (all localhost)
 
@@ -259,8 +263,9 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
   terminal — the maintained successor to the discontinued Roo Code, configured
   local-provider-only with telemetry and session sharing disabled) — all pointed
   at llama-swap, so every keystroke of AI runs on local models. `oracle ide
-  install` sets it up (extensions from open-vsx, configs generated, updates and
-  telemetry off); `oracle ide` opens the repo.
+  install` sets it up from policy-bound cache exports in repo-owned application,
+  extension, and user-data directories (configs generated, updates and telemetry
+  off); `oracle ide` opens the repo without modifying canonical user settings.
 - **Parallel agent tabs** — `Cmd+Shift+A` (`Ctrl+Shift+A` on Windows) opens a full
   engine session (Claude Code) as an editor tab; open as many as you want, side by
   side, like Cursor's agent tabs. `Cmd+Shift+Alt+A` opens the agent in its **own git
@@ -270,7 +275,8 @@ that it's a native binary. The desktop-shortcut menu has it as option `0`.
   Also available from the terminal `+` dropdown ("Oracle Agent" profiles).
 - **Model auto-detection** — every IDE launch runs `sync-models`, which asks the
   serving layer (or scans `models/`) for what's actually installed, then rewires
-  Continue, Kilo Code (generated `~/.config/kilo/kilo.jsonc`), the engine tier maps
+  Continue and Kilo Code through explicitly selected files under `state/generated/`,
+  plus the engine tier maps
   (`serving/tiers.env`), and the opus/sonnet/haiku aliases to models that exist on
   this machine. Download a new model and it shows up everywhere on the next launch.
 - **`oracle agents-ui`** (optional) — the **orchestration viewer**: a vendored,
@@ -331,8 +337,8 @@ Full detail in [`docs/SECURITY.md`](docs/SECURITY.md). In brief:
 - Network touches the machine in exactly two ways after bootstrap: envoy windows
   (fetch-only, allowlisted, quarantined, provenance-tracked) — and nothing else.
 - Network acquisition is an explicit export/model-download phase. Installers consume
-  the hashed `incoming/dependency-cache/`, exact package locks, and recorded model
-  revisions; `make verify` proves the resulting stack works offline.
+  only a policy-bound `incoming/dependency-cache/`, exact package locks, and trusted
+  model revisions; `make verify` proves the resulting stack works offline.
 
 ## Model ensemble (defaults, editable in `serving/models.manifest`)
 

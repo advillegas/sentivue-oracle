@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ResolvedVersion,
     [string]$ExpectedSha256,
     [string]$CacheDir,
-    [string]$Root
+    [string]$Root,
+    [switch]$Trusted
 )
 
 # This is the only lifecycle entry point that fetches dependency bytes. Every
@@ -50,6 +51,11 @@ $Arguments += @(
 )
 if ($ExpectedSha256) {
     $Arguments += @("--expected-sha256", $ExpectedSha256)
+}
+if ($Trusted) {
+    $Arguments += @("--trusted", "--root", $Root)
+} else {
+    Write-Warning "recording untrusted acquisition evidence; release/install will reject it"
 }
 
 & $Python.Source @Arguments

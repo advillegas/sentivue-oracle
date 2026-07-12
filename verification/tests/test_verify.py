@@ -35,6 +35,7 @@ from verification.verify import (
     check_powershell,
     check_python,
     check_secrets,
+    check_uv_lock,
     make_run_id,
     write_reports,
 )
@@ -126,6 +127,45 @@ def isolated_checkpoint_env(root: Path) -> dict[str, str]:
             env.pop(name)
     env["ORACLE_ROOT"] = str(root)
     return env
+
+
+def test_uv_lock_gate_runs_pinned_tool_and_lock_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put(tmp_path, "VERSIONS.lock", "UV_VERSION=0.11.26\n")
+    put(tmp_path, "env/pyproject.toml", "[project]\nname='fixture'\nversion='0.0.0'\n")
+    put(tmp_path, "env/uv.lock", "version = 1\nrevision = 3\n")
+    commands: list[tuple[list[str], Path]] = []
+
+    def fake_run(
+        argv: list[str], cwd: Path, **_kwargs: object
+    ) -> CommandEvidence:
+        commands.append((argv, cwd))
+        if argv == ["uv", "--version"]:
+            return CommandEvidence(argv, 0, "uv 0.11.26\n", "", str(cwd))
+        return CommandEvidence(argv, 0, "", "", str(cwd))
+
+    monkeypatch.setattr(verify.shutil, "which", lambda name: name if name == "uv" else None)
+    monkeypatch.setattr(verify, "_run_command", fake_run)
+
+    result = check_uv_lock(tmp_path)
+
+    assert result.status == PASS
+    assert commands == [
+        (["uv", "--version"], tmp_path),
+        (["uv", "lock", "--check"], tmp_path / "env"),
+    ]
+
+
+def test_ci_runs_uv_lock_check_on_windows_and_macos() -> None:
+    workflow = (REPO_ROOT / ".github/workflows/verify.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert workflow.count("uv lock --check") == 2
+    assert workflow.count("UV_VERSION") == 2
+    assert "-split '#'" in workflow
+    assert "sub(/[[:space:]]*#.*/" in workflow
 
 
 def test_powershell_gate_rejects_non_ascii_and_parses_ast(tmp_path: Path) -> None:
@@ -477,7 +517,11 @@ def test_dependency_provenance_gate_requires_central_exact_or_declared_dynamic_p
     put(
         tmp_path,
         "VERSIONS.lock",
-        "EXACT_TOOL_VERSION=v1.2.3\nDYNAMIC_IDE_VERSION=dynamic\n",
+        "EXACT_TOOL_VERSION=v1.2.3\n"
+        "EXACT_TOOL_SHA256=unresolved\n"
+        "DYNAMIC_IDE_VERSION=dynamic\n"
+        "DYNAMIC_IDE_RESOLVED_VERSION=unresolved\n"
+        "DYNAMIC_IDE_SHA256=unresolved\n",
     )
     put(
         tmp_path,
@@ -492,13 +536,24 @@ def test_dependency_provenance_gate_requires_central_exact_or_declared_dynamic_p
                 "dependency_inputs": [
                     {
                         "id": "exact-tool",
+                        "kind": "native",
                         "version_key": "EXACT_TOOL_VERSION",
                         "allow_dynamic": False,
+                        "source": {
+                            "identity": "unresolved",
+                            "digest_key": "EXACT_TOOL_SHA256",
+                        },
                     },
                     {
                         "id": "dynamic-ide",
+                        "kind": "ide",
                         "version_key": "DYNAMIC_IDE_VERSION",
                         "allow_dynamic": True,
+                        "source": {
+                            "identity": "unresolved",
+                            "resolved_version_key": "DYNAMIC_IDE_RESOLVED_VERSION",
+                            "digest_key": "DYNAMIC_IDE_SHA256",
+                        },
                     },
                 ]
             }

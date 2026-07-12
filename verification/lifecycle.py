@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -43,6 +44,7 @@ VERSION_PATTERN = re.compile(
     r"^v?[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?$"
 )
 PORTABLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-v1"
 
 HARD_EXCLUDED_PARTS = {
     ".agent",
@@ -74,6 +76,7 @@ CREDENTIAL_NAMES = {
     "id_rsa",
 }
 PURGE_ROOTS = (
+    STATE_DIRECTORY,
     ".tools",
     "artifacts",
     "backups",
@@ -113,6 +116,7 @@ class ArtifactRecord:
     sha256: str
     size: int
     recorded_at: str
+    trust: str = "untrusted"
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -124,6 +128,7 @@ class ArtifactRecord:
             "sha256": self.sha256,
             "size": self.size,
             "recorded_at": self.recorded_at,
+            "trust": self.trust,
         }
 
     @classmethod
@@ -137,6 +142,7 @@ class ArtifactRecord:
             sha256=str(payload.get("sha256", "")),
             size=int(payload.get("size", -1)),
             recorded_at=str(payload.get("recorded_at", "")),
+            trust=str(payload.get("trust", "untrusted")),
         )
 
 
@@ -246,6 +252,18 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int | None = None) -> None
             temporary.unlink()
         except FileNotFoundError:
             pass
+
+
+def quote_command_argument(value: str, platform: str) -> str:
+    """Quote one argv element for the shell used by a llama-swap command."""
+
+    if not value or any(ord(character) < 32 for character in value):
+        raise LifecycleError("command argument is empty or contains a control character")
+    if platform == "posix":
+        return shlex.quote(value)
+    if platform == "windows":
+        return subprocess.list2cmdline([value])
+    raise LifecycleError(f"unsupported command quoting platform: {platform}")
 
 
 def atomic_write_text(path: Path, text: str, mode: int | None = None) -> None:
@@ -520,6 +538,92 @@ def _artifact_requirements(
     return sorted(requirements, key=lambda item: str(item["id"]))
 
 
+DEPENDENCY_KINDS = {
+    "container",
+    "git",
+    "ide",
+    "ide-extension",
+    "native",
+    "npm",
+    "python",
+    "toolchain",
+}
+UNRESOLVED_VALUES = {"", "dynamic", "unresolved"}
+
+
+def _source_identity(
+    source: Mapping[str, Any],
+    versions: Mapping[str, str],
+    *,
+    requested_version: str,
+    resolved_version: str,
+) -> str:
+    literal = source.get("identity")
+    key = source.get("identity_key")
+    if isinstance(literal, str):
+        identity = literal
+    elif isinstance(key, str):
+        identity = versions.get(key, "")
+    else:
+        return ""
+    return identity.replace("{version}", requested_version).replace(
+        "{resolved}", resolved_version
+    )
+
+
+def _authoritative_source_url(
+    source: Mapping[str, Any],
+    versions: Mapping[str, str],
+    *,
+    requested_version: str,
+    resolved_version: str,
+) -> str:
+    identity = _source_identity(
+        source,
+        versions,
+        requested_version=requested_version,
+        resolved_version=resolved_version,
+    )
+    template = source.get("url", identity)
+    if not isinstance(template, str):
+        return ""
+    return (
+        template.replace("{identity}", identity)
+        .replace("{version}", requested_version)
+        .replace("{resolved}", resolved_version)
+    )
+
+
+def _trusted_digest(
+    source: Mapping[str, Any], versions: Mapping[str, str]
+) -> str:
+    key = source.get("digest_key")
+    if not isinstance(key, str):
+        return ""
+    value = versions.get(key, "").lower()
+    if value.startswith("sha256:"):
+        value = value.removeprefix("sha256:")
+    return value
+
+
+def _trusted_revision(
+    source: Mapping[str, Any], versions: Mapping[str, str]
+) -> str:
+    key = source.get("revision_key")
+    return versions.get(key, "") if isinstance(key, str) else ""
+
+
+def _trusted_resolved_version(
+    source: Mapping[str, Any],
+    versions: Mapping[str, str],
+    requested_version: str,
+) -> str:
+    key = source.get("resolved_version_key")
+    if isinstance(key, str):
+        return versions.get(key, "")
+    return requested_version
+
+
 def _dependency_policy_errors(
     versions: Mapping[str, str], policy: Mapping[str, Any]
 ) -> list[str]:
@@ -529,16 +633,37 @@ def _dependency_policy_errors(
         return ["policy dependency_inputs must be a list"]
     seen_ids: set[str] = set()
     declared_version_keys: set[str] = set()
+    trust_roots = policy.get("bootstrap_trust_roots", [])
+    if not isinstance(trust_roots, list):
+        errors.append("policy bootstrap_trust_roots must be a list")
+        trust_roots = []
+    for index, raw_trust in enumerate(trust_roots):
+        if not isinstance(raw_trust, dict):
+            errors.append(f"bootstrap_trust_roots[{index}] must be an object")
+            continue
+        trust_key = raw_trust.get("version_key")
+        if trust_key is None:
+            continue
+        if not isinstance(trust_key, str) or trust_key not in versions:
+            errors.append(
+                f"bootstrap_trust_roots[{index}] has a missing version key"
+            )
+            continue
+        declared_version_keys.add(trust_key)
+        if not _is_exact_pin(versions[trust_key]):
+            errors.append(f"{trust_key} must be an exact bootstrap trust-root pin")
     for index, raw in enumerate(raw_inputs):
         if not isinstance(raw, dict):
             errors.append(f"dependency_inputs[{index}] must be an object")
             continue
         artifact_id = raw.get("id")
+        kind = raw.get("kind")
         version_key = raw.get("version_key")
         allow_dynamic = raw.get("allow_dynamic", False)
         if (
             not isinstance(artifact_id, str)
             or not PORTABLE_ID_PATTERN.fullmatch(artifact_id)
+            or kind not in DEPENDENCY_KINDS
             or not isinstance(version_key, str)
             or not isinstance(allow_dynamic, bool)
         ):
@@ -551,10 +676,58 @@ def _dependency_policy_errors(
         value = versions.get(version_key)
         if value is None:
             errors.append(f"{artifact_id}: missing {version_key} in VERSIONS.lock")
-        elif value == "dynamic" and not allow_dynamic:
-            errors.append(f"{version_key} must be exact, not dynamic")
-        elif value != "dynamic" and not _is_exact_pin(value):
+        elif value in {"dynamic", "unresolved"} and not allow_dynamic:
+            errors.append(f"{version_key} must be exact, not {value}")
+        elif value not in {"dynamic", "unresolved"} and not _is_exact_pin(value):
             errors.append(f"{version_key} must be an exact pin")
+        source = raw.get("source")
+        if not isinstance(source, dict):
+            errors.append(f"{artifact_id}: authoritative source policy is missing")
+            continue
+        for source_key_name in (
+            "identity_key",
+            "digest_key",
+            "revision_key",
+            "resolved_version_key",
+        ):
+            source_key = source.get(source_key_name)
+            if isinstance(source_key, str):
+                declared_version_keys.add(source_key)
+        identity = source.get("identity")
+        identity_key = source.get("identity_key")
+        if (not isinstance(identity, str) or not identity) and not isinstance(
+            identity_key, str
+        ):
+            errors.append(f"{artifact_id}: authoritative source identity is missing")
+        elif isinstance(identity_key, str) and identity_key not in versions:
+            errors.append(
+                f"{artifact_id}: source identity key {identity_key} is absent from VERSIONS.lock"
+            )
+        digest_key = source.get("digest_key")
+        if not isinstance(digest_key, str):
+            errors.append(f"{artifact_id}: trusted digest key is missing")
+        elif digest_key not in versions:
+            errors.append(
+                f"{artifact_id}: trusted digest key {digest_key} is absent from VERSIONS.lock"
+            )
+        if kind == "git":
+            revision_key = source.get("revision_key")
+            if not isinstance(revision_key, str):
+                errors.append(f"{artifact_id}: trusted revision key is missing")
+            elif revision_key not in versions:
+                errors.append(
+                    f"{artifact_id}: trusted revision key {revision_key} is absent from VERSIONS.lock"
+                )
+        if value in {"dynamic", "unresolved"}:
+            resolved_key = source.get("resolved_version_key")
+            if not isinstance(resolved_key, str):
+                errors.append(
+                    f"{artifact_id}: dynamic input needs a trusted resolved-version key"
+                )
+            elif resolved_key not in versions:
+                errors.append(
+                    f"{artifact_id}: resolved-version key {resolved_key} is absent from VERSIONS.lock"
+                )
     pin_suffixes = ("_VERSION", "_PIN", "_TAG", "_IMAGE", "_NPM")
     for key in sorted(versions):
         if (
@@ -632,6 +805,18 @@ def _prepare_archive_entries(
         "source_revision": revision,
         "files": _source_manifest_entries(selected),
     }
+    protected_builder = selected_by_path.get("bootstrap/build-installers.ps1")
+    if protected_builder is not None:
+        source_provenance["protected_builder_transform"] = {
+            "id": INSTALLER_HARDENING_TRANSFORM,
+            "path": "bootstrap/build-installers.ps1",
+            "source_sha256": _sha256_bytes(protected_builder.data),
+            "required_after_protected_builder": True,
+            "reason": (
+                "The protected source remains byte-identical; release fails closed "
+                "unless its installer output is hardened after generation."
+            ),
+        }
     generated = [
         GitEntry(
             "ARTIFACTS.json",
@@ -730,6 +915,7 @@ def _write_release_metadata(
     version: str,
     revision: str,
     artifacts: Sequence[Path],
+    build_transforms: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[Path, Path]:
     provenance = output_dir / "PROVENANCE.json"
     checksums = output_dir / "SHA256SUMS"
@@ -740,6 +926,7 @@ def _write_release_metadata(
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "artifacts": _artifact_payload(artifacts),
         "builder": "verification/lifecycle.py",
+        "build_transforms": [dict(item) for item in build_transforms],
     }
     atomic_write_bytes(provenance, _json_bytes(payload))
     checksum_targets = sorted([*artifacts, provenance], key=lambda item: item.name)
@@ -854,6 +1041,10 @@ def _archive_source_names(path: Path) -> set[str]:
 def _smoke_installer(path: Path) -> None:
     if path.suffix.lower() == ".command":
         data = path.read_bytes()
+        if INSTALLER_HARDENING_TRANSFORM.encode("ascii") not in data:
+            raise LifecycleError(f"{path.name}: required build transform is missing")
+        if b"bash install || true" in data:
+            raise LifecycleError(f"{path.name}: install failures are still suppressed")
         marker = b"\n__PAYLOAD_BELOW__\n"
         position = data.find(marker)
         if position < 0:
@@ -871,6 +1062,10 @@ def _smoke_installer(path: Path) -> None:
             raise LifecycleError(f"{path.name}: embedded artifact manifest is missing")
     elif path.suffix.lower() == ".cmd":
         data = path.read_bytes()
+        if INSTALLER_HARDENING_TRANSFORM.encode("ascii") not in data:
+            raise LifecycleError(f"{path.name}: required build transform is missing")
+        if b"Set-Content -Path" in data or b"Write-Utf8NoBomAtomic" not in data:
+            raise LifecycleError(f"{path.name}: config writes are not hardened")
         marker = b"#==B64PAYLOAD==#"
         position = data.find(marker)
         if position < 0:
@@ -936,6 +1131,25 @@ def verify_release_bundle(output_dir: Path) -> ReleaseBundle:
             raise LifecycleError(f"checksum/provenance disagreement: {name}")
         assets.append(path)
 
+    installers = [
+        path for path in assets if path.suffix.lower() in {".command", ".cmd"}
+    ]
+    transforms = provenance.get("build_transforms")
+    if installers:
+        if not isinstance(transforms, list):
+            raise LifecycleError("PROVENANCE.json lacks installer build transforms")
+        transformed_names = {
+            str(item.get("artifact"))
+            for item in transforms
+            if isinstance(item, dict)
+            and item.get("id") == INSTALLER_HARDENING_TRANSFORM
+            and SHA256_PATTERN.fullmatch(str(item.get("source_sha256", "")))
+        }
+        if transformed_names != {path.name for path in installers}:
+            raise LifecycleError(
+                "PROVENANCE.json installer transform records are incomplete"
+            )
+
     source_archives = [
         path
         for path in assets
@@ -992,16 +1206,163 @@ def _find_powershell() -> str | None:
     return str(fixed) if fixed.is_file() else None
 
 
+def _harden_built_installer(path: Path) -> dict[str, Any]:
+    """Apply the required post-build transform without changing the protected source."""
+
+    data = path.read_bytes()
+    marker_line = f"ORACLE_BUILD_TRANSFORM={INSTALLER_HARDENING_TRANSFORM}"
+    if path.suffix.lower() == ".command":
+        payload_marker = b"\n__PAYLOAD_BELOW__\n"
+        if data.count(payload_marker) != 1:
+            raise LifecycleError("protected installer output lacks one macOS payload marker")
+        header, payload = data.split(payload_marker, 1)
+        try:
+            text = header.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise LifecycleError("protected installer header is not UTF-8") from exc
+        if text.count("bash install || true") != 1:
+            raise LifecycleError(
+                "protected installer macOS failure-suppression pattern changed"
+            )
+        text = text.replace("bash install || true", "bash install")
+        if not text.startswith("#!/bin/bash\n"):
+            raise LifecycleError("protected installer macOS shebang changed")
+        text = text.replace(
+            "#!/bin/bash\n",
+            f"#!/bin/bash\n# {marker_line}\n",
+            1,
+        )
+        atomic_write_bytes(
+            path, text.encode("utf-8") + payload_marker + payload, mode=0o755
+        )
+        return {
+            "id": INSTALLER_HARDENING_TRANSFORM,
+            "artifact": path.name,
+            "changes": ["propagate-install-failure", "utf8-header"],
+        }
+    if path.suffix.lower() != ".cmd":
+        raise LifecycleError(f"protected installer has an unexpected format: {path.name}")
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise LifecycleError("protected installer Windows output is not ASCII") from exc
+    if text.count("#==B64PAYLOAD==#") != 1:
+        raise LifecycleError("protected installer output lacks one Windows payload marker")
+    if text.count('$ErrorActionPreference = "Stop"') != 1:
+        raise LifecycleError("protected installer PowerShell preamble changed")
+    if text.count("Set-Content -Path") != 2:
+        raise LifecycleError("protected installer config-write patterns changed")
+    helper = r'''
+# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-v1
+function Write-Utf8NoBomAtomic([string]$Path, [string]$Text) {
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $temporary = Join-Path $parent (".{0}.{1}.tmp" -f [IO.Path]::GetFileName($Path), [Guid]::NewGuid().ToString("N"))
+    try {
+        [IO.File]::WriteAllText($temporary, $Text, (New-Object Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+'''.strip("\n")
+    text = text.replace(
+        '$ErrorActionPreference = "Stop"',
+        '$ErrorActionPreference = "Stop"\n' + helper,
+        1,
+    )
+    profile_write = (
+        'Set-Content -Path (Join-Path $dest "serving\\models.profile") '
+        '-Value (($sel.Models -split ",") -join "`n")'
+    )
+    tiers_write = (
+        'Set-Content -Path (Join-Path $dest "serving\\tiers.env") '
+        '-Value @("OPUS_MODEL=$($sel.Opus)", "SONNET_MODEL=$($sel.Sonnet)", '
+        '"HAIKU_MODEL=$($sel.Haiku)")'
+    )
+    if text.count(profile_write) != 1 or text.count(tiers_write) != 1:
+        raise LifecycleError("protected installer exact config-write patterns changed")
+    text = text.replace(
+        profile_write,
+        (
+            'Write-Utf8NoBomAtomic (Join-Path $dest "serving\\models.profile") '
+            '((($sel.Models -split ",") -join "`n") + "`n")'
+        ),
+        1,
+    )
+    text = text.replace(
+        tiers_write,
+        (
+            'Write-Utf8NoBomAtomic (Join-Path $dest "serving\\tiers.env") '
+            '((@("OPUS_MODEL=$($sel.Opus)", "SONNET_MODEL=$($sel.Sonnet)", '
+            '"HAIKU_MODEL=$($sel.Haiku)") -join "`n") + "`n")'
+        ),
+        1,
+    )
+    model_acquisition = (
+        '& powershell -NoProfile -ExecutionPolicy Bypass -File '
+        '(Join-Path $dest "bootstrap\\download-models.ps1")'
+    )
+    if text.count(model_acquisition) != 1:
+        raise LifecycleError("protected installer model-acquisition pattern changed")
+    text = text.replace(
+        model_acquisition,
+        (
+            'throw "Model acquisition is a separate explicit operation; '
+            'import a policy-bound cache before offline installation."'
+        ),
+        1,
+    )
+    checked_commands = (
+        (
+            '& powershell -NoProfile -ExecutionPolicy Bypass -File '
+            '(Join-Path $dest "connectors\\ide\\setup-ide.ps1") install'
+        ),
+        (
+            '& powershell -NoProfile -ExecutionPolicy Bypass -File '
+            '(Join-Path $dest "bin\\oracle.ps1") setup'
+        ),
+    )
+    for command in checked_commands:
+        if text.count(command) != 1:
+            raise LifecycleError("protected installer child-command pattern changed")
+        text = text.replace(
+            command,
+            command
+            + '\n        if ($LASTEXITCODE -ne 0) { throw "installer child command failed: $LASTEXITCODE" }',
+            1,
+        )
+    if "Set-Content -Path" in text:
+        raise LifecycleError("protected installer still has ambiguous config writes")
+    atomic_write_bytes(path, text.encode("ascii"))
+    return {
+        "id": INSTALLER_HARDENING_TRANSFORM,
+        "artifact": path.name,
+        "changes": [
+            "atomic-utf8-no-bom-config",
+            "separate-online-acquisition",
+            "propagate-child-failures",
+        ],
+    }
+
+
 def _build_installers(
     root: Path,
     revision: str,
     output_dir: Path,
     version: str,
-) -> list[Path]:
+) -> tuple[list[Path], list[dict[str, Any]]]:
     executable = _find_powershell()
     if not executable:
         raise LifecycleError("PowerShell is required to build both installer formats")
-    entries, _requirements, _provenance = _prepare_archive_entries(root, revision)
+    entries, _requirements, source_provenance = _prepare_archive_entries(
+        root, revision
+    )
+    transform_disclosure = source_provenance.get("protected_builder_transform")
+    if not isinstance(transform_disclosure, dict):
+        raise LifecycleError(
+            "immutable source does not disclose the protected installer transform"
+        )
     with tempfile.TemporaryDirectory(prefix="oracle immutable release ") as temporary:
         stage = Path(temporary) / "source with spaces"
         stage.mkdir()
@@ -1049,6 +1410,7 @@ def _build_installers(
             f"SentiVue-Oracle-Setup-{version}.cmd",
         )
         results: list[Path] = []
+        transforms: list[dict[str, Any]] = []
         for name in names:
             source = built / name
             if not source.is_file():
@@ -1057,8 +1419,33 @@ def _build_installers(
             if target.exists():
                 raise LifecycleError(f"refusing to overwrite existing artifact: {target}")
             shutil.copyfile(source, target)
+            transform = _harden_built_installer(target)
+            transform["source_path"] = transform_disclosure["path"]
+            transform["source_sha256"] = transform_disclosure["source_sha256"]
+            transforms.append(transform)
             results.append(target)
-        return results
+        return results, transforms
+
+
+def _require_release_inputs_match_revision(root: Path, revision: str) -> None:
+    for relative in (
+        "VERSIONS.lock",
+        "bootstrap/build-installers.ps1",
+        "verification/policy.json",
+        "serving/models.manifest",
+        "env/pyproject.toml",
+        "env/uv.lock",
+    ):
+        path = root / relative
+        committed = _git_blob(root, revision, relative)
+        try:
+            working = path.read_bytes()
+        except OSError as exc:
+            raise LifecycleError(f"release authority input is unreadable: {relative}") from exc
+        if working != committed:
+            raise LifecycleError(
+                f"release authority input differs from immutable revision: {relative}"
+            )
 
 
 def preflight_release(
@@ -1069,8 +1456,50 @@ def preflight_release(
 ) -> ReleaseBundle:
     """Build and smoke-validate all local assets before publication is possible."""
 
+    root = root.resolve()
+    resolved_revision = _resolve_revision(root, revision)
+    current_revision = _current_revision(root)
+    if resolved_revision != current_revision:
+        raise LifecycleError(
+            "release dependency policy must be validated from the checked-out revision"
+        )
+    _require_release_inputs_match_revision(root, resolved_revision)
+    dependency_cache = root / "incoming" / "dependency-cache"
+    dependency_manifest = dependency_cache / "manifest.json"
+    dependency_errors = validate_dependency_inputs(
+        root,
+        artifact_manifest=(
+            dependency_manifest if dependency_manifest.is_file() else None
+        ),
+        cache_root=dependency_cache,
+        reproducible=True,
+    )
+    if dependency_errors:
+        raise LifecycleError(
+            "release requires policy-bound reproducible dependencies: "
+            + "; ".join(dependency_errors)
+        )
+    output_dir = output_dir.resolve()
+    existing_checksums = output_dir / "SHA256SUMS"
+    existing_provenance = output_dir / "PROVENANCE.json"
+    if existing_checksums.is_file() and existing_provenance.is_file():
+        existing = verify_release_bundle(output_dir)
+        installer_suffixes = {
+            path.suffix.lower()
+            for path in existing.archives
+            if path.suffix.lower() in {".command", ".cmd"}
+        }
+        if (
+            existing.version != version
+            or existing.revision != resolved_revision
+            or installer_suffixes != {".command", ".cmd"}
+        ):
+            raise LifecycleError(
+                "existing release output is not the complete requested bundle"
+            )
+        return existing
     source_bundle = build_source_archives(root, revision, output_dir, version)
-    installers = _build_installers(
+    installers, transforms = _build_installers(
         root.resolve(),
         source_bundle.revision,
         source_bundle.output_dir,
@@ -1082,6 +1511,7 @@ def preflight_release(
         version,
         source_bundle.revision,
         artifacts,
+        build_transforms=transforms,
     )
     bundle = ReleaseBundle(
         version=version,
@@ -1097,14 +1527,16 @@ def preflight_release(
     return bundle
 
 
-def _require_absent_release_version(root: Path, version: str) -> None:
-    local = _run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/tags/{version}"],
-        cwd=root,
+def _existing_tag_targets(
+    root: Path, version: str
+) -> tuple[str | None, str | None]:
+    local_result = _run(
+        ["git", "rev-parse", f"refs/tags/{version}^{{commit}}"], cwd=root
     )
-    if local.returncode == 0:
-        raise LifecycleError(f"release version already exists locally: {version}")
-    remote = _run(
+    local = str(local_result.stdout).strip() if local_result.returncode == 0 else None
+    if local is not None and not COMMIT_PATTERN.fullmatch(local):
+        raise LifecycleError(f"local release tag is malformed: {version}")
+    remote_result = _run(
         [
             "git",
             "ls-remote",
@@ -1115,11 +1547,42 @@ def _require_absent_release_version(root: Path, version: str) -> None:
         ],
         cwd=root,
     )
-    if remote.returncode == 0:
-        raise LifecycleError(f"release version already exists remotely: {version}")
-    release = _run(["gh", "release", "view", version], cwd=root)
-    if release.returncode == 0:
-        raise LifecycleError(f"release version already exists: {version}")
+    remote: str | None = None
+    if remote_result.returncode == 0:
+        first_line = str(remote_result.stdout).splitlines()[0] if remote_result.stdout else ""
+        remote = first_line.split(maxsplit=1)[0]
+        if not COMMIT_PATTERN.fullmatch(remote):
+            raise LifecycleError(f"remote release tag is malformed: {version}")
+    return local, remote
+
+
+def _existing_release_assets(
+    root: Path, version: str
+) -> dict[str, str] | None:
+    result = _run(
+        ["gh", "release", "view", version, "--json", "tagName,assets"],
+        cwd=root,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(str(result.stdout))
+    except json.JSONDecodeError as exc:
+        raise LifecycleError("existing release metadata is invalid") from exc
+    if not isinstance(payload, dict) or payload.get("tagName") != version:
+        raise LifecycleError("existing release is not bound to the requested tag")
+    raw_assets = payload.get("assets")
+    if not isinstance(raw_assets, list):
+        raise LifecycleError("existing release asset metadata is invalid")
+    assets: dict[str, str] = {}
+    for raw in raw_assets:
+        if not isinstance(raw, dict):
+            raise LifecycleError("existing release has a malformed asset")
+        name = validate_relative_path(str(raw.get("name", "")))
+        if "/" in name or name in assets:
+            raise LifecycleError("existing release has an unsafe or duplicate asset")
+        assets[name] = str(raw.get("digest", ""))
+    return assets
 
 
 def publish_release(
@@ -1134,19 +1597,51 @@ def publish_release(
     _validate_version(version)
     bundle = preflight_release(root, version, output_dir, revision)
     verify_release_bundle(bundle.output_dir)
-    _require_absent_release_version(root, version)
+    local_tag, remote_tag = _existing_tag_targets(root, version)
+    for location, target in (("local", local_tag), ("remote", remote_tag)):
+        if target is not None and target != bundle.revision:
+            raise LifecycleError(
+                f"{location} release tag {version} points to a different revision"
+            )
+    release_assets = _existing_release_assets(root, version)
+    if release_assets is not None and remote_tag is None:
+        raise LifecycleError("existing release has no matching remote tag")
+    release_paths = [
+        *bundle.archives,
+        bundle.checksums,
+        bundle.provenance,
+    ]
+    expected_assets = {path.name: _sha256_file(path) for path in release_paths}
+    missing_assets: list[Path] = []
+    if release_assets is not None:
+        unexpected = set(release_assets) - set(expected_assets)
+        if unexpected:
+            raise LifecycleError(
+                "existing release has unexpected immutable assets: "
+                + ", ".join(sorted(unexpected))
+            )
+        for path in release_paths:
+            digest = release_assets.get(path.name)
+            if digest is None:
+                missing_assets.append(path)
+            elif digest != f"sha256:{expected_assets[path.name]}":
+                raise LifecycleError(
+                    f"existing release asset digest differs: {path.name}"
+                )
 
-    commands = [
-        ["git", "tag", version, bundle.revision],
-        ["git", "push", "origin", f"refs/tags/{version}"],
-        [
+    commands: list[list[str]] = []
+    if local_tag is None:
+        commands.append(["git", "tag", version, bundle.revision])
+    if remote_tag is None:
+        commands.append(["git", "push", "origin", f"refs/tags/{version}"])
+    if release_assets is None:
+        commands.append(
+            [
             "gh",
             "release",
             "create",
             version,
-            *[str(path) for path in bundle.archives],
-            str(bundle.checksums),
-            str(bundle.provenance),
+            *[str(path) for path in release_paths],
             "--title",
             f"SentiVue Oracle {version}",
             "--notes",
@@ -1154,8 +1649,12 @@ def publish_release(
                 f"Immutable release from {bundle.revision}. "
                 "Verify every asset with SHA256SUMS."
             ),
-        ],
-    ]
+            ]
+        )
+    elif missing_assets:
+        commands.append(
+            ["gh", "release", "upload", version, *[str(path) for path in missing_assets]]
+        )
     for command in commands:
         completed = _run(command, cwd=root)
         if completed.returncode != 0:
@@ -1168,7 +1667,14 @@ def publish_release(
 
 def _is_exact_pin(value: str) -> bool:
     lowered = value.strip().lower()
-    if not lowered or lowered in {"dynamic", "head", "latest", "main", "master"}:
+    if not lowered or lowered in {
+        "dynamic",
+        "head",
+        "latest",
+        "main",
+        "master",
+        "unresolved",
+    }:
         return False
     if re.fullmatch(
         r"[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[A-Za-z0-9,._-]+\])?"
@@ -1229,6 +1735,8 @@ def validate_artifact_manifest(
             errors.append(f"{artifact_id}: invalid SHA-256")
         if record.size < 0:
             errors.append(f"{artifact_id}: invalid size")
+        if record.trust not in {"policy-bound", "untrusted"}:
+            errors.append(f"{artifact_id}: invalid trust classification")
         if not _is_exact_pin(record.resolved_version):
             errors.append(f"{artifact_id}: resolved version is not exact")
         path = cache_root / Path(*PurePosixPath(relative).parts)
@@ -1249,6 +1757,8 @@ def resolve_cached_artifact(
     *,
     expected_version: str | None = None,
     expected_requested_version: str | None = None,
+    policy_root: Path | None = None,
+    require_policy_bound: bool = False,
 ) -> Path:
     """Return one verified cache path or fail before a consumer can use it."""
 
@@ -1262,6 +1772,21 @@ def resolve_cached_artifact(
     record = records.get(artifact_id)
     if record is None:
         raise LifecycleError(f"artifact is absent from export manifest: {artifact_id}")
+    if require_policy_bound:
+        if policy_root is None:
+            raise LifecycleError(
+                "policy-bound artifact resolution requires a policy root"
+            )
+        policy_errors = validate_dependency_inputs(
+            policy_root,
+            artifact_manifest=manifest_path,
+            cache_root=cache_root,
+            reproducible=True,
+            artifact_ids={artifact_id},
+            include_models=artifact_id.startswith("model:"),
+        )
+        if policy_errors:
+            raise LifecycleError("; ".join(policy_errors))
     if (
         expected_requested_version is not None
         and record.requested_version != expected_requested_version
@@ -1288,6 +1813,7 @@ def record_cached_artifact(
     source_url: str,
     requested_version: str,
     resolved_version: str,
+    trust: str = "untrusted",
 ) -> ArtifactRecord:
     """Copy a locally obtained artifact into a hashed, auditable export cache."""
 
@@ -1299,6 +1825,8 @@ def record_cached_artifact(
         raise LifecycleError(f"artifact source is not a file: {source_file}")
     if not _is_exact_pin(resolved_version):
         raise LifecycleError("resolved artifact version must be exact")
+    if trust not in {"policy-bound", "untrusted"}:
+        raise LifecycleError("artifact trust classification is invalid")
     parsed = urllib.parse.urlparse(source_url)
     if parsed.scheme not in {"file", "https"}:
         raise LifecycleError("artifact source URL must use file or https")
@@ -1317,6 +1845,7 @@ def record_cached_artifact(
         sha256=_sha256_file(destination),
         size=destination.stat().st_size,
         recorded_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        trust=trust,
     )
     manifest_path = cache_root / "manifest.json"
     records, errors = _load_artifact_records(
@@ -1339,6 +1868,100 @@ def record_cached_artifact(
     return record
 
 
+def _load_dependency_policy(
+    root: Path,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    try:
+        versions, errors = _parse_versions_text(
+            (root / "VERSIONS.lock").read_text(encoding="utf-8")
+        )
+        if errors:
+            raise LifecycleError("; ".join(errors))
+        policy = json.loads(
+            (root / "verification" / "policy.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError(f"dependency policy is unreadable: {exc}") from exc
+    if not isinstance(policy, dict):
+        raise LifecycleError("dependency policy must be an object")
+    policy_errors = _dependency_policy_errors(versions, policy)
+    if policy_errors:
+        raise LifecycleError("; ".join(policy_errors))
+    return versions, policy
+
+
+def _trusted_export_digest(
+    root: Path,
+    *,
+    artifact_id: str,
+    source_url: str,
+    requested_version: str,
+    resolved_version: str,
+) -> str:
+    versions, policy = _load_dependency_policy(root.resolve())
+    raw_inputs = policy.get("dependency_inputs", [])
+    raw = next(
+        (
+            item
+            for item in raw_inputs
+            if isinstance(item, dict) and item.get("id") == artifact_id
+        ),
+        None,
+    )
+    if raw is None:
+        raise LifecycleError(f"{artifact_id}: absent from authoritative dependency policy")
+    version_key = str(raw["version_key"])
+    locked_request = versions.get(version_key, "")
+    if requested_version != locked_request:
+        raise LifecycleError(
+            f"{artifact_id}: requested version differs from authoritative {version_key}"
+        )
+    source = raw["source"]
+    assert isinstance(source, dict)
+    trusted_resolved = _trusted_resolved_version(
+        source, versions, requested_version
+    )
+    if raw.get("kind") == "git":
+        trusted_resolved = _trusted_revision(source, versions)
+        if not COMMIT_PATTERN.fullmatch(trusted_resolved):
+            raise LifecycleError(
+                f"{artifact_id}: immutable trusted revision is unresolved"
+            )
+    elif not _is_exact_pin(trusted_resolved):
+        raise LifecycleError(
+            f"{artifact_id}: trusted resolved version is unresolved"
+        )
+    if resolved_version != trusted_resolved:
+        raise LifecycleError(
+            f"{artifact_id}: resolved version differs from authoritative policy"
+        )
+    identity = _source_identity(
+        source,
+        versions,
+        requested_version=requested_version,
+        resolved_version=resolved_version,
+    )
+    expected_url = _authoritative_source_url(
+        source,
+        versions,
+        requested_version=requested_version,
+        resolved_version=resolved_version,
+    )
+    if (
+        not identity
+        or identity in UNRESOLVED_VALUES
+        or not expected_url
+        or source_url != expected_url
+    ):
+        raise LifecycleError(
+            f"{artifact_id}: URL differs from authoritative source identity"
+        )
+    digest = _trusted_digest(source, versions)
+    if not SHA256_PATTERN.fullmatch(digest):
+        raise LifecycleError(f"{artifact_id}: immutable trusted digest is unresolved")
+    return digest
+
+
 def export_artifact(
     cache_root: Path,
     *,
@@ -1347,8 +1970,10 @@ def export_artifact(
     requested_version: str,
     resolved_version: str,
     expected_sha256: str | None = None,
+    policy_root: Path | None = None,
+    trusted: bool = False,
 ) -> ArtifactRecord:
-    """Fetch one declared artifact into the explicit, hashed export cache."""
+    """Acquire one artifact, optionally binding it to committed source policy."""
 
     parsed = urllib.parse.urlparse(source_url)
     if parsed.scheme not in {"file", "https"}:
@@ -1359,6 +1984,24 @@ def export_artifact(
         expected_sha256.lower()
     ):
         raise LifecycleError("expected SHA-256 must be 64 hexadecimal characters")
+    policy_digest: str | None = None
+    if trusted:
+        if policy_root is None:
+            raise LifecycleError("trusted export requires an authoritative policy root")
+        policy_digest = _trusted_export_digest(
+            policy_root,
+            artifact_id=artifact_id,
+            source_url=source_url,
+            requested_version=requested_version,
+            resolved_version=resolved_version,
+        )
+        if (
+            expected_sha256 is not None
+            and expected_sha256.lower() != policy_digest
+        ):
+            raise LifecycleError(
+                "caller-supplied hash differs from authoritative trusted digest"
+            )
     filename = Path(urllib.parse.unquote(parsed.path)).name or "artifact.bin"
     if any(ord(character) < 32 for character in filename):
         raise LifecycleError("artifact URL contains an unsafe file name")
@@ -1381,9 +2024,12 @@ def export_artifact(
             output.flush()
             os.fsync(output.fileno())
         actual = _sha256_file(temporary)
-        if expected_sha256 is not None and actual != expected_sha256.lower():
+        comparison_digest = policy_digest or (
+            expected_sha256.lower() if expected_sha256 is not None else None
+        )
+        if comparison_digest is not None and actual != comparison_digest:
             raise LifecycleError(
-                f"expected SHA-256 {expected_sha256.lower()}, downloaded {actual}"
+                f"expected SHA-256 {comparison_digest}, downloaded {actual}"
             )
         return record_cached_artifact(
             cache_root,
@@ -1392,6 +2038,7 @@ def export_artifact(
             source_url=source_url,
             requested_version=requested_version,
             resolved_version=resolved_version,
+            trust="policy-bound" if trusted else "untrusted",
         )
 
 
@@ -1446,6 +2093,20 @@ def record_model_snapshot(
         "resolved_revision": resolved_revision,
         "files": files,
     }
+    trust = "untrusted"
+    try:
+        declared_models, declared_errors = _parse_models_text(
+            (root / "serving" / "models.manifest").read_text(encoding="utf-8")
+        )
+        if not declared_errors and any(
+            item["name"] == model_name
+            and item["repository"] == repository
+            and item["revision"] == resolved_revision
+            for item in declared_models
+        ):
+            trust = "policy-bound"
+    except (OSError, UnicodeDecodeError):
+        pass
     cache_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".model-snapshot-", dir=cache_root
@@ -1461,6 +2122,7 @@ def record_model_snapshot(
             ),
             requested_version=requested_revision,
             resolved_version=resolved_revision,
+            trust=trust,
         )
 
 
@@ -1539,6 +2201,8 @@ def validate_dependency_inputs(
     artifact_manifest: Path | None = None,
     cache_root: Path | None = None,
     reproducible: bool = False,
+    artifact_ids: set[str] | None = None,
+    include_models: bool = True,
 ) -> list[str]:
     """Validate central pins and, in reproducible mode, exact cached artifacts."""
 
@@ -1607,32 +2271,118 @@ def validate_dependency_inputs(
             or not isinstance(version_key, str)
         ):
             continue
+        if artifact_ids is not None and artifact_id not in artifact_ids:
+            continue
         value = versions.get(version_key)
         if value is None:
             continue
-        dynamic = value == "dynamic"
+        dynamic = value in {"dynamic", "unresolved"}
         if reproducible:
+            source = raw.get("source")
+            if not isinstance(source, dict):
+                continue
+            policy_digest = _trusted_digest(source, versions)
+            if not SHA256_PATTERN.fullmatch(policy_digest):
+                errors.append(
+                    f"{artifact_id}: immutable trusted digest is unresolved"
+                )
+            if raw.get("kind") == "git" and not COMMIT_PATTERN.fullmatch(
+                _trusted_revision(source, versions)
+            ):
+                errors.append(
+                    f"{artifact_id}: immutable trusted revision is unresolved"
+                )
             record = records.get(artifact_id)
             if record is None:
                 errors.append(f"{artifact_id}: reproducible mode needs a resolved artifact")
-            elif dynamic and record.requested_version != "dynamic":
-                errors.append(f"{artifact_id}: resolution did not record dynamic input")
+                continue
+            if record.trust != "policy-bound":
+                errors.append(
+                    f"{artifact_id}: untrusted acquisition evidence is not reproducible"
+                )
+            expected_digest = policy_digest
+            if not SHA256_PATTERN.fullmatch(expected_digest):
+                errors.append(
+                    f"{artifact_id}: immutable trusted digest is unresolved"
+                )
+            elif record.sha256 != expected_digest:
+                errors.append(
+                    f"{artifact_id}: cached content differs from trusted digest"
+                )
+            kind = raw.get("kind")
+            expected_resolved = _trusted_resolved_version(source, versions, value)
+            if kind == "git":
+                expected_resolved = _trusted_revision(source, versions)
+                if not COMMIT_PATTERN.fullmatch(expected_resolved):
+                    errors.append(
+                        f"{artifact_id}: immutable trusted revision is unresolved"
+                    )
+            elif not _is_exact_pin(expected_resolved):
+                errors.append(
+                    f"{artifact_id}: trusted resolved version is unresolved"
+                )
+            if (
+                _is_exact_pin(expected_resolved)
+                and record.resolved_version != expected_resolved
+            ):
+                errors.append(
+                    f"{artifact_id}: resolved version differs from authoritative policy"
+                )
+            identity = _source_identity(
+                source,
+                versions,
+                requested_version=value,
+                resolved_version=record.resolved_version,
+            )
+            expected_url = _authoritative_source_url(
+                source,
+                versions,
+                requested_version=value,
+                resolved_version=record.resolved_version,
+            )
+            if (
+                not identity
+                or identity in UNRESOLVED_VALUES
+                or not expected_url
+                or record.source_url != expected_url
+            ):
+                errors.append(
+                    f"{artifact_id}: cached URL differs from authoritative source"
+                )
+            elif dynamic and record.requested_version != value:
+                errors.append(
+                    f"{artifact_id}: resolution did not record unresolved input"
+                )
             elif not dynamic and record.requested_version != value:
                 errors.append(f"{artifact_id}: requested version differs from {version_key}")
-            elif not dynamic and record.resolved_version != value:
+            elif (
+                not dynamic
+                and kind != "git"
+                and record.resolved_version != value
+            ):
                 errors.append(f"{artifact_id}: resolved version differs from {version_key}")
 
     for model in models:
         artifact_id = f"model:{model['name']}"
+        if not include_models or (
+            artifact_ids is not None and artifact_id not in artifact_ids
+        ):
+            continue
         revision = model["revision"]
         if reproducible:
             record = records.get(artifact_id)
+            if revision == "dynamic":
+                errors.append(
+                    f"{artifact_id}: reproducible mode needs a trusted revision in models.manifest"
+                )
             if record is None:
                 errors.append(f"{artifact_id}: reproducible mode needs a resolved artifact")
+            elif record.trust != "policy-bound":
+                errors.append(
+                    f"{artifact_id}: untrusted acquisition evidence is not reproducible"
+                )
             elif not COMMIT_PATTERN.fullmatch(record.resolved_version):
                 errors.append(f"{artifact_id}: resolved model revision is not immutable")
-            elif revision == "dynamic" and record.requested_version != "dynamic":
-                errors.append(f"{artifact_id}: resolution did not record dynamic input")
             elif revision != "dynamic" and record.requested_version != revision:
                 errors.append(f"{artifact_id}: requested revision differs from manifest")
             elif revision != "dynamic" and record.resolved_version != revision:
@@ -1653,10 +2403,8 @@ def _choose_generated_target(
     fallback: Path,
     marker: bytes,
 ) -> Path:
-    if not canonical.exists():
-        return canonical
-    if canonical.is_file() and canonical.read_bytes().startswith(marker):
-        return canonical
+    # Canonical files belong to the user, including when they do not exist yet.
+    # Oracle always owns a named sidecar and consumers select that path explicitly.
     if fallback.exists() and (
         not fallback.is_file() or not fallback.read_bytes().startswith(marker)
     ):
@@ -1676,11 +2424,11 @@ def _guard_managed_target(root: Path, home: Path, target: Path) -> None:
         cursor = base
         for part in relative.parts[:-1]:
             cursor = cursor / part
-            if cursor.is_symlink():
+            if _is_reparse_point(cursor):
                 raise LifecycleError(
                     f"refusing generated config under symbolic-link parent: {cursor}"
                 )
-        if absolute.is_symlink():
+        if _is_reparse_point(absolute):
             raise LifecycleError(
                 f"refusing to replace generated-config symbolic link: {absolute}"
             )
@@ -1767,7 +2515,9 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
         raise LifecycleError("; ".join(errors))
     ids = _detect_model_ids(root, models)
     if not ids:
-        return []
+        raise LifecycleError(
+            "no validated models detected; generated engine configuration is unavailable"
+        )
     by_name = {model["name"]: model for model in models}
     detected = [by_name[name] for name in ids if name in by_name]
     chat = [model for model in detected if model["slot"] != "embed"]
@@ -1857,11 +2607,7 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
     opencode_path = root / "state" / "generated" / "opencode" / "opencode.json"
 
     continue_marker = b"# GENERATED by SentiVue Oracle lifecycle\n"
-    continue_canonical = home / ".continue" / "config.yaml"
-    continue_fallback = home / ".continue" / "config.oracle.yaml"
-    continue_path = _choose_generated_target(
-        continue_canonical, continue_fallback, continue_marker
-    )
+    continue_path = root / "state" / "generated" / "continue" / "config.yaml"
     continue_lines = [
         continue_marker.decode("ascii").rstrip("\n"),
         "name: SentiVue Oracle",
@@ -1898,9 +2644,7 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
     continue_text = "\n".join(continue_lines) + "\n"
 
     kilo_marker = b"// GENERATED by SentiVue Oracle lifecycle\n"
-    kilo_canonical = home / ".config" / "kilo" / "kilo.jsonc"
-    kilo_fallback = home / ".config" / "kilo" / "kilo.oracle.jsonc"
-    kilo_path = _choose_generated_target(kilo_canonical, kilo_fallback, kilo_marker)
+    kilo_path = root / "state" / "generated" / "kilo" / "kilo.jsonc"
     kilo_models = {
         name: value for name, value in model_map.items()
     }
@@ -1988,6 +2732,12 @@ def _read_state(root: Path) -> dict[str, Any]:
         raise LifecycleError("install state owned_paths must be a list")
     if not isinstance(state.get("phases"), dict):
         raise LifecycleError("install state phases must be an object")
+    if "owned_services" not in state:
+        state["owned_services"] = []
+    if "pending_phase" not in state:
+        state["pending_phase"] = None
+    if not isinstance(state.get("owned_services"), list):
+        raise LifecycleError("install state owned_services must be a list")
     return state
 
 
@@ -2049,11 +2799,15 @@ def initialize_install_state(
         if previous.get("home_root") != str(home):
             raise LifecycleError("install state belongs to a different home root")
         owned_paths = previous["owned_paths"]
+        owned_services = previous["owned_services"]
         phases = previous["phases"]
+        pending_phase = previous.get("pending_phase")
         created_at = previous.get("created_at")
     else:
         owned_paths = []
+        owned_services = []
         phases = {}
+        pending_phase = None
         created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     state = {
         "schema_version": SCHEMA_VERSION,
@@ -2064,23 +2818,89 @@ def initialize_install_state(
         "created_at": created_at,
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "phases": phases,
+        "pending_phase": pending_phase,
         "owned_paths": owned_paths,
+        "owned_services": owned_services,
     }
     _write_state(root, state)
     return state
 
 
 def phase_is_current(root: Path, phase: str) -> bool:
-    state = _read_state(root.resolve())
-    return state["phases"].get(phase) == state["input_sha256"]
+    root = root.resolve()
+    state = _read_state(root)
+    phase_record = state["phases"].get(phase)
+    if isinstance(phase_record, str):
+        phase_input = phase_record
+        phase_paths = state["owned_paths"]
+    elif isinstance(phase_record, dict):
+        phase_input = phase_record.get("input_sha256")
+        phase_paths = phase_record.get("owned_paths")
+        if not isinstance(phase_paths, list):
+            return False
+    else:
+        return False
+    if phase_input != state["input_sha256"]:
+        return False
+    home = Path(str(state.get("home_root", "")))
+    try:
+        for raw in phase_paths:
+            if not isinstance(raw, dict):
+                return False
+            _scope, _relative, kind, digest, target = _owned_target(
+                root, home, raw
+            )
+            if kind == "directory":
+                if not target.is_dir() or _is_reparse_point(target):
+                    return False
+            elif kind == "symlink":
+                if not _is_reparse_point(target):
+                    return False
+                if _owned_fingerprint(target, kind) != digest:
+                    return False
+            elif not target.is_file() or _owned_fingerprint(target, kind) != digest:
+                return False
+    except (LifecycleError, OSError):
+        return False
+    return True
+
+
+def _validate_phase_name(phase: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", phase):
+        raise LifecycleError("install phase has an invalid name")
+
+
+def begin_install_phase(root: Path, phase: str) -> None:
+    """Associate subsequently registered ownership with one install phase."""
+
+    _validate_phase_name(phase)
+    root = root.resolve()
+    state = _read_state(root)
+    state["pending_phase"] = phase
+    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    _write_state(root, state)
 
 
 def mark_install_phase(root: Path, phase: str) -> None:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", phase):
-        raise LifecycleError("install phase has an invalid name")
+    _validate_phase_name(phase)
     root = root.resolve()
     state = _read_state(root)
-    state["phases"][phase] = state["input_sha256"]
+    phase_paths = [
+        item
+        for item in state["owned_paths"]
+        if isinstance(item, dict) and item.get("phase") == phase
+    ]
+    if not phase_paths and state.get("pending_phase") != phase:
+        # Direct API callers predating begin-phase retain the original behavior.
+        phase_paths = state["owned_paths"]
+    state["phases"][phase] = {
+        "input_sha256": state["input_sha256"],
+        "owned_paths": json.loads(json.dumps(phase_paths)),
+    }
+    if state.get("pending_phase") == phase:
+        state["pending_phase"] = None
     state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
         "+00:00", "Z"
     )
@@ -2108,13 +2928,9 @@ def _owned_fingerprint(path: Path, kind: str) -> str | None:
     return None
 
 
-def register_owned_path(root: Path, home: Path, path: Path) -> dict[str, Any]:
-    """Record a path that Oracle actually created, with a content fingerprint."""
-
-    root = root.resolve()
-    home = home.resolve()
-    candidate = path.absolute()
-    if candidate.is_symlink():
+def _owned_entry(root: Path, home: Path, candidate: Path) -> dict[str, Any]:
+    candidate = candidate.absolute()
+    if _is_reparse_point(candidate):
         kind = "symlink"
     elif candidate.is_file():
         kind = "file"
@@ -2123,13 +2939,40 @@ def register_owned_path(root: Path, home: Path, path: Path) -> dict[str, Any]:
     else:
         raise LifecycleError(f"owned path does not exist: {candidate}")
     scope, relative = _path_scope(root, home, candidate)
-    state = _read_state(root)
-    entry = {
+    base = root if scope == "install" else home
+    _managed_target(base, relative, allow_final_reparse=kind == "symlink")
+    return {
         "scope": scope,
         "path": relative,
         "kind": kind,
         "sha256": _owned_fingerprint(candidate, kind),
     }
+
+
+def register_owned_path(root: Path, home: Path, path: Path) -> dict[str, Any]:
+    """Record a path that Oracle actually created, with a content fingerprint."""
+
+    root = root.resolve()
+    home = home.resolve()
+    entry = _owned_entry(root, home, path)
+    scope = entry["scope"]
+    relative = entry["path"]
+    state = _read_state(root)
+    previous = next(
+        (
+            item
+            for item in state["owned_paths"]
+            if isinstance(item, dict)
+            and item.get("scope") == scope
+            and item.get("path") == relative
+        ),
+        None,
+    )
+    owner_phase = state.get("pending_phase")
+    if not isinstance(owner_phase, str) and isinstance(previous, dict):
+        owner_phase = previous.get("phase")
+    if isinstance(owner_phase, str):
+        entry["phase"] = owner_phase
     state["owned_paths"] = [
         item
         for item in state["owned_paths"]
@@ -2149,6 +2992,254 @@ def register_owned_path(root: Path, home: Path, path: Path) -> dict[str, Any]:
     )
     _write_state(root, state)
     return entry
+
+
+def register_owned_tree(
+    root: Path,
+    home: Path,
+    tree: Path,
+) -> list[dict[str, Any]]:
+    """Replace ownership records for a tree with every path currently present."""
+
+    root = root.resolve()
+    home = home.resolve()
+    tree = tree.absolute()
+    if _is_reparse_point(tree) or not tree.is_dir():
+        raise LifecycleError(f"owned tree is missing or unsafe: {tree}")
+    paths = [tree]
+    for directory, directory_names, file_names in os.walk(tree, followlinks=False):
+        current = Path(directory)
+        for name in list(directory_names):
+            child = current / name
+            paths.append(child)
+            if _is_reparse_point(child):
+                directory_names.remove(name)
+        paths.extend(current / name for name in file_names)
+    entries = [_owned_entry(root, home, path) for path in paths]
+    tree_scope, tree_relative = _path_scope(root, home, tree)
+    prefix = f"{tree_relative}/"
+    state = _read_state(root)
+    previous_phases = {
+        (str(item.get("scope")), str(item.get("path"))): item.get("phase")
+        for item in state["owned_paths"]
+        if isinstance(item, dict) and isinstance(item.get("phase"), str)
+    }
+    pending_phase = state.get("pending_phase")
+    for entry in entries:
+        owner_phase = (
+            pending_phase
+            if isinstance(pending_phase, str)
+            else previous_phases.get((str(entry["scope"]), str(entry["path"])))
+        )
+        if isinstance(owner_phase, str):
+            entry["phase"] = owner_phase
+    state["owned_paths"] = [
+        item
+        for item in state["owned_paths"]
+        if not (
+            isinstance(item, dict)
+            and item.get("scope") == tree_scope
+            and (
+                item.get("path") == tree_relative
+                or str(item.get("path", "")).startswith(prefix)
+            )
+        )
+    ]
+    state["owned_paths"].extend(entries)
+    state["owned_paths"] = sorted(
+        state["owned_paths"],
+        key=lambda item: (str(item.get("scope")), str(item.get("path"))),
+    )
+    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    _write_state(root, state)
+    return entries
+
+
+def register_owned_service(
+    root: Path,
+    *,
+    kind: str,
+    identifier: str,
+) -> dict[str, str]:
+    """Record one narrowly validated service that Oracle created."""
+
+    _validate_owned_service({"kind": kind, "identifier": identifier})
+    root = root.resolve()
+    state = _read_state(root)
+    entry = {"kind": kind, "identifier": identifier}
+    state["owned_services"] = [
+        item
+        for item in state["owned_services"]
+        if not (
+            isinstance(item, dict)
+            and item.get("kind") == kind
+            and item.get("identifier") == identifier
+        )
+    ]
+    state["owned_services"].append(entry)
+    state["owned_services"] = sorted(
+        state["owned_services"],
+        key=lambda item: (str(item.get("kind")), str(item.get("identifier"))),
+    )
+    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
+        "+00:00", "Z"
+    )
+    _write_state(root, state)
+    return entry
+
+
+def _validate_owned_service(raw: Mapping[str, Any]) -> dict[str, str]:
+    kind = raw.get("kind")
+    identifier = raw.get("identifier")
+    if not isinstance(identifier, str):
+        raise LifecycleError("unsafe owned service in install state")
+    if kind == "launchd-user" and re.fullmatch(
+        r"com\.sentivue\.[a-z0-9.-]+", identifier
+    ):
+        return {"kind": kind, "identifier": identifier}
+    if kind == "windows-pid-file" and identifier == "state/llama-swap.pid":
+        return {"kind": kind, "identifier": identifier}
+    raise LifecycleError("unsafe owned service identifier in install state")
+
+
+def _stop_owned_windows_process(root: Path, identifier: str) -> None:
+    if os.name != "nt":
+        raise LifecycleError("cannot safely stop an owned Windows process here")
+    pid_path = _managed_target(root, identifier, allow_final_reparse=False)
+    if not pid_path.is_file():
+        return
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise LifecycleError("owned Windows PID file is invalid") from exc
+    if pid <= 0 or pid > 0xFFFFFFFF:
+        raise LifecycleError("owned Windows PID is outside the safe range")
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    process = kernel32.OpenProcess(0x1001, False, pid)
+    if not process:
+        error = ctypes.get_last_error()
+        if error == 87:
+            return
+        raise LifecycleError(f"cannot inspect owned Windows process {pid}: {error}")
+    try:
+        capacity = wintypes.DWORD(32768)
+        buffer = ctypes.create_unicode_buffer(capacity.value)
+        if not kernel32.QueryFullProcessImageNameW(
+            process, 0, buffer, ctypes.byref(capacity)
+        ):
+            raise LifecycleError(
+                f"cannot identify owned Windows process {pid}: {ctypes.get_last_error()}"
+            )
+        expected = root / ".tools" / "win" / "llama-swap.exe"
+        actual = Path(buffer.value)
+        if os.path.normcase(os.path.realpath(actual)) != os.path.normcase(
+            os.path.realpath(expected)
+        ):
+            raise LifecycleError(
+                f"refusing to stop PID {pid}: executable is not Oracle llama-swap"
+            )
+        if not kernel32.TerminateProcess(process, 0):
+            raise LifecycleError(
+                f"could not stop owned Windows process {pid}: {ctypes.get_last_error()}"
+            )
+        kernel32.WaitForSingleObject(process, 5000)
+    finally:
+        kernel32.CloseHandle(process)
+
+
+def _stop_owned_service(service: Mapping[str, str], root: Path | None = None) -> None:
+    if service["kind"] == "windows-pid-file":
+        if root is None:
+            raise LifecycleError("Windows process stop requires an installation root")
+        _stop_owned_windows_process(root, service["identifier"])
+        return
+    if service["kind"] != "launchd-user":
+        raise LifecycleError("unsafe owned service identifier in install state")
+    launchctl = shutil.which("launchctl")
+    if not launchctl or not hasattr(os, "getuid"):
+        raise LifecycleError("cannot safely stop owned launchd service on this platform")
+    target = f"gui/{os.getuid()}/{service['identifier']}"
+    present = _run([launchctl, "print", target])
+    if present.returncode != 0:
+        return
+    stopped = _run([launchctl, "bootout", target])
+    if stopped.returncode != 0:
+        detail = stopped.stderr or stopped.stdout or "launchctl bootout failed"
+        raise LifecycleError(
+            f"could not stop owned service {service['identifier']}: {detail.strip()}"
+        )
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Recognize POSIX links and Windows junction/reparse entries without following."""
+
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return False
+    attributes = int(getattr(metadata, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return stat.S_ISLNK(metadata.st_mode) or bool(attributes & reparse_flag)
+
+
+def _managed_target(
+    base: Path,
+    relative: str,
+    *,
+    allow_final_reparse: bool,
+) -> Path:
+    """Join beneath a trusted real root and reject every traversed reparse entry."""
+
+    base = Path(os.path.realpath(base))
+    parts = PurePosixPath(validate_relative_path(relative)).parts
+    target = base.joinpath(*parts)
+    try:
+        if os.path.commonpath((str(base), str(target))) != str(base):
+            raise LifecycleError("managed path escapes its trusted real root")
+    except ValueError as exc:
+        raise LifecycleError("managed path crosses filesystem roots") from exc
+    current = base
+    for index, part in enumerate(parts):
+        current = current / part
+        is_final = index == len(parts) - 1
+        if _is_reparse_point(current):
+            if is_final and allow_final_reparse:
+                continue
+            role = "target" if is_final else "ancestor"
+            raise LifecycleError(
+                f"managed path has a symlink or reparse {role}: {current}"
+            )
+        if not is_final and current.exists() and not current.is_dir():
+            raise LifecycleError(f"managed path ancestor changed type: {current}")
+        if current.exists():
+            resolved = Path(os.path.realpath(current))
+            try:
+                contained = os.path.commonpath((str(base), str(resolved))) == str(base)
+            except ValueError:
+                contained = False
+            if not contained:
+                raise LifecycleError(
+                    f"managed path resolves outside its trusted real root: {current}"
+                )
+    return target
 
 
 def _owned_target(
@@ -2173,7 +3264,9 @@ def _owned_target(
     ):
         raise LifecycleError("unsafe ownership fingerprint in install state")
     base = root if scope == "install" else home
-    target = base / Path(*PurePosixPath(relative).parts)
+    target = _managed_target(
+        base, relative, allow_final_reparse=kind == "symlink"
+    )
     return scope, relative, kind, digest if isinstance(digest, str) else None, target
 
 
@@ -2187,7 +3280,7 @@ def _remove_owned(
     if not target.exists() and not target.is_symlink():
         return "missing", "path is already absent"
     if kind == "directory":
-        if not target.is_dir() or target.is_symlink():
+        if not target.is_dir() or _is_reparse_point(target):
             return "preserve-modified", "owned directory changed type"
         try:
             next(target.iterdir())
@@ -2196,7 +3289,13 @@ def _remove_owned(
                 target.rmdir()
             return "remove", "owned directory is empty"
         return "preserve-nonempty", "owned directory contains unowned entries"
-    actual_kind = "symlink" if target.is_symlink() else "file" if target.is_file() else ""
+    actual_kind = (
+        "symlink"
+        if _is_reparse_point(target)
+        else "file"
+        if target.is_file()
+        else ""
+    )
     if actual_kind != kind:
         return "preserve-modified", "owned path changed type"
     actual_digest = _owned_fingerprint(target, kind)
@@ -2214,6 +3313,7 @@ def uninstall(
     apply: bool = False,
     purge: bool = False,
     confirm_purge: bool = False,
+    service_stopper: Callable[[dict[str, str]], None] | None = None,
 ) -> UninstallPlan:
     """Plan or apply ownership-scoped removal.  Dry-run is the default."""
 
@@ -2228,13 +3328,40 @@ def uninstall(
         raise LifecycleError("install state home does not match this user")
     entries: list[UninstallEntry] = []
     retained: list[dict[str, Any]] = []
+    services = []
+    for raw_service in state["owned_services"]:
+        if not isinstance(raw_service, dict):
+            raise LifecycleError("unsafe non-object service entry in install state")
+        services.append(_validate_owned_service(raw_service))
     raw_owned = state["owned_paths"]
     validated = []
     for raw in raw_owned:
         if not isinstance(raw, dict):
             raise LifecycleError("unsafe non-object ownership entry in install state")
         validated.append((raw, _owned_target(root, home, raw)))
+    validated.sort(
+        key=lambda item: len(PurePosixPath(item[1][1]).parts),
+        reverse=True,
+    )
+    for service in services:
+        entries.append(
+            UninstallEntry(
+                "service",
+                service["identifier"],
+                "stop",
+                "owned service is stopped before file removal",
+            )
+        )
+        if apply:
+            if service_stopper is not None:
+                service_stopper(service)
+            else:
+                _stop_owned_service(service, root)
     for raw, (scope, relative, kind, digest, target) in validated:
+        base = root if scope == "install" else home
+        target = _managed_target(
+            base, relative, allow_final_reparse=kind == "symlink"
+        )
         action, reason = _remove_owned(
             target,
             kind=kind,
@@ -2248,7 +3375,9 @@ def uninstall(
     if purge:
         for relative in PURGE_ROOTS:
             validate_relative_path(relative)
-            target = root / Path(*PurePosixPath(relative).parts)
+            target = _managed_target(
+                root, relative, allow_final_reparse=True
+            )
             if target.exists() or target.is_symlink():
                 entries.append(
                     UninstallEntry(
@@ -2259,12 +3388,21 @@ def uninstall(
                     )
                 )
                 if apply:
-                    if target.is_symlink() or target.is_file():
+                    target = _managed_target(
+                        root, relative, allow_final_reparse=True
+                    )
+                    if _is_reparse_point(target):
+                        if target.is_dir():
+                            target.rmdir()
+                        else:
+                            target.unlink()
+                    elif target.is_file():
                         target.unlink()
                     else:
                         shutil.rmtree(target)
 
-    if apply:
+    if apply and not purge:
+        state["owned_services"] = []
         state["owned_paths"] = retained
         state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
             "+00:00", "Z"
@@ -2340,6 +3478,8 @@ def _command_export_artifact(args: argparse.Namespace) -> int:
         requested_version=args.requested_version,
         resolved_version=args.resolved_version,
         expected_sha256=args.expected_sha256,
+        policy_root=args.root,
+        trusted=args.trusted,
     )
     print(json.dumps(record.to_payload(), sort_keys=True))
     return 0
@@ -2352,6 +3492,8 @@ def _command_artifact_path(args: argparse.Namespace) -> int:
         args.artifact_id,
         expected_version=args.expected_version,
         expected_requested_version=args.expected_requested_version,
+        policy_root=args.root,
+        require_policy_bound=args.reproducible,
     )
     print(path)
     return 0
@@ -2382,6 +3524,11 @@ def _command_state(args: argparse.Namespace) -> int:
         if not args.phase:
             raise LifecycleError("state phase-current requires --phase")
         return 0 if phase_is_current(args.root, args.phase) else 1
+    if args.state_action == "begin-phase":
+        if not args.phase:
+            raise LifecycleError("state begin-phase requires --phase")
+        begin_install_phase(args.root, args.phase)
+        return 0
     if args.state_action == "mark-phase":
         if not args.phase:
             raise LifecycleError("state mark-phase requires --phase")
@@ -2391,6 +3538,20 @@ def _command_state(args: argparse.Namespace) -> int:
         if args.path is None:
             raise LifecycleError("state own requires --path")
         register_owned_path(args.root, args.home, args.path)
+        return 0
+    if args.state_action == "own-tree":
+        if args.path is None:
+            raise LifecycleError("state own-tree requires --path")
+        register_owned_tree(args.root, args.home, args.path)
+        return 0
+    if args.state_action == "own-service":
+        if not args.service_kind or not args.identifier:
+            raise LifecycleError(
+                "state own-service requires --service-kind and --identifier"
+            )
+        register_owned_service(
+            args.root, kind=args.service_kind, identifier=args.identifier
+        )
         return 0
     raise LifecycleError("unknown state action")
 
@@ -2414,6 +3575,11 @@ def _command_sync_config(args: argparse.Namespace) -> int:
         return 0
     for path in written:
         print(path)
+    return 0
+
+
+def _command_quote_argument(args: argparse.Namespace) -> int:
+    print(quote_command_argument(args.value, args.platform))
     return 0
 
 
@@ -2463,6 +3629,8 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--requested-version", required=True)
     export.add_argument("--resolved-version", required=True)
     export.add_argument("--expected-sha256")
+    export.add_argument("--root", type=Path)
+    export.add_argument("--trusted", action="store_true")
     export.set_defaults(handler=_command_export_artifact)
 
     artifact_path = subparsers.add_parser("artifact-path")
@@ -2471,6 +3639,8 @@ def build_parser() -> argparse.ArgumentParser:
     artifact_path.add_argument("--artifact-id", required=True)
     artifact_path.add_argument("--expected-version")
     artifact_path.add_argument("--expected-requested-version")
+    artifact_path.add_argument("--root", type=Path)
+    artifact_path.add_argument("--reproducible", action="store_true")
     artifact_path.set_defaults(handler=_command_artifact_path)
 
     record_model = subparsers.add_parser("record-model")
@@ -2485,13 +3655,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     state = subparsers.add_parser("state")
     state.add_argument(
-        "state_action", choices=("init", "phase-current", "mark-phase", "own")
+        "state_action",
+        choices=(
+            "init",
+            "phase-current",
+            "begin-phase",
+            "mark-phase",
+            "own",
+            "own-tree",
+            "own-service",
+        ),
     )
     state.add_argument("--root", type=Path, required=True)
     state.add_argument("--home", type=Path, required=True)
     state.add_argument("--revision")
     state.add_argument("--phase")
     state.add_argument("--path", type=Path)
+    state.add_argument("--service-kind")
+    state.add_argument("--identifier")
     state.set_defaults(handler=_command_state)
 
     remove = subparsers.add_parser("uninstall")
@@ -2506,6 +3687,11 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--root", type=Path, required=True)
     sync.add_argument("--home", type=Path, required=True)
     sync.set_defaults(handler=_command_sync_config)
+
+    quote_argument = subparsers.add_parser("quote-argument")
+    quote_argument.add_argument("--platform", choices=("posix", "windows"), required=True)
+    quote_argument.add_argument("--value", required=True)
+    quote_argument.set_defaults(handler=_command_quote_argument)
     return parser
 
 

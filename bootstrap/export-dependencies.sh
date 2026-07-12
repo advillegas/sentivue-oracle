@@ -10,6 +10,7 @@ URL=""
 REQUESTED=""
 RESOLVED=""
 EXPECTED=""
+TRUSTED=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -18,9 +19,10 @@ while [[ $# -gt 0 ]]; do
     --requested-version) REQUESTED="${2:-}"; shift ;;
     --resolved-version) RESOLVED="${2:-}"; shift ;;
     --expected-sha256) EXPECTED="${2:-}"; shift ;;
+    --trusted) TRUSTED=1 ;;
     --cache) CACHE="${2:-}"; shift ;;
     --root) ROOT="${2:-}"; shift ;;
-    *) echo "usage: export-dependencies.sh --artifact-id ID --url URL --requested-version PIN --resolved-version EXACT [--expected-sha256 HASH] [--cache DIR]" >&2; exit 2 ;;
+    *) echo "usage: export-dependencies.sh --artifact-id ID --url URL --requested-version PIN --resolved-version EXACT [--trusted] [--expected-sha256 HASH] [--cache DIR]" >&2; exit 2 ;;
   esac
   shift
 done
@@ -48,4 +50,9 @@ fi
 ARGS=(export-artifact --cache "$CACHE" --artifact-id "$ARTIFACT_ID" --url "$URL"
   --requested-version "$REQUESTED" --resolved-version "$RESOLVED")
 [[ -z "$EXPECTED" ]] || ARGS+=(--expected-sha256 "$EXPECTED")
+if [[ "$TRUSTED" -eq 1 ]]; then
+  ARGS+=(--trusted --root "$ROOT")
+else
+  echo "WARN: recording untrusted acquisition evidence; release/install will reject it" >&2
+fi
 exec "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" "${ARGS[@]}"

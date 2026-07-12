@@ -18,13 +18,18 @@ $DependencyCache = if ($env:ORACLE_DEPENDENCY_CACHE) {
     Join-Path $Root "incoming\dependency-cache"
 }
 $ArtifactManifest = Join-Path $DependencyCache "manifest.json"
+$VSCodiumRoot = Join-Path $Root ".tools\vscodium"
+$VSCodiumAppRoot = Join-Path $VSCodiumRoot "app"
+$ExtensionsDir = Join-Path $VSCodiumRoot "extensions"
+$UserDataDir = Join-Path $Root "state\generated\vscodium"
+$VsixDir = Join-Path $VSCodiumRoot "vsix"
 
 function Get-LockedVersion([string]$Name) {
     $line = Get-Content (Join-Path $Root "VERSIONS.lock") |
         Where-Object { $_ -match "^$([regex]::Escape($Name))=" } |
         Select-Object -First 1
     if (-not $line) { throw "missing $Name in VERSIONS.lock" }
-    return ($line -split "=", 2)[1].Trim()
+    return ((($line -split "=", 2)[1]) -split "#", 2)[0].Trim()
 }
 
 function Get-CachedArtifact([string]$Id, [string]$Version) {
@@ -36,7 +41,8 @@ function Get-CachedArtifact([string]$Id, [string]$Version) {
         (Join-Path $Root "verification\lifecycle.py"), "artifact-path",
         "--manifest", $ArtifactManifest, "--cache", $DependencyCache,
         "--artifact-id", $Id,
-        "--expected-requested-version", $Version
+        "--expected-requested-version", $Version,
+        "--root", $Root, "--reproducible"
     )
     if ($Version -ne "dynamic") {
         $lifecycleArgs += @("--expected-version", $Version)
@@ -62,13 +68,9 @@ function Write-Utf8NoBomAtomic([string]$Path, [string]$Text) {
 }
 
 function Find-Codium {
-    $c = Get-Command codium -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    $candidates = @(
-        "$env:LOCALAPPDATA\Programs\VSCodium\bin\codium.cmd",
-        "$env:ProgramFiles\VSCodium\bin\codium.cmd"
-    )
-    foreach ($p in $candidates) { if (Test-Path $p) { return $p } }
+    $candidate = Get-ChildItem $VSCodiumAppRoot -Recurse -Filter "codium.cmd" `
+        -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($candidate) { return $candidate.FullName }
     return $null
 }
 
@@ -77,23 +79,28 @@ function Install-OracleAgentsExtension {
     # packed as a .vsix and installed via the codium CLI - a folder copied into
     # .vscode-oss\extensions is ignored (extensions.json is the registry).
     $src = Join-Path $PSScriptRoot "oracle-agents"
-    if (-not (Test-Path (Join-Path $src "package.json"))) { return }
-    $codium = Find-Codium
-    if (-not $codium) { return }
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "pack-extension.ps1")
-    $ver = (Get-Content (Join-Path $src "package.json") -Raw | ConvertFrom-Json).version
-    $vsix = Join-Path $Root "incoming\vsix\sentivue.oracle-agents-$ver.vsix"
-    if (Test-Path $vsix) {
-        & $codium --install-extension $vsix --force | Out-Null
-        Write-Host "==> installed agents sidebar extension (sentivue.oracle-agents-$ver)"
+    if (-not (Test-Path (Join-Path $src "package.json"))) {
+        throw "bundled Oracle agents extension source is missing"
     }
+    $codium = Find-Codium
+    if (-not $codium) { throw "repo-local VSCodium is missing" }
+    & powershell -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $PSScriptRoot "pack-extension.ps1") -OutDir $VsixDir
+    if ($LASTEXITCODE -ne 0) { throw "Oracle agents extension packaging failed" }
+    $ver = (Get-Content (Join-Path $src "package.json") -Raw | ConvertFrom-Json).version
+    $vsix = Join-Path $VsixDir "sentivue.oracle-agents-$ver.vsix"
+    if (-not (Test-Path $vsix)) { throw "packed Oracle agents VSIX is missing" }
+    & $codium --user-data-dir $UserDataDir --extensions-dir $ExtensionsDir `
+        --install-extension $vsix --force | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Oracle agents extension install failed" }
+    Write-Host "==> installed agents sidebar extension (sentivue.oracle-agents-$ver)"
 }
 
 function Update-UserConfig {
-    # Merge (never clobber) the Oracle keys into VSCodium user settings:
-    # telemetry off, Roo auto-import path, and the agent-tab terminal profiles.
+    # This dedicated user-data directory is Oracle-owned; canonical user files
+    # remain untouched.
     param([switch]$Quiet)
-    $userDir = Join-Path $env:APPDATA "VSCodium\User"
+    $userDir = Join-Path $UserDataDir "User"
     New-Item -ItemType Directory -Force -Path $userDir | Out-Null
     $settingsPath = Join-Path $userDir "settings.json"
     $settings = @{}
@@ -102,8 +109,7 @@ function Update-UserConfig {
             $obj = Get-Content $settingsPath -Raw | ConvertFrom-Json
             foreach ($p in $obj.PSObject.Properties) { $settings[$p.Name] = $p.Value }
         } catch {
-            if (-not $Quiet) { Write-Host "WARN: could not parse existing settings.json - leaving it untouched" }
-            return
+            throw "Oracle VSCodium settings are malformed"
         }
     }
     $agentTab = Join-Path $PSScriptRoot "agent-tab.ps1"
@@ -184,17 +190,34 @@ function Update-UserConfig {
 
 switch ($Cmd) {
     "install" {
-        $codium = Find-Codium
-        if (-not $codium) {
-            Write-Host "==> installing VSCodium (winget)"
-            winget install --id VSCodium.VSCodium -e --silent --accept-package-agreements --accept-source-agreements
-            $codium = Find-Codium
-            if (-not $codium) { Write-Host "ERROR: VSCodium installed but codium CLI not found - reopen the terminal and re-run"; exit 1 }
+        Write-Host "==> installing VSCodium from policy-bound offline export"
+        $archive = Get-CachedArtifact "vscodium-windows-x64" (Get-LockedVersion "VSCODIUM_VERSION")
+        if ([IO.Path]::GetExtension($archive) -ne ".zip") {
+            throw "validated Windows VSCodium export must be a portable .zip"
         }
-        $vsix = Join-Path $Root "incoming\vsix"
-        New-Item -ItemType Directory -Force -Path $vsix | Out-Null
+        New-Item -ItemType Directory -Force -Path $VSCodiumRoot | Out-Null
+        $stage = Join-Path $VSCodiumRoot (".app-stage-" + [Guid]::NewGuid().ToString("N"))
+        $newApp = Join-Path $VSCodiumRoot "app.new"
+        try {
+            Expand-Archive -LiteralPath $archive -DestinationPath $stage -Force
+            $stagedCodium = Get-ChildItem $stage -Recurse -Filter "codium.cmd" |
+                Select-Object -First 1
+            if (-not $stagedCodium) { throw "cached VSCodium archive has no codium.cmd" }
+            $stagedApp = Split-Path -Parent (Split-Path -Parent $stagedCodium.FullName)
+            Remove-Item -LiteralPath $newApp -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item -LiteralPath $stagedApp -Destination $newApp -Recurse -Force
+            Remove-Item -LiteralPath $VSCodiumAppRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $newApp -Destination $VSCodiumAppRoot
+        } finally {
+            Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $newApp -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $codium = Find-Codium
+        if (-not $codium) { throw "cached VSCodium install did not provide the codium CLI" }
+        New-Item -ItemType Directory -Force -Path $VsixDir, $ExtensionsDir | Out-Null
         # migration: Roo Code was discontinued (May 2026) - replace it with Kilo
-        & $codium --uninstall-extension RooVeterinaryInc.roo-cline 2>$null | Out-Null
+        & $codium --user-data-dir $UserDataDir --extensions-dir $ExtensionsDir `
+            --uninstall-extension RooVeterinaryInc.roo-cline 2>$null | Out-Null
         # Native extensions are pre-exported for win32-x64 and hash-verified.
         foreach ($ext in @(
             @("continue-vsix-windows-x64", "CONTINUE_VSIX_VERSION"),
@@ -203,32 +226,45 @@ switch ($Cmd) {
             $version = Get-LockedVersion $ext[1]
             $file = Get-CachedArtifact $ext[0] $version
             Write-Host "==> $($ext[0]) $version"
-            & $codium --install-extension $file --force | Out-Null
+            & $codium --user-data-dir $UserDataDir --extensions-dir $ExtensionsDir `
+                --install-extension $file --force | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "$($ext[0]) installation failed" }
         }
         Install-OracleAgentsExtension
         # Open VSX builds of Continue ship WITHOUT the ripgrep binary, so the
         # extension dies on activation with "Could not find ripgrep binary".
         # Graft VSCodium's own rg.exe into the extension to fix it.
-        $contExt = Get-ChildItem "$env:USERPROFILE\.vscode-oss\extensions" -Directory -ErrorAction SilentlyContinue |
+        $contExt = Get-ChildItem $ExtensionsDir -Directory -ErrorAction SilentlyContinue |
             Where-Object Name -match "^continue\.continue-" | Sort-Object Name -Descending | Select-Object -First 1
-        if ($contExt) {
-            $rgDest = Join-Path $contExt.FullName "out\node_modules\@vscode\ripgrep\bin"
-            if (-not (Test-Path (Join-Path $rgDest "rg.exe"))) {
-                $codiumRoot = Split-Path -Parent (Split-Path -Parent $codium)  # ...\VSCodium from ...\VSCodium\bin\codium.cmd
-                $rgSrc = Get-ChildItem (Join-Path $codiumRoot "resources\app\node_modules\@vscode") -Recurse -Filter "rg.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($rgSrc) {
-                    New-Item -ItemType Directory -Force -Path $rgDest | Out-Null
-                    Copy-Item $rgSrc.FullName (Join-Path $rgDest "rg.exe") -Force
-                    Write-Host "==> grafted ripgrep into Continue (Open VSX build ships without it)"
-                }
-            }
+        if (-not $contExt) { throw "installed Continue extension is missing" }
+        $rgDest = Join-Path $contExt.FullName "out\node_modules\@vscode\ripgrep\bin"
+        if (-not (Test-Path (Join-Path $rgDest "rg.exe"))) {
+            $rgSrc = Get-ChildItem $VSCodiumAppRoot -Recurse -Filter "rg.exe" `
+                -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $rgSrc) { throw "VSCodium export has no ripgrep binary for Continue" }
+            New-Item -ItemType Directory -Force -Path $rgDest | Out-Null
+            Copy-Item $rgSrc.FullName (Join-Path $rgDest "rg.exe") -Force
+            Write-Host "==> grafted ripgrep into Continue (Open VSX build ships without it)"
         }
         # Continue + Kilo model config: auto-detected from this machine
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync-models.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "generated model configuration failed" }
         Update-UserConfig
+        $python = Join-Path $Root "env\.venv\Scripts\python.exe"
+        if (-not (Test-Path -LiteralPath $python)) {
+            $python = (Get-Command python -ErrorAction Stop).Source
+        }
+        $lifecycle = Join-Path $Root "verification\lifecycle.py"
+        & $python $lifecycle state init --root $Root --home $env:USERPROFILE | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "install state initialization failed" }
+        foreach ($ownedTree in @($VSCodiumRoot, (Join-Path $Root "state\generated"))) {
+            & $python $lifecycle state own-tree --root $Root --home $env:USERPROFILE `
+                --path $ownedTree | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "IDE ownership registration failed" }
+        }
         Write-Host ""
         Write-Host "IDE ready. Models are auto-detected on every launch; Kilo Code reads"
-        Write-Host "its generated config from ~\.config\kilo\kilo.jsonc (local provider only)."
+        Write-Host "its generated config from state\generated\kilo\kilo.jsonc (local provider only)."
         Write-Host "Agent tabs: Ctrl+Shift+A (Claude Code), Ctrl+Shift+Alt+A (worktree),"
         Write-Host "Ctrl+Alt+O (OpenCode) - or the terminal '+' dropdown, 'Oracle Agent' profiles"
         Write-Host "(Claude Code, OpenCode, Kilo Code)."
@@ -236,14 +272,20 @@ switch ($Cmd) {
     }
     "sync" {
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync-models.ps1")
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     "launch" {
         $codium = Find-Codium
         if (-not $codium) { Write-Host "IDE not installed - run: bin\oracle.ps1 ide install"; exit 1 }
-        # refresh model detection + profile paths on every launch (best effort)
-        try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync-models.ps1") } catch {}
-        try { Update-UserConfig -Quiet } catch {}
-        & $codium $Root
+        # Refresh model detection + profile paths before selecting generated configs.
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync-models.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "generated model configuration failed" }
+        $env:CONTINUE_GLOBAL_DIR = Join-Path $Root "state\generated\continue"
+        $env:KILO_CONFIG = Join-Path $Root "state\generated\kilo\kilo.jsonc"
+        $env:OPENCODE_CONFIG = $env:KILO_CONFIG
+        Update-UserConfig -Quiet
+        & $codium --user-data-dir $UserDataDir --extensions-dir $ExtensionsDir $Root
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
     default { Write-Host "usage: setup-ide.ps1 {install|sync|launch}" }
 }
