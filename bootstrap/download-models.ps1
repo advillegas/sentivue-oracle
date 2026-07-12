@@ -22,19 +22,50 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 if (-not $Dest) { $Dest = Join-Path $Root "models" }
+$DependencyCache = if ($env:ORACLE_DEPENDENCY_CACHE) {
+    $env:ORACLE_DEPENDENCY_CACHE
+} else {
+    Join-Path $Root "incoming\dependency-cache"
+}
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
 Write-Host "==> destination: $Dest"
 
 $curl = (Get-Command curl.exe -ErrorAction SilentlyContinue).Source
 if (-not $curl) { Write-Host "ERROR: curl.exe not found (ships with Windows 10 1803+)"; exit 1 }
+$python = Join-Path $Root "env\.venv\Scripts\python.exe"
+if (-not (Test-Path $python)) {
+    $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCommand) { $python = $pythonCommand.Source }
+}
+if (-not (Test-Path $python)) {
+    Write-Host "ERROR: Python is required for model provenance."
+    exit 1
+}
 
 $authHeader = @()
 if ($env:HF_TOKEN) { $authHeader = @("-H", "Authorization: Bearer $($env:HF_TOKEN)") }
 
-function Get-RepoFiles([string]$repo) {
+function Resolve-RepoRevision([string]$repo, [string]$requested) {
+    if ($repo -notmatch "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$") {
+        throw "unsafe model repository: $repo"
+    }
+    $resolved = $requested
+    if ($requested -eq "dynamic") {
+        $headers = @{}
+        if ($env:HF_TOKEN) { $headers["Authorization"] = "Bearer $($env:HF_TOKEN)" }
+        $metadata = Invoke-RestMethod -Uri "https://huggingface.co/api/models/$repo" -Headers $headers
+        $resolved = [string]$metadata.sha
+    }
+    if ($resolved -notmatch "^[0-9a-f]{40}$") {
+        throw "model revision did not resolve to a commit: $repo"
+    }
+    return $resolved
+}
+
+function Get-RepoFiles([string]$repo, [string]$revision) {
     # Full recursive file listing, following API pagination if present.
     $files = @()
-    $uri = "https://huggingface.co/api/models/$repo/tree/main?recursive=true"
+    $uri = "https://huggingface.co/api/models/$repo/tree/$revision`?recursive=true"
     while ($uri) {
         $headers = @{}
         if ($env:HF_TOKEN) { $headers["Authorization"] = "Bearer $($env:HF_TOKEN)" }
@@ -56,7 +87,14 @@ if (Test-Path $profileFile) {
 
 $rows = Get-Content $manifest | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") } | ForEach-Object {
     $f = $_ -split "\|"
-    [pscustomobject]@{ Name = $f[0].Trim(); Repo = $f[1].Trim(); Include = $f[2].Trim() }
+    if ($f.Count -ne 7) { throw "invalid model manifest row: $_" }
+    [pscustomobject]@{
+        Name = $f[0].Trim()
+        Repo = $f[1].Trim()
+        Include = $f[2].Trim()
+        RequestedRevision = $f[6].Trim()
+        Revision = $f[6].Trim()
+    }
 } | Where-Object {
     ($null -eq $active -or $active -contains $_.Name) -and
     ($Only.Count -eq 0 -or $Only -contains $_.Name)
@@ -66,13 +104,14 @@ if (-not $rows) { Write-Host "Nothing to download (check -Only / serving\models.
 # ---- plan ---------------------------------------------------------------------
 $plan = @()
 foreach ($r in $rows) {
-    Write-Host ("==> listing {0}  ({1} :: {2})" -f $r.Name, $r.Repo, $r.Include)
-    $matched = Get-RepoFiles $r.Repo | Where-Object { $_.path -like $r.Include }
+    $r.Revision = Resolve-RepoRevision $r.Repo $r.RequestedRevision
+    Write-Host ("==> listing {0}  ({1}@{2} :: {3})" -f $r.Name, $r.Repo, $r.Revision, $r.Include)
+    $matched = Get-RepoFiles $r.Repo $r.Revision | Where-Object { $_.path -like $r.Include }
     if (-not $matched) { Write-Host "    WARN: no files match pattern '$($r.Include)'"; continue }
     foreach ($m in $matched) {
         $plan += [pscustomobject]@{
             Model = $r.Name; Repo = $r.Repo; Path = $m.path; Size = [long]$m.size
-            Url   = "https://huggingface.co/$($r.Repo)/resolve/main/$($m.path)"
+            Url   = "https://huggingface.co/$($r.Repo)/resolve/$($r.Revision)/$($m.path)"
             Local = Join-Path (Join-Path $Dest $r.Name) ($m.path -replace "/", "\")
         }
     }
@@ -124,6 +163,17 @@ Get-ChildItem $Dest -Directory | ForEach-Object {
 if ($failed) {
     Write-Host ("FAILED after {0} attempts: {1}  - re-run to resume." -f $Retries, ($failed -join ", "))
     exit 1
+}
+foreach ($r in $rows) {
+    if (-not ($plan | Where-Object { $_.Model -eq $r.Name } | Select-Object -First 1)) {
+        continue
+    }
+    & $python (Join-Path $Root "verification\lifecycle.py") record-model `
+        --root $Root --cache $DependencyCache --models-root $Dest `
+        --model-name $r.Name `
+        --repository $r.Repo --requested-revision $r.RequestedRevision `
+        --resolved-revision $r.Revision | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "model provenance failed: $($r.Name)" }
 }
 Write-Host ""
 Write-Host "All downloads complete. Move '$Dest' to the Mac as ~/sentivue-oracle/models"

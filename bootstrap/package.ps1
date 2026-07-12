@@ -3,13 +3,9 @@ param(
     [Parameter(Mandatory = $true)][string]$Version,
     [string]$Revision = "HEAD",
     [string]$OutDir,
-    [string]$Root,
-    [switch]$Publish
+    [string]$Root
 )
 
-# The default is local preflight only. Publication is create-only and requires
-# an explicit -Publish after all archives, installers, hashes, and provenance
-# have passed smoke validation.
 $ErrorActionPreference = "Stop"
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $Root) { $Root = Split-Path -Parent $ScriptRoot }
@@ -32,21 +28,18 @@ foreach ($Candidate in @(
     }
 }
 if (-not $Python) {
-    Write-Error "release: Python 3.12 or newer is required"
+    Write-Error "package: Python 3.12 or newer is required"
     exit 127
 }
 
 $Arguments = @($Prefix)
 $Arguments += (Join-Path $Root "verification\lifecycle.py")
 $Arguments += @(
-    "release",
+    "package",
     "--root", $Root,
     "--version", $Version,
     "--revision", $Revision,
     "--output", $OutDir
 )
-if ($Publish) { $Arguments += "--publish" }
-else { $Arguments += "--preflight-only" }
-
 & $Python.Source @Arguments
 exit $LASTEXITCODE

@@ -27,6 +27,32 @@ function Find-RealPython {
     return $null
 }
 
+function Get-CachedArtifact {
+    param(
+        [string]$ArtifactId,
+        [string]$ExpectedVersion,
+        [string]$Python
+    )
+    $cache = if ($env:ORACLE_DEPENDENCY_CACHE) {
+        $env:ORACLE_DEPENDENCY_CACHE
+    } else {
+        Join-Path $Root "incoming\dependency-cache"
+    }
+    $manifest = Join-Path $cache "manifest.json"
+    $lifecycleArgs = @(
+        (Join-Path $Root "verification\lifecycle.py"), "artifact-path",
+        "--manifest", $manifest, "--cache", $cache,
+        "--artifact-id", $ArtifactId,
+        "--expected-version", $ExpectedVersion,
+        "--expected-requested-version", $ExpectedVersion
+    )
+    $path = (& $Python @lifecycleArgs)
+    if ($LASTEXITCODE -ne 0) {
+        throw "cached artifact validation failed: $ArtifactId"
+    }
+    return $path.Trim()
+}
+
 function Invoke-Conductor {
     param([string[]]$CondArgs)
     $python = Find-RealPython
@@ -44,19 +70,46 @@ function Invoke-Conductor {
 switch ($Cmd) {
     "vault"  { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\vault.ps1") @Rest }
     "models" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\download-models.ps1") @Rest }
+    "uninstall" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\uninstall.ps1") @Rest }
     "finish" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\finish-windows.ps1") @Rest }
     "setup" {
         # Full platform on Windows: engines (pinned npm, repo-local) + serving toolchain.
         $lock = Get-Content (Join-Path $Root "VERSIONS.lock") | Where-Object { $_ -match "=" }
         $pins = @{}
         foreach ($l in $lock) { $kv = $l -split "=", 2; $pins[$kv[0].Trim()] = ($kv[1] -split "#")[0].Trim() }
+        $python = Find-RealPython
+        if (-not $python) {
+            & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\ensure-tools.ps1")
+            $python = Find-RealPython
+        }
+        if (-not $python) { throw "Python is required to validate the dependency cache" }
+        $lifecycle = Join-Path $Root "verification\lifecycle.py"
+        & $python $lifecycle state init --root $Root --home $env:USERPROFILE | Out-Null
+        & $python $lifecycle state phase-current --root $Root `
+            --home $env:USERPROFILE --phase "windows-setup" *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "==> setup already current for this source and dependency export"
+            break
+        }
+        $cache = if ($env:ORACLE_DEPENDENCY_CACHE) {
+            $env:ORACLE_DEPENDENCY_CACHE
+        } else {
+            Join-Path $Root "incoming\dependency-cache"
+        }
         $env:npm_config_prefix = Join-Path $Root ".tools\npm"
+        $env:npm_config_cache = Join-Path $cache "npm"
+        $env:npm_config_offline = "true"
         New-Item -ItemType Directory -Force -Path $env:npm_config_prefix | Out-Null
         Write-Host "==> engines: claude-code@$($pins['CLAUDE_CODE_NPM_VERSION']) + opencode@$($pins['OPENCODE_NPM_VERSION']) + kilo@$($pins['KILO_CLI_NPM_VERSION'])"
-        npm install -g "@anthropic-ai/claude-code@$($pins['CLAUDE_CODE_NPM_VERSION'])" "opencode-ai@$($pins['OPENCODE_NPM_VERSION'])" "@kilocode/cli@$($pins['KILO_CLI_NPM_VERSION'])"
+        $claudeArchive = Get-CachedArtifact "npm-claude-code" $pins["CLAUDE_CODE_NPM_VERSION"] $python
+        $opencodeArchive = Get-CachedArtifact "npm-opencode" $pins["OPENCODE_NPM_VERSION"] $python
+        $kiloArchive = Get-CachedArtifact "npm-kilo-cli" $pins["KILO_CLI_NPM_VERSION"] $python
+        npm install -g $claudeArchive $opencodeArchive $kiloArchive
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\sync-skills.ps1")
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "harness\skill-packs\install-skill-packs.ps1")
         & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") setup
+        & $python $lifecycle state mark-phase --root $Root `
+            --home $env:USERPROFILE --phase "windows-setup" | Out-Null
         Write-Host "==> setup complete: 'oracle.ps1 serve' then 'oracle.ps1 claude'"
     }
     "harden" {
@@ -164,6 +217,7 @@ switch ($Cmd) {
         Write-Host "  menu                                      interactive menu (the desktop shortcut opens this)"
         Write-Host "  vault   init|sync|new|clone|list|backup   local private git remote"
         Write-Host "  models  [-Dest path] [-Only name]         download models (profile-aware)"
+        Write-Host "  uninstall [-Apply] [-Purge -ConfirmPurge] ownership-scoped removal"
         Write-Host "  finish  [-SkipPush]                       commit + package + push + vault sync"
     }
 }

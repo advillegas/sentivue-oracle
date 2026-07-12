@@ -94,7 +94,8 @@ oracle — offline agentic workstation
                  oracle vault ui install|start|stop|status        GitHub-like UI at http://127.0.0.1:3300
   loops          oracle loops audit|init|cost|sync                loop-engineering toolkit
   git vault      oracle vault init|sync|new|clone|list|backup     (offline private remote)
-  maintenance    oracle models           oracle skills        oracle uninstall [--purge]
+  maintenance    oracle models           oracle skills        oracle uninstall [--apply]
+                 purge: oracle uninstall --apply --purge --confirm-purge
 EOF
     ;;
 esac

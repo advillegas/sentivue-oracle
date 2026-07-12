@@ -37,6 +37,218 @@
       "connectors/ide/oracle-agents/media/*.svg"
     ]
   },
+  "dependency_inputs": [
+    {
+      "id": "npm-claude-code",
+      "kind": "npm",
+      "version_key": "CLAUDE_CODE_NPM_VERSION",
+      "allow_dynamic": false
+    },
+    {
+      "id": "npm-opencode",
+      "kind": "npm",
+      "version_key": "OPENCODE_NPM_VERSION",
+      "allow_dynamic": false
+    },
+    {
+      "id": "npm-kilo-cli",
+      "kind": "npm",
+      "version_key": "KILO_CLI_NPM_VERSION",
+      "allow_dynamic": false
+    },
+    {
+      "id": "source-ecc",
+      "kind": "git",
+      "version_key": "ECC_PIN",
+      "allow_dynamic": false
+    },
+    {
+      "id": "source-agent-mcp",
+      "kind": "git",
+      "version_key": "AGENT_MCP_PIN",
+      "allow_dynamic": false
+    },
+    {
+      "id": "source-loop-engineering",
+      "kind": "git",
+      "version_key": "LOOP_ENG_PIN",
+      "allow_dynamic": false
+    },
+    {
+      "id": "npm-loop-audit",
+      "kind": "npm",
+      "version_key": "LOOP_AUDIT_NPM",
+      "allow_dynamic": false
+    },
+    {
+      "id": "npm-loop-init",
+      "kind": "npm",
+      "version_key": "LOOP_INIT_NPM",
+      "allow_dynamic": false
+    },
+    {
+      "id": "npm-loop-cost",
+      "kind": "npm",
+      "version_key": "LOOP_COST_NPM",
+      "allow_dynamic": false
+    },
+    {
+      "id": "npm-loop-sync",
+      "kind": "npm",
+      "version_key": "LOOP_SYNC_NPM",
+      "allow_dynamic": false
+    },
+    {
+      "id": "source-superpowers",
+      "kind": "git",
+      "version_key": "SUPERPOWERS_PIN",
+      "allow_dynamic": false
+    },
+    {
+      "id": "source-gstack",
+      "kind": "git",
+      "version_key": "GSTACK_PIN",
+      "allow_dynamic": false
+    },
+    {
+      "id": "brew-llama-cpp",
+      "kind": "native",
+      "version_key": "LLAMA_CPP_BREW_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "llama-swap-darwin-arm64",
+      "kind": "native",
+      "version_key": "LLAMA_SWAP_VERSION",
+      "allow_dynamic": false
+    },
+    {
+      "id": "llama-swap-windows-amd64",
+      "kind": "native",
+      "version_key": "LLAMA_SWAP_VERSION",
+      "allow_dynamic": false
+    },
+    {
+      "id": "llama-cpp-windows-vulkan",
+      "kind": "native",
+      "version_key": "LLAMA_CPP_WIN_TAG",
+      "allow_dynamic": false
+    },
+    {
+      "id": "python-runtime",
+      "kind": "toolchain",
+      "version_key": "PYTHON_VERSION",
+      "allow_dynamic": false
+    },
+    {
+      "id": "uv",
+      "kind": "toolchain",
+      "version_key": "UV_VERSION",
+      "allow_dynamic": false
+    },
+    {
+      "id": "node",
+      "kind": "toolchain",
+      "version_key": "NODE_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "vscodium",
+      "kind": "ide",
+      "version_key": "VSCODIUM_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "continue-vsix-darwin-arm64",
+      "kind": "ide-extension",
+      "version_key": "CONTINUE_VSIX_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "continue-vsix-darwin-x64",
+      "kind": "ide-extension",
+      "version_key": "CONTINUE_VSIX_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "continue-vsix-windows-x64",
+      "kind": "ide-extension",
+      "version_key": "CONTINUE_VSIX_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "kilo-vsix-darwin-arm64",
+      "kind": "ide-extension",
+      "version_key": "KILO_VSIX_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "kilo-vsix-darwin-x64",
+      "kind": "ide-extension",
+      "version_key": "KILO_VSIX_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "kilo-vsix-windows-x64",
+      "kind": "ide-extension",
+      "version_key": "KILO_VSIX_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "hf-cli",
+      "kind": "python",
+      "version_key": "HF_CLI_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "brew-gitea",
+      "kind": "native",
+      "version_key": "GITEA_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "brew-rust",
+      "kind": "toolchain",
+      "version_key": "RUST_VERSION",
+      "allow_dynamic": true
+    },
+    {
+      "id": "docker-supabase-postgres",
+      "kind": "container",
+      "version_key": "SUPABASE_POSTGRES_IMAGE",
+      "allow_dynamic": false
+    },
+    {
+      "id": "docker-postgrest",
+      "kind": "container",
+      "version_key": "POSTGREST_IMAGE",
+      "allow_dynamic": false
+    },
+    {
+      "id": "docker-postgres-meta",
+      "kind": "container",
+      "version_key": "POSTGRES_META_IMAGE",
+      "allow_dynamic": false
+    },
+    {
+      "id": "docker-supabase-studio",
+      "kind": "container",
+      "version_key": "SUPABASE_STUDIO_IMAGE",
+      "allow_dynamic": false
+    },
+    {
+      "id": "python-mcp-duckdb",
+      "kind": "python",
+      "version_key": "MCP_DUCKDB",
+      "allow_dynamic": false
+    },
+    {
+      "id": "python-mcp-postgres",
+      "kind": "python",
+      "version_key": "MCP_POSTGRES",
+      "allow_dynamic": false
+    }
+  ],
   "platform_twins": [
     {
       "powershell": "bin/oracle.ps1",
@@ -99,16 +311,6 @@
       "path": "bootstrap/install.sh",
       "platform": "macos",
       "reason": "Installs macOS Homebrew and launchd dependencies."
-    },
-    {
-      "path": "bootstrap/package.sh",
-      "platform": "posix",
-      "reason": "Builds the POSIX tar distribution with platform-native tools."
-    },
-    {
-      "path": "bootstrap/release.ps1",
-      "platform": "windows",
-      "reason": "Publishes Windows-authored release artifacts through PowerShell tooling."
     },
     {
       "path": "bootstrap/render-config.sh",

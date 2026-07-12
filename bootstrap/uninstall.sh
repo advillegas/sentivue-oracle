@@ -1,37 +1,43 @@
 #!/usr/bin/env bash
-# Uninstall the appliance's system integration points. The repo itself stays.
-#   oracle uninstall            remove services + PATH symlink (models kept)
-#   oracle uninstall --purge    also delete models, tools, caches, vendor checkouts
+# Ownership-scoped uninstaller. Default behavior is a read-only dry run.
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT"
 
-echo "==> stopping services"
-bash serving/service.sh stop 2>/dev/null || true
-launchctl bootout "gui/$(id -u)/com.sentivue.llamaswap" 2>/dev/null || true
-rm -f "$HOME/Library/LaunchAgents/com.sentivue.llamaswap.plist"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+HOME_ROOT="${ORACLE_HOME:-$HOME}"
+APPLY=0
+PURGE=0
+CONFIRM_PURGE=0
 
-if [[ -f /Library/LaunchDaemons/com.sentivue.wiredlimit.plist ]]; then
-  echo "==> removing wired-limit LaunchDaemon (sudo)"
-  sudo launchctl bootout system/com.sentivue.wiredlimit 2>/dev/null || true
-  sudo rm -f /Library/LaunchDaemons/com.sentivue.wiredlimit.plist
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --apply) APPLY=1 ;;
+    --purge) PURGE=1 ;;
+    --confirm-purge) CONFIRM_PURGE=1 ;;
+    --root) ROOT="${2:-}"; shift ;;
+    --home) HOME_ROOT="${2:-}"; shift ;;
+    *) echo "usage: uninstall.sh [--apply] [--purge --confirm-purge] [--root DIR] [--home DIR]" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+PYTHON_BIN=""
+if [[ -n "${ORACLE_PYTHON:-}" ]] &&
+   "$ORACLE_PYTHON" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
+  PYTHON_BIN="$ORACLE_PYTHON"
+else
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
+      PYTHON_BIN="$candidate"
+      break
+    fi
+  done
 fi
+[[ -n "$PYTHON_BIN" ]] || { echo "uninstall: Python 3.12 or newer is required" >&2; exit 127; }
 
-echo "==> removing pf hardening (if active)"
-sudo bash bootstrap/harden-offline.sh off 2>/dev/null || true
-
-echo "==> removing PATH symlink"
-rm -f "$(brew --prefix 2>/dev/null)/bin/oracle" "$HOME/.local/bin/oracle" 2>/dev/null || true
-
-if command -v docker >/dev/null 2>&1; then
-  echo "==> stopping supabase stack (volumes kept unless --purge)"
-  ( cd connectors/supabase && docker compose down 2>/dev/null ) || true
-fi
-
-if [[ "${1:-}" == "--purge" ]]; then
-  echo "==> PURGE: models, tools, vendor, engine caches, runtime state"
-  rm -rf models .tools harness/ecc/vendor engines/opencode/xdg-data \
-         .worktrees logs state .install-state connectors/supabase/volumes
-fi
-
-echo "Uninstalled. The repo and your memory/ ledger remain at: $ROOT"
+ARGS=(uninstall --root "$ROOT" --home "$HOME_ROOT")
+[[ "$APPLY" -eq 1 ]] && ARGS+=(--apply)
+[[ "$PURGE" -eq 1 ]] && ARGS+=(--purge)
+[[ "$CONFIRM_PURGE" -eq 1 ]] && ARGS+=(--confirm-purge)
+exec "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" "${ARGS[@]}"

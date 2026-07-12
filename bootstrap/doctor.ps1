@@ -34,6 +34,52 @@ foreach ($eng in @("claude.cmd", "opencode.cmd", "kilo.cmd")) {
     if (Test-Path ".tools\npm\$eng") { OK "engine: $eng" } else { BAD "engine missing: $eng" "bin\oracle.ps1 setup" }
 }
 
+Write-Host "== lifecycle =="
+if ($python) {
+    $lifecycle = Join-Path $Root "verification\lifecycle.py"
+    & $python $lifecycle validate-dependencies --root $Root *> $null
+    if ($LASTEXITCODE -eq 0) {
+        OK "dependency pin policy valid"
+    } else {
+        BAD "dependency pin policy invalid" "$python verification\lifecycle.py validate-dependencies --root `"$Root`""
+    }
+    $cache = if ($env:ORACLE_DEPENDENCY_CACHE) {
+        $env:ORACLE_DEPENDENCY_CACHE
+    } else {
+        Join-Path $Root "incoming\dependency-cache"
+    }
+    $manifest = Join-Path $cache "manifest.json"
+    if (Test-Path -LiteralPath $manifest) {
+        & $python $lifecycle validate-dependencies --root $Root --manifest $manifest --cache $cache *> $null
+        if ($LASTEXITCODE -eq 0) {
+            OK "dependency-cache manifest and hashes valid"
+        } else {
+            BAD "dependency-cache validation failed" "re-export dependencies with bootstrap\export-dependencies.ps1"
+        }
+    } else {
+        MEH "dependency-cache manifest missing" "export online artifacts before reproducible/offline install"
+    }
+} else {
+    BAD "lifecycle checks need Python" "bootstrap\ensure-tools.ps1"
+}
+$statePath = Join-Path $Root ".install-state\state.json"
+if (Test-Path -LiteralPath $statePath) {
+    try {
+        $installState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+        if ($installState.schema_version -eq 1 -and
+            $installState.input_sha256 -match "^[0-9a-f]{64}$" -and
+            $installState.installation_root -eq $Root) {
+            OK "install state records input hash and ownership"
+        } else {
+            BAD "install state fields are invalid" "re-run bin\oracle.ps1 setup"
+        }
+    } catch {
+        BAD "install state is unreadable" "re-run bin\oracle.ps1 setup"
+    }
+} else {
+    MEH "install state missing" "run bin\oracle.ps1 setup"
+}
+
 Write-Host "== platform scopes =="
 $PolicyPath = Join-Path $Root "verification\policy.json"
 if (Test-Path $PolicyPath) {

@@ -12,6 +12,54 @@
 param([Parameter(Position = 0)][string]$Cmd = "launch")
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$DependencyCache = if ($env:ORACLE_DEPENDENCY_CACHE) {
+    $env:ORACLE_DEPENDENCY_CACHE
+} else {
+    Join-Path $Root "incoming\dependency-cache"
+}
+$ArtifactManifest = Join-Path $DependencyCache "manifest.json"
+
+function Get-LockedVersion([string]$Name) {
+    $line = Get-Content (Join-Path $Root "VERSIONS.lock") |
+        Where-Object { $_ -match "^$([regex]::Escape($Name))=" } |
+        Select-Object -First 1
+    if (-not $line) { throw "missing $Name in VERSIONS.lock" }
+    return ($line -split "=", 2)[1].Trim()
+}
+
+function Get-CachedArtifact([string]$Id, [string]$Version) {
+    $python = Join-Path $Root "env\.venv\Scripts\python.exe"
+    if (-not (Test-Path $python)) {
+        $python = (Get-Command python -ErrorAction Stop).Source
+    }
+    $lifecycleArgs = @(
+        (Join-Path $Root "verification\lifecycle.py"), "artifact-path",
+        "--manifest", $ArtifactManifest, "--cache", $DependencyCache,
+        "--artifact-id", $Id,
+        "--expected-requested-version", $Version
+    )
+    if ($Version -ne "dynamic") {
+        $lifecycleArgs += @("--expected-version", $Version)
+    }
+    $path = (& $python @lifecycleArgs)
+    if ($LASTEXITCODE -ne 0) { throw "cached artifact validation failed: $Id" }
+    return $path.Trim()
+}
+
+function Write-Utf8NoBomAtomic([string]$Path, [string]$Text) {
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $temporary = Join-Path $parent (".{0}.{1}.tmp" -f
+        [IO.Path]::GetFileName($Path), [Guid]::NewGuid().ToString("N"))
+    try {
+        [IO.File]::WriteAllText(
+            $temporary, $Text, (New-Object Text.UTF8Encoding($false))
+        )
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
 
 function Find-Codium {
     $c = Get-Command codium -ErrorAction SilentlyContinue
@@ -92,7 +140,8 @@ function Update-UserConfig {
         icon = "circuit-board"; color = "terminal.ansiYellow"; overrideName = $true
     }
     $settings["terminal.integrated.profiles.windows"] = $profiles
-    ConvertTo-Json -InputObject $settings -Depth 20 | Set-Content -Path $settingsPath
+    $settingsJson = ConvertTo-Json -InputObject $settings -Depth 20
+    Write-Utf8NoBomAtomic $settingsPath ($settingsJson + "`n")
     if (-not $Quiet) { Write-Host "==> merged VSCodium user settings (agent-tab profiles, telemetry off)" }
 
     # Keybindings for new agent tabs (created only if the user has none yet).
@@ -103,12 +152,13 @@ function Update-UserConfig {
         # normalize our own earlier defaults back to editor tabs
         $raw = Get-Content $keysPath -Raw
         if ($raw -match "Oracle Agent: Claude Code" -and $raw -match '"location": "view"') {
-            $raw -replace '"location": "view"', '"location": "editor"' | Set-Content $keysPath
+            $normalized = $raw -replace '"location": "view"', '"location": "editor"'
+            Write-Utf8NoBomAtomic $keysPath $normalized
             if (-not $Quiet) { Write-Host "==> keybindings normalized: agent tabs open as editor tabs" }
         }
     }
     if (-not (Test-Path $keysPath)) {
-        @'
+        $keybindings = @'
 [
   {
     "key": "ctrl+shift+a",
@@ -126,7 +176,8 @@ function Update-UserConfig {
     "args": { "profileName": "Oracle Agent: OpenCode", "location": "editor" }
   }
 ]
-'@ | Set-Content -Path $keysPath
+'@
+        Write-Utf8NoBomAtomic $keysPath ($keybindings + "`n")
         if (-not $Quiet) { Write-Host "==> wrote keybindings: Ctrl+Shift+A agent tab, Ctrl+Shift+Alt+A worktree, Ctrl+Alt+O opencode" }
     }
 }
@@ -144,19 +195,14 @@ switch ($Cmd) {
         New-Item -ItemType Directory -Force -Path $vsix | Out-Null
         # migration: Roo Code was discontinued (May 2026) - replace it with Kilo
         & $codium --uninstall-extension RooVeterinaryInc.roo-cline 2>$null | Out-Null
-        # Continue ships native modules (sqlite3, lancedb, onnx) - must take the
-        # win32-x64 build, not the universal one, or activation fails.
-        foreach ($ext in @(@("Continue", "continue", "win32-x64"), @("kilocode", "kilo-code", "win32-x64"))) {
-            $ns = $ext[0]; $name = $ext[1]; $plat = $ext[2]
-            $meta = $null
-            if ($plat) {
-                try { $meta = Invoke-RestMethod -Uri "https://open-vsx.org/api/$ns/$name/$plat/latest" } catch { $meta = $null }
-            }
-            if (-not $meta) { $meta = Invoke-RestMethod -Uri "https://open-vsx.org/api/$ns/$name/latest" }
-            $tag = if ($plat) { "$plat-" } else { "" }
-            $file = Join-Path $vsix "$ns.$name-$tag$($meta.version).vsix"
-            Write-Host "==> $ns.$name $($meta.version) $plat"
-            if (-not (Test-Path $file)) { Invoke-WebRequest -Uri $meta.files.download -OutFile $file }
+        # Native extensions are pre-exported for win32-x64 and hash-verified.
+        foreach ($ext in @(
+            @("continue-vsix-windows-x64", "CONTINUE_VSIX_VERSION"),
+            @("kilo-vsix-windows-x64", "KILO_VSIX_VERSION")
+        )) {
+            $version = Get-LockedVersion $ext[1]
+            $file = Get-CachedArtifact $ext[0] $version
+            Write-Host "==> $($ext[0]) $version"
             & $codium --install-extension $file --force | Out-Null
         }
         Install-OracleAgentsExtension

@@ -5,6 +5,31 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 source VERSIONS.lock
+DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
+ARTIFACT_MANIFEST="$DEPENDENCY_CACHE/manifest.json"
+
+find_python() {
+  local candidate
+  for candidate in "$ROOT/env/.venv/bin/python" python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+artifact_path() {
+  local artifact_id="$1" expected_version="$2" python_bin
+  python_bin="$(find_python)" || {
+    echo "ERROR: Python is required to validate the dependency cache." >&2
+    return 1
+  }
+  "$python_bin" "$ROOT/verification/lifecycle.py" artifact-path \
+    --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+    --artifact-id "$artifact_id" --expected-version "$expected_version" \
+    --expected-requested-version "$expected_version"
+}
 
 if [[ "$(uname -s)/$(uname -m)" != "Darwin/arm64" && -z "${ORACLE_SKIP_OS_CHECK:-}" ]]; then
   echo "ERROR: deployment target is macOS arm64 (Mac Studio)."
@@ -14,6 +39,8 @@ fi
 
 echo "==> [1/8] Homebrew packages"
 command -v brew >/dev/null || { echo "ERROR: install Homebrew first: https://brew.sh"; exit 1; }
+export HOMEBREW_CACHE="$DEPENDENCY_CACHE/homebrew"
+export HOMEBREW_NO_AUTO_UPDATE=1
 brew install "$LLAMA_CPP_BREW_FORMULA" "node@${NODE_MAJOR}" uv jq git gettext || true
 brew pin "$LLAMA_CPP_BREW_FORMULA" || true
 # node@N is keg-only: without linking, npm/node are NOT on PATH on a clean Mac
@@ -28,9 +55,10 @@ chmod +x bootstrap/*.sh serving/service.sh engines/*/launch.sh harness/ecc/insta
 echo "==> [2/8] llama-swap ${LLAMA_SWAP_VERSION} (pinned release binary)"
 mkdir -p .tools/bin
 if [[ ! -x .tools/bin/llama-swap ]]; then
-  curl -fL --retry 3 -o /tmp/llama-swap.tar.gz \
-    "https://github.com/mostlygeek/llama-swap/releases/download/${LLAMA_SWAP_VERSION}/llama-swap_${LLAMA_SWAP_VERSION#v}_darwin_arm64.tar.gz"
-  tar -xzf /tmp/llama-swap.tar.gz -C .tools/bin llama-swap
+  LLAMA_SWAP_ARCHIVE="$(
+    artifact_path "llama-swap-darwin-arm64" "$LLAMA_SWAP_VERSION"
+  )"
+  tar -xzf "$LLAMA_SWAP_ARCHIVE" -C .tools/bin llama-swap
   chmod +x .tools/bin/llama-swap
 fi
 
@@ -38,10 +66,13 @@ echo "==> [3/8] Engines (pinned, repo-local npm prefix — nothing global)"
 # npm install of Claude Code is deprecated upstream in favor of the native installer,
 # but npm is the right choice here: exact version pin, no background auto-updates.
 export npm_config_prefix="$ROOT/.tools/npm"
+export npm_config_cache="$DEPENDENCY_CACHE/npm"
+export npm_config_offline=true
 mkdir -p "$npm_config_prefix"
-npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_NPM_VERSION}" \
-              "opencode-ai@${OPENCODE_NPM_VERSION}" \
-              "@kilocode/cli@${KILO_CLI_NPM_VERSION}"
+CLAUDE_ARCHIVE="$(artifact_path "npm-claude-code" "$CLAUDE_CODE_NPM_VERSION")"
+OPENCODE_ARCHIVE="$(artifact_path "npm-opencode" "$OPENCODE_NPM_VERSION")"
+KILO_ARCHIVE="$(artifact_path "npm-kilo-cli" "$KILO_CLI_NPM_VERSION")"
+npm install -g "$CLAUDE_ARCHIVE" "$OPENCODE_ARCHIVE" "$KILO_ARCHIVE"
 
 echo "==> [3b/8] 'oracle' CLI on PATH"
 chmod +x bin/oracle
@@ -54,11 +85,11 @@ else
 fi
 
 echo "==> [4/8] Python quant environment (uv)"
-( cd env && uv sync )
+( cd env && uv sync --offline --frozen )
 # Warm uvx caches for the MCP servers so they launch offline later.
-uvx --from "$MCP_DUCKDB" mcp-server-duckdb --help >/dev/null 2>&1 || true
-uvx --from "$MCP_POSTGRES" postgres-mcp --help  >/dev/null 2>&1 || true
-uv tool install "${HF_CLI}" 2>/dev/null || true
+uvx --offline --from "$MCP_DUCKDB" mcp-server-duckdb --help >/dev/null 2>&1 || true
+uvx --offline --from "$MCP_POSTGRES" postgres-mcp --help  >/dev/null 2>&1 || true
+uv tool install --offline "${HF_CLI}" 2>/dev/null || true
 
 echo "==> [5/8] Skills -> both engines"
 bash bootstrap/sync-skills.sh

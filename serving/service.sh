@@ -9,8 +9,10 @@ BIN="$ROOT/.tools/bin/llama-swap"
 LOGDIR="$ROOT/logs"
 
 write_plist() {
+  local temporary
   mkdir -p "$LOGDIR" "$(dirname "$PLIST")"
-  cat > "$PLIST" <<EOF
+  temporary="$(mktemp "${PLIST}.tmp.XXXXXX")"
+  if ! cat > "$temporary" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -31,6 +33,14 @@ write_plist() {
   <key>StandardErrorPath</key><string>$LOGDIR/llama-swap.err.log</string>
 </dict></plist>
 EOF
+  then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$PLIST"; then
+    rm -f "$temporary"
+    return 1
+  fi
 }
 
 case "${1:-}" in

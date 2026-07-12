@@ -11,9 +11,54 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Tools = Join-Path $Root ".tools\win"
 $Rendered = Join-Path $Root "serving\llama-swap.rendered.win.yaml"
 $PidFile = Join-Path $Root "state\llama-swap.pid"
-# pins (see VERSIONS.lock)
-$LlamaTag = "b9948"
-$SwapVer = "236"
+$DependencyCache = if ($env:ORACLE_DEPENDENCY_CACHE) {
+    $env:ORACLE_DEPENDENCY_CACHE
+} else {
+    Join-Path $Root "incoming\dependency-cache"
+}
+$ArtifactManifest = Join-Path $DependencyCache "manifest.json"
+
+function Get-LockedVersion([string]$Name) {
+    $line = Get-Content (Join-Path $Root "VERSIONS.lock") |
+        Where-Object { $_ -match "^$([regex]::Escape($Name))=" } |
+        Select-Object -First 1
+    if (-not $line) { throw "missing $Name in VERSIONS.lock" }
+    return ($line -split "=", 2)[1].Trim()
+}
+
+function Get-CachedArtifact([string]$Id, [string]$Version) {
+    $python = Join-Path $Root "env\.venv\Scripts\python.exe"
+    if (-not (Test-Path $python)) {
+        $python = (Get-Command python -ErrorAction Stop).Source
+    }
+    $lifecycleArgs = @(
+        (Join-Path $Root "verification\lifecycle.py"), "artifact-path",
+        "--manifest", $ArtifactManifest, "--cache", $DependencyCache,
+        "--artifact-id", $Id, "--expected-version", $Version,
+        "--expected-requested-version", $Version
+    )
+    $path = (& $python @lifecycleArgs)
+    if ($LASTEXITCODE -ne 0) { throw "cached artifact validation failed: $Id" }
+    return $path.Trim()
+}
+
+function Write-Utf8NoBomAtomic([string]$Path, [string]$Text) {
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    $temporary = Join-Path $parent (".{0}.{1}.tmp" -f
+        [IO.Path]::GetFileName($Path), [Guid]::NewGuid().ToString("N"))
+    try {
+        [IO.File]::WriteAllText(
+            $temporary, $Text, (New-Object Text.UTF8Encoding($false))
+        )
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$LlamaTag = Get-LockedVersion "LLAMA_CPP_WIN_TAG"
+$SwapVer = Get-LockedVersion "LLAMA_SWAP_VERSION"
 
 function Get-ActiveModels {
     # A model is active if the profile selects it OR it is already downloaded -
@@ -44,16 +89,14 @@ switch ($Cmd) {
         $swapExe = Join-Path $Tools "llama-swap.exe"
         if (-not (Test-Path $swapExe)) {
             Write-Host "==> llama-swap v$SwapVer (windows_amd64)"
-            $z = Join-Path $env:TEMP "llama-swap.zip"
-            Invoke-WebRequest -Uri "https://github.com/mostlygeek/llama-swap/releases/download/v$SwapVer/llama-swap_${SwapVer}_windows_amd64.zip" -OutFile $z
-            Expand-Archive -Path $z -DestinationPath $Tools -Force; Remove-Item $z
+            $z = Get-CachedArtifact "llama-swap-windows-amd64" $SwapVer
+            Expand-Archive -LiteralPath $z -DestinationPath $Tools -Force
         }
         $serverExe = Join-Path $Tools "llama\llama-server.exe"
         if (-not (Test-Path $serverExe)) {
             Write-Host "==> llama.cpp $LlamaTag (win-vulkan-x64: AMD/Intel/NVIDIA GPU accel)"
-            $z = Join-Path $env:TEMP "llamacpp.zip"
-            Invoke-WebRequest -Uri "https://github.com/ggml-org/llama.cpp/releases/download/$LlamaTag/llama-$LlamaTag-bin-win-vulkan-x64.zip" -OutFile $z
-            Expand-Archive -Path $z -DestinationPath (Join-Path $Tools "llama") -Force; Remove-Item $z
+            $z = Get-CachedArtifact "llama-cpp-windows-vulkan" $LlamaTag
+            Expand-Archive -LiteralPath $z -DestinationPath (Join-Path $Tools "llama") -Force
         }
         Write-Host "serving toolchain ready under .tools\win"
     }
@@ -139,7 +182,7 @@ switch ($Cmd) {
         }
         $lines += "  resident:"; $lines += "    swap: false"; $lines += "    exclusive: false"; $lines += "    persistent: true"; $lines += "    members:"
         foreach ($m in $resident) { $lines += "      - `"$m`"" }
-        Set-Content -Path $Rendered -Value ($lines -join "`n")
+        Write-Utf8NoBomAtomic $Rendered (($lines -join "`n") + "`n")
         Write-Host "rendered $Rendered ($($big.Count) big, $($resident.Count) resident)"
     }
     "start" {

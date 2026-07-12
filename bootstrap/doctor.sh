@@ -32,6 +32,56 @@ done
 command -v oracle >/dev/null && ok "oracle on PATH" \
   || meh "oracle not on PATH" "ln -sf $ROOT/bin/oracle \$(brew --prefix)/bin/oracle"
 
+echo "== lifecycle =="
+python_bin=""
+for candidate in "$ROOT/env/.venv/bin/python" python3 python; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    python_bin="$candidate"
+    break
+  fi
+done
+if [[ -n "$python_bin" ]]; then
+  if "$python_bin" verification/lifecycle.py validate-dependencies \
+      --root "$ROOT" >/dev/null 2>&1; then
+    ok "dependency pin policy valid"
+  else
+    bad "dependency pin policy invalid" \
+      "$python_bin verification/lifecycle.py validate-dependencies --root \"$ROOT\""
+  fi
+  dependency_cache="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
+  artifact_manifest="$dependency_cache/manifest.json"
+  if [[ -f "$artifact_manifest" ]]; then
+    if "$python_bin" verification/lifecycle.py validate-dependencies \
+        --root "$ROOT" --manifest "$artifact_manifest" \
+        --cache "$dependency_cache" >/dev/null 2>&1; then
+      ok "dependency-cache manifest and hashes valid"
+    else
+      bad "dependency-cache validation failed" \
+        "re-export dependencies with bootstrap/export-dependencies.sh"
+    fi
+  else
+    meh "dependency-cache manifest missing" \
+      "export online artifacts before reproducible/offline install"
+  fi
+else
+  bad "lifecycle checks need Python" "bootstrap/ensure-tools.sh"
+fi
+state_path="$ROOT/.install-state/state.json"
+if [[ -f "$state_path" ]]; then
+  if jq -e --arg root "$ROOT" \
+      '.schema_version == 1 and
+       (.input_sha256 | test("^[0-9a-f]{64}$")) and
+       .installation_root == $root and
+       (.owned_paths | type == "array")' \
+      "$state_path" >/dev/null 2>&1; then
+    ok "install state records input hash and ownership"
+  else
+    bad "install state fields are invalid" "re-run ./install"
+  fi
+else
+  meh "install state missing" "run ./install"
+fi
+
 echo "== platform scopes =="
 POLICY="verification/policy.json"
 if [[ -f "$POLICY" ]] && command -v jq >/dev/null 2>&1; then

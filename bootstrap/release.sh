@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build checksummed source archives from an immutable Git commit.
+# Build and validate every local release artifact before optional publication.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,18 +7,20 @@ ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERSION=""
 REVISION="HEAD"
 OUTPUT=""
+PUBLISH=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --version) VERSION="${2:-}"; shift ;;
     --revision) REVISION="${2:-}"; shift ;;
     --output) OUTPUT="${2:-}"; shift ;;
-    *) echo "usage: package.sh --version vX.Y.Z [--revision COMMIT] [--output DIR]" >&2; exit 2 ;;
+    --publish) PUBLISH=1 ;;
+    *) echo "usage: release.sh --version vX.Y.Z [--revision COMMIT] [--output DIR] [--publish]" >&2; exit 2 ;;
   esac
   shift
 done
 
-[[ -n "$VERSION" ]] || { echo "package: --version is required" >&2; exit 2; }
+[[ -n "$VERSION" ]] || { echo "release: --version is required" >&2; exit 2; }
 [[ -n "$OUTPUT" ]] || OUTPUT="$ROOT/artifacts/releases/$VERSION"
 
 PYTHON_BIN=""
@@ -34,7 +36,10 @@ else
     fi
   done
 fi
-[[ -n "$PYTHON_BIN" ]] || { echo "package: Python 3.12 or newer is required" >&2; exit 127; }
+[[ -n "$PYTHON_BIN" ]] || { echo "release: Python 3.12 or newer is required" >&2; exit 127; }
 
-exec "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" package \
-  --root "$ROOT" --version "$VERSION" --revision "$REVISION" --output "$OUTPUT"
+ARGS=(release --root "$ROOT" --version "$VERSION" --revision "$REVISION" --output "$OUTPUT")
+if [[ "$PUBLISH" -eq 1 ]]; then ARGS+=(--publish)
+else ARGS+=(--preflight-only)
+fi
+exec "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" "${ARGS[@]}"

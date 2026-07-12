@@ -27,6 +27,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+try:
+    from verification.lifecycle import validate_dependency_inputs
+except ModuleNotFoundError:
+    from lifecycle import validate_dependency_inputs
+
 
 PASS = "PASS"
 FAIL = "FAIL"
@@ -727,20 +732,30 @@ def check_model_integrity(root: Path) -> CheckResult:
     models: dict[str, dict[str, Any]] = {}
     for line_number, line in _data_lines(manifest_path):
         fields = [field.strip() for field in line.split("|")]
-        if len(fields) != 6:
+        if len(fields) != 7:
             details.append(
-                f"serving/models.manifest:{line_number}: expected 6 fields"
+                f"serving/models.manifest:{line_number}: expected 7 fields "
+                "including revision"
             )
             continue
-        name, repository, include, slot, context, _flags = fields
+        name, repository, include, slot, context, _flags, revision = fields
         if not name or name in models:
             details.append(
                 f"serving/models.manifest:{line_number}: empty or duplicate model {name!r}"
             )
             continue
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            details.append(
+                f"serving/models.manifest:{line_number}: non-portable model name"
+            )
         if not repository or not include:
             details.append(
                 f"serving/models.manifest:{line_number}: repository/include is empty"
+            )
+        if revision != "dynamic" and not re.fullmatch(r"[0-9a-f]{40}", revision):
+            details.append(
+                f"serving/models.manifest:{line_number}: revision must be "
+                "a 40-character commit or dynamic export marker"
             )
         if slot not in {"big", "fast", "embed"}:
             details.append(
@@ -842,6 +857,23 @@ def check_model_integrity(root: Path) -> CheckResult:
         else "Profile/model/tier referential integrity failed"
     )
     return CheckResult("model_integrity", status, summary, details)
+
+
+def check_dependency_provenance(root: Path) -> CheckResult:
+    root = root.resolve()
+    details = validate_dependency_inputs(root, reproducible=False)
+    if details:
+        return CheckResult(
+            "dependency_provenance",
+            FAIL,
+            "Dependency/model pin policy failed",
+            details,
+        )
+    return CheckResult(
+        "dependency_provenance",
+        PASS,
+        "Dependency inputs are centralized, exact, or explicitly export-resolved",
+    )
 
 
 def _strip_jsonc(text: str) -> str:
@@ -1801,6 +1833,7 @@ def _execute_static_checks(
         ("conductor_tests", lambda: check_conductor_tests(root)),
         ("line_policy", lambda: check_line_policy(root)),
         ("platform_twins", lambda: check_platform_twins(root, policy)),
+        ("dependency_provenance", lambda: check_dependency_provenance(root)),
         ("model_integrity", lambda: check_model_integrity(root)),
         ("config_formats", lambda: check_config_formats(root)),
         ("path_safety", lambda: check_path_safety(root, report_dir / "artifacts")),

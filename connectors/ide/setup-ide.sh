@@ -16,20 +16,46 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VSIX_DIR="$ROOT/incoming/vsix"
+source "$ROOT/VERSIONS.lock"
+DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
+ARTIFACT_MANIFEST="$DEPENDENCY_CACHE/manifest.json"
 
-fetch_vsix() {  # fetch_vsix <namespace> <name> [target-platform]
-  # Extensions with native modules (Continue: sqlite3/lancedb/onnx) must use the
-  # platform build, not the universal one, or they fail to activate.
-  local meta url ver plat="${3:-}"
-  if [[ -n "$plat" ]]; then
-    meta="$(curl -sf --proto '=https' "https://open-vsx.org/api/$1/$2/$plat/latest" || true)"
+artifact_path() {
+  local artifact_id="$1" expected_version="$2" python_bin args
+  for python_bin in "$ROOT/env/.venv/bin/python" python3 python; do
+    if command -v "$python_bin" >/dev/null 2>&1; then
+      break
+    fi
+    python_bin=""
+  done
+  [[ -n "$python_bin" ]] || {
+    echo "ERROR: Python is required to validate the dependency cache." >&2
+    return 1
+  }
+  args=(
+    "$ROOT/verification/lifecycle.py" artifact-path
+    --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE"
+    --artifact-id "$artifact_id"
+    --expected-requested-version "$expected_version"
+  )
+  if [[ "$expected_version" != "dynamic" ]]; then
+    args+=(--expected-version "$expected_version")
   fi
-  [[ -n "${meta:-}" ]] || meta="$(curl -sf --proto '=https' "https://open-vsx.org/api/$1/$2/latest")"
-  url="$(echo "$meta" | jq -r '.files.download')"
-  ver="$(echo "$meta" | jq -r '.version')"
-  echo "==> $1.$2 $ver ${plat:-universal}" >&2
-  curl -sfL --proto '=https' -o "$VSIX_DIR/$1.$2-$ver.vsix" "$url"
-  echo "$VSIX_DIR/$1.$2-$ver.vsix"
+  "$python_bin" "${args[@]}"
+}
+
+atomic_from_stdin() {
+  local target="$1" temporary
+  mkdir -p "$(dirname "$target")"
+  temporary="$(mktemp "${target}.tmp.XXXXXX")"
+  if ! cat > "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$target"; then
+    rm -f "$temporary"
+    return 1
+  fi
 }
 
 install_oracle_agents_extension() {
@@ -126,19 +152,19 @@ update_user_config() {
     echo "WARN: could not parse existing settings.json - leaving it untouched"
     return 0
   fi
-  echo "$merged" > "$settings"
+  printf '%s\n' "$merged" | atomic_from_stdin "$settings"
   echo "==> merged VSCodium user settings (agent-tab profiles, telemetry off)"
 
   # Keybindings for new agent tabs (created only if the user has none yet)
   local keys="$dir/keybindings.json"
   if [[ -f "$keys" ]] && grep -q "Oracle Agent: Claude Code" "$keys" && grep -q '"location": "view"' "$keys"; then
     # normalize our own earlier defaults back to editor tabs
-    sed -i '' 's/"location": "view"/"location": "editor"/g' "$keys" 2>/dev/null || \
-      sed -i 's/"location": "view"/"location": "editor"/g' "$keys"
+    sed 's/"location": "view"/"location": "editor"/g' "$keys" |
+      atomic_from_stdin "$keys"
     echo "==> keybindings normalized: agent tabs open as editor tabs"
   fi
   if [[ ! -f "$keys" ]]; then
-    cat > "$keys" <<'EOF'
+    atomic_from_stdin "$keys" <<'EOF'
 [
   {
     "key": "cmd+shift+a",
@@ -165,11 +191,17 @@ case "${1:-launch}" in
   install)
     command -v codium >/dev/null || { echo "==> brew install --cask vscodium"; brew install --cask vscodium; }
     mkdir -p "$VSIX_DIR"
-    arch="darwin-arm64"; [[ "$(uname -m)" == "x86_64" ]] && arch="darwin-x64"
+    if [[ "$(uname -m)" == "x86_64" ]]; then
+      continue_id="continue-vsix-darwin-x64"
+      kilo_id="kilo-vsix-darwin-x64"
+    else
+      continue_id="continue-vsix-darwin-arm64"
+      kilo_id="kilo-vsix-darwin-arm64"
+    fi
     # migration: Roo Code was discontinued (May 2026) - replace it with Kilo
     codium --uninstall-extension RooVeterinaryInc.roo-cline >/dev/null 2>&1 || true
-    cont="$(fetch_vsix Continue continue "$arch")"
-    kilo="$(fetch_vsix kilocode kilo-code "$arch")"
+    cont="$(artifact_path "$continue_id" "$CONTINUE_VSIX_VERSION")"
+    kilo="$(artifact_path "$kilo_id" "$KILO_VSIX_VERSION")"
     codium --install-extension "$cont" --force
     codium --install-extension "$kilo" --force
     install_oracle_agents_extension

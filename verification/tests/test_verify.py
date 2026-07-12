@@ -24,6 +24,7 @@ from verification.verify import (
     check_conductor_tests,
     check_config_formats,
     check_docs_commands,
+    check_dependency_provenance,
     check_host_generated,
     check_line_policy,
     check_model_integrity,
@@ -81,9 +82,11 @@ def valid_models(root: Path) -> None:
     put(
         root,
         "serving/models.manifest",
-        "# name | repo | include | slot | ctx | flags\n"
-        "chat | example/chat | *.gguf | fast | 32768 | --temp 0.7\n"
-        "embed | example/embed | *.gguf | embed | 8192 |\n",
+        "# name | repo | include | slot | ctx | flags | revision\n"
+        "chat | example/chat | *.gguf | fast | 32768 | --temp 0.7 | dynamic\n"
+        "embed | example/embed | *.gguf | embed | 8192 | | "
+        + ("a" * 40)
+        + "\n",
     )
     put(
         root,
@@ -269,6 +272,7 @@ def test_crashed_check_preserves_explicit_id(
         "check_host_generated",
         "check_oversized",
         "check_docs_commands",
+        "check_dependency_provenance",
     ):
         monkeypatch.setattr(
             verify,
@@ -446,6 +450,94 @@ def test_model_integrity_rejects_unknown_profile_and_tier_models(
     result = check_model_integrity(tmp_path)
     assert result.status == FAIL
     assert any("missing" in detail for detail in result.details)
+
+
+def test_model_integrity_requires_explicit_reproducibility_revision(
+    tmp_path: Path,
+) -> None:
+    valid_models(tmp_path)
+    manifest = tmp_path / "serving/models.manifest"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "example/chat | *.gguf | fast | 32768 | --temp 0.7 | dynamic",
+            "example/chat | *.gguf | fast | 32768 | --temp 0.7 | main",
+        ),
+        encoding="utf-8",
+    )
+
+    result = check_model_integrity(tmp_path)
+
+    assert result.status == FAIL
+    assert any("revision" in detail for detail in result.details)
+
+
+def test_dependency_provenance_gate_requires_central_exact_or_declared_dynamic_pins(
+    tmp_path: Path,
+) -> None:
+    put(
+        tmp_path,
+        "VERSIONS.lock",
+        "EXACT_TOOL_VERSION=v1.2.3\nDYNAMIC_IDE_VERSION=dynamic\n",
+    )
+    put(
+        tmp_path,
+        "serving/models.manifest",
+        "chat | example/chat | model.gguf | fast | 32768 | | dynamic\n",
+    )
+    put(
+        tmp_path,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "dependency_inputs": [
+                    {
+                        "id": "exact-tool",
+                        "version_key": "EXACT_TOOL_VERSION",
+                        "allow_dynamic": False,
+                    },
+                    {
+                        "id": "dynamic-ide",
+                        "version_key": "DYNAMIC_IDE_VERSION",
+                        "allow_dynamic": True,
+                    },
+                ]
+            }
+        )
+        + "\n",
+    )
+    assert check_dependency_provenance(tmp_path).status == PASS
+
+    put(
+        tmp_path,
+        "env/pyproject.toml",
+        '[project]\nname = "fixture"\nversion = "1.0.0"\n',
+    )
+    result = check_dependency_provenance(tmp_path)
+    assert result.status == FAIL
+    assert any("uv.lock" in detail for detail in result.details)
+    put(tmp_path, "env/uv.lock", "version = 1\nrevision = 3\n")
+    assert check_dependency_provenance(tmp_path).status == PASS
+
+    versions = tmp_path / "VERSIONS.lock"
+    versions.write_text(
+        versions.read_text(encoding="utf-8")
+        + "UNDECLARED_TOOL_VERSION=9.9.9\n",
+        encoding="utf-8",
+    )
+    result = check_dependency_provenance(tmp_path)
+    assert result.status == FAIL
+    assert any("UNDECLARED_TOOL_VERSION" in detail for detail in result.details)
+
+    versions.write_text(
+        versions.read_text(encoding="utf-8")
+        .replace("UNDECLARED_TOOL_VERSION=9.9.9\n", "")
+        .replace("v1.2.3", "latest"),
+        encoding="utf-8",
+    )
+    result = check_dependency_provenance(tmp_path)
+
+    assert result.status == FAIL
+    assert any("EXACT_TOOL_VERSION" in detail for detail in result.details)
 
 
 @pytest.mark.parametrize(

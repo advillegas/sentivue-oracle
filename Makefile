@@ -7,6 +7,7 @@ ROOT         := $(shell pwd)
 ENGINE       ?= claude
 HOURS        ?= 24
 M            ?= conductor/missions/example.toml
+VERSION      ?=
 PY           := uv run --project env python
 
 .PHONY: help install models render serve stop status verify doctor harden \
@@ -24,8 +25,9 @@ help:
 	@echo "  make verify         offline end-to-end smoke test"
 	@echo "  make doctor         full diagnostic with suggested fixes"
 	@echo "  make harden         install optional pf firewall profile (offline enforcement)"
-	@echo "  make dist           package a clean tarball for transfer to the Mac"
-	@echo "  make uninstall      remove services/symlinks (add PURGE=1 to delete models)"
+	@echo "  make dist VERSION=vX.Y.Z   build immutable, checksummed source archives"
+	@echo "  make uninstall      ownership-scoped dry run (add APPLY=1 to execute)"
+	@echo "  make uninstall APPLY=1 PURGE=1 CONFIRM_PURGE=1  also remove runtime roots"
 	@echo "  make claude         interactive session (Claude Code engine)"
 	@echo "  make opencode       interactive session (OpenCode engine)"
 	@echo "  make mission M=<toml> ENGINE=<claude|opencode> HOURS=<n>"
@@ -58,10 +60,11 @@ doctor:
 	bash bootstrap/doctor.sh
 
 dist:
-	bash bootstrap/package.sh
+	@test -n "$(VERSION)" || { echo "VERSION=vX.Y.Z is required"; exit 2; }
+	bash bootstrap/package.sh --version "$(VERSION)"
 
 uninstall:
-	bash bootstrap/uninstall.sh $(if $(PURGE),--purge,)
+	bash bootstrap/uninstall.sh $(if $(APPLY),--apply,) $(if $(PURGE),--purge,) $(if $(CONFIRM_PURGE),--confirm-purge,)
 
 harden:
 	sudo bash bootstrap/harden-offline.sh
@@ -79,7 +82,7 @@ report:
 	@ls -1t reports/ 2>/dev/null | head -5 || echo "no reports yet"
 
 env:
-	cd env && uv sync
+	cd env && uv sync --frozen
 
 skills:
 	bash bootstrap/sync-skills.sh

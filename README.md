@@ -95,14 +95,17 @@ memory/         plain-text ledger + state (runtime, gitignored)
 - **Windows:** `SentiVue-Oracle-Setup-<ver>.cmd` — double-click; a console wizard
   prompts through location → git vault setup → optional model pre-download.
 
-Both are self-extracting (the full repo rides inside, built from `git archive` so
-they're always clean) and every step is resumable. Plain `.tar.gz`/`.zip` archives
-sit alongside for scripted installs; the repo is private, so downloads authenticate
-via `gh release download` or a signed-in browser. Publishing a new version:
-`bootstrap/release.ps1 -Version vX.Y.Z`.
+Both are self-extracting (the full repo rides inside, built from an immutable Git
+revision and package allowlist) and every step is resumable. Plain `.tar.gz`/`.zip`
+archives sit alongside for scripted installs; the repo is private, so downloads
+authenticate via `gh release download` or a signed-in browser. Release commands are
+safe by default: `bootstrap/release.ps1 -Version vX.Y.Z` performs local preflight
+only; publishing requires `bootstrap/release.ps1 -Version vX.Y.Z -Publish`.
 
-Fully offline alternative: `make dist` produces the tarball locally for USB/AirDrop,
-or plain `git clone` from the vault.
+For offline transfer, `make dist VERSION=vX.Y.Z` produces checksummed source
+archives. Exported online dependencies live separately under
+`incoming/dependency-cache/`; carry that cache with the source archive. A plain
+`git clone` from the vault remains available for source-only transfer.
 
 ### Pre-downloading the models on Windows (optional, saves a night)
 
@@ -145,7 +148,8 @@ oracle harden        # software air gap (pf egress block); undo: oracle harden o
 ```
 
 (`make …` targets remain for everything if you prefer; `oracle uninstall`
-cleanly removes services, symlinks, and — with `--purge` — the models.)
+previews ownership-scoped removal. Applying it is explicit, and runtime-root
+purge requires a second confirmation flag.)
 
 ## Engine choice
 
@@ -326,8 +330,9 @@ Full detail in [`docs/SECURITY.md`](docs/SECURITY.md). In brief:
   blocked, loopback intact), `oracle doctor` (security-posture section).
 - Network touches the machine in exactly two ways after bootstrap: envoy windows
   (fetch-only, allowlisted, quarantined, provenance-tracked) — and nothing else.
-- The only broad network phase is bootstrap: Homebrew, npm pins, model downloads,
-  docker image pulls, uv cache warm. `make verify` proves the stack works offline.
+- Network acquisition is an explicit export/model-download phase. Installers consume
+  the hashed `incoming/dependency-cache/`, exact package locks, and recorded model
+  revisions; `make verify` proves the resulting stack works offline.
 
 ## Model ensemble (defaults, editable in `serving/models.manifest`)
 

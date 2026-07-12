@@ -1,6 +1,7 @@
 # SentiVue Oracle — pinned versions (single source of truth for bootstrap)
-# Everything here is installed exactly at these versions. Bump deliberately, one at a time,
-# and re-run `make verify` after any change.
+# Exact values are installed as written. Entries marked dynamic are permitted only
+# through the hashed dependency export manifest, which records their resolution.
+# Bump deliberately, one at a time, and re-run `make verify` after any change.
 #
 # BEFORE FIRST BOOTSTRAP on the Mac: sanity-check that each pin still exists
 # (npm view <pkg> versions; the GitHub releases pages; docker manifest inspect).
@@ -35,22 +36,28 @@ GSTACK_PIN=7c9df1c568a9ea745508f679a329332b2c338063  # main 2026-07-10 (no tags)
 
 # --- serving (verified on GitHub releases 2026-07-09/10) ---
 LLAMA_CPP_BREW_FORMULA=llama.cpp        # brew pin after install (Mac)
+LLAMA_CPP_BREW_VERSION=dynamic          # exact bottle revision is captured by dependency export
 LLAMA_SWAP_VERSION=v236                 # github: mostlygeek/llama-swap
                                         # assets: ..._darwin_arm64.tar.gz / ..._windows_amd64.zip
 LLAMA_CPP_WIN_TAG=b9948                 # github: ggml-org/llama.cpp
                                         # asset: llama-b9948-bin-win-vulkan-x64.zip (AMD/Intel/NVIDIA)
-                                        # (serve-windows.ps1 carries these two pins)
 
 # --- tooling ---
-NODE_MAJOR=22
+PYTHON_VERSION=3.12.10                  # verified on the Windows authoring host
+UV_VERSION=0.11.26                      # verified on the Windows authoring host
+NODE_VERSION=dynamic                    # package-manager resolution is exported before reproducible install
+NODE_MAJOR=22                           # compatibility selector, not an artifact identity
 UV_INSTALL=brew                         # uv via homebrew
-HF_CLI=huggingface_hub[cli]             # provides `hf download`
+HF_CLI_VERSION=dynamic                  # exact wheel set is captured by dependency export
+HF_CLI=huggingface_hub[cli]             # package name; version is resolved separately
 GITEA_BREW_FORMULA=gitea                # optional vault UI; brew pin after install
-VSCODIUM_CASK=vscodium                  # IDE; Continue + Kilo Code .vsix versions are
-                                        # resolved at install from open-vsx (latest)
-                                        # and recorded in incoming/PROVENANCE.md
+GITEA_VERSION=dynamic                   # exact bottle revision is captured by dependency export
+VSCODIUM_CASK=vscodium                  # package name; exact artifact is exported
+VSCODIUM_VERSION=dynamic
+CONTINUE_VSIX_VERSION=dynamic           # Open VSX resolution must be exported and hashed
+KILO_VSIX_VERSION=dynamic               # Open VSX resolution must be exported and hashed
 RUST_BREW_FORMULA=rust                  # builds desk/ (oracle-desk frontend); pin after install
-                                        # crate pins live in desk/Cargo.toml (eframe 0.29)
+RUST_VERSION=dynamic                    # exact bottle revision is captured by dependency export
 
 # --- supabase (docker images; verified on Docker Hub 2026-07-09, all arm64) ---
 SUPABASE_POSTGRES_IMAGE=supabase/postgres:15.8.1.135
@@ -62,4 +69,5 @@ SUPABASE_STUDIO_IMAGE=supabase/studio:2026.07.07-sha-a6a04f2
 MCP_DUCKDB=mcp-server-duckdb==1.1.0     # uvx (ktanaka101)
 MCP_POSTGRES=postgres-mcp==0.3.0        # uvx (crystaldba)
 
-# --- model files: resolved SHAs are appended by download-models.sh below this line ---
+# --- model files: revisions live in serving/models.manifest; dynamic resolutions
+#     and per-shard hashes are written to the dependency export manifest. ---

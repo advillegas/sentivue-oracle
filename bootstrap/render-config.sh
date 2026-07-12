@@ -21,7 +21,8 @@ first_gguf() {  # first shard of a multi-part GGUF, or the single .gguf
   echo "$f"
 }
 
-TMP="$(mktemp)"
+TMP="$(mktemp "${OUT}.tmp.XXXXXX")"
+trap 'rm -f "$TMP"' EXIT
 big_members=(); resident_members=(); missing=0
 
 cat > "$TMP" <<'EOF'
@@ -48,7 +49,7 @@ macros:
 models:
 EOF
 
-while IFS='|' read -r name repo include slot ctx flags; do
+while IFS='|' read -r name repo include slot ctx flags revision; do
   name="$(echo "$name" | xargs)"; slot="$(echo "$slot" | xargs)"
   ctx="$(echo "$ctx" | xargs)";   flags="$(echo "${flags:-}" | xargs)"
   [[ -z "$name" ]] && continue
@@ -137,5 +138,6 @@ done < <(grep -Ev '^\s*(#|$)' "$MANIFEST")
   for mdl in "${resident_members[@]}"; do echo "      - \"$mdl\""; done
 } >> "$TMP"
 
-mv "$TMP" "$OUT"
+mv -f "$TMP" "$OUT"
+trap - EXIT
 echo "Rendered $OUT (${#big_members[@]} big, ${#resident_members[@]} resident)"
