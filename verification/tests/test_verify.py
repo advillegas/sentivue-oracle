@@ -11,9 +11,11 @@ from pathlib import Path
 
 import pytest
 
+import verification.verify as verify
 from verification.verify import (
     FAIL,
     PASS,
+    PROVISIONAL,
     SKIP,
     CheckResult,
     CommandEvidence,
@@ -113,10 +115,11 @@ def test_powershell_gate_rejects_non_ascii_and_parses_ast(tmp_path: Path) -> Non
 
     (tmp_path / "scripts/non-ascii.ps1").unlink()
     result = check_powershell(tmp_path)
-    assert result.status in {PASS, SKIP}
     if powershell_executable():
         assert result.status == PASS
         assert result.commands and result.commands[0].exit_code == 0
+    else:
+        assert result.status == FAIL
 
 
 def test_bash_gate_rejects_syntax_errors(tmp_path: Path) -> None:
@@ -142,6 +145,127 @@ def test_bash_entrypoint_selects_a_working_python() -> None:
     )
     assert completed.returncode == 0, completed.stderr + completed.stdout
     assert "Run read-only SentiVue Oracle verification." in completed.stdout
+
+
+def test_powershell_entrypoint_probes_python_then_uses_py_launcher(
+    tmp_path: Path,
+) -> None:
+    if os.name != "nt":
+        pytest.skip("Windows command shims are required for this test")
+    powershell = powershell_executable()
+    if not powershell:
+        pytest.skip("PowerShell is unavailable on this platform")
+
+    verification_dir = tmp_path / "repository with spaces" / "verification"
+    verification_dir.mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "verification/verify.ps1", verification_dir)
+    put(
+        verification_dir.parent,
+        "verification/verify.py",
+        "import sys\n"
+        "assert '--static-only' in sys.argv\n"
+        "print('PY-LAUNCHER-OK')\n",
+    )
+    fake_bin = tmp_path / "fake commands"
+    fake_bin.mkdir()
+    put(fake_bin, "python.cmd", "@echo off\r\nexit /b 49\r\n")
+    put(
+        fake_bin,
+        "py.cmd",
+        '@echo off\r\n"'
+        + sys.executable
+        + '" %2 %3 %4 %5 %6 %7 %8 %9\r\n',
+    )
+    env = os.environ.copy()
+    env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+
+    completed = subprocess.run(
+        [
+            powershell,
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(verification_dir / "verify.ps1"),
+            "-StaticOnly",
+        ],
+        cwd=verification_dir.parent,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr + completed.stdout
+    assert "PY-LAUNCHER-OK" in completed.stdout
+
+
+def test_required_shell_tools_cannot_skip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    put(tmp_path, "scripts/check.ps1", "$value = 1\n")
+    put(tmp_path, "scripts/check.sh", "#!/usr/bin/env bash\ntrue\n")
+    monkeypatch.setattr(verify, "_find_powershell", lambda: None)
+    monkeypatch.setattr(verify, "_find_bash", lambda: None)
+
+    assert check_powershell(tmp_path).status == FAIL
+    assert check_bash(tmp_path).status == FAIL
+
+
+def test_aggregate_skip_is_provisional_and_nonzero(tmp_path: Path) -> None:
+    results = [CheckResult("required", SKIP, "not executed")]
+    assert verify._overall_status(results) == PROVISIONAL
+    assert verify._verification_exit_code(results) == 2
+    report_dir = write_reports(tmp_path, "20260712T120000Z-cafefeed", results)
+    payload = json.loads((report_dir / "report.json").read_text(encoding="utf-8"))
+    assert payload["overall_status"] == PROVISIONAL
+    assert verify._verification_exit_code(
+        [CheckResult("failed", FAIL, "failed")]
+    ) == 1
+    assert verify._verification_exit_code([CheckResult("ok", PASS, "done")]) == 0
+
+
+def test_crashed_check_preserves_explicit_id(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def crash(_root: Path) -> CheckResult:
+        raise RuntimeError("fixture crash")
+
+    monkeypatch.setattr(verify, "check_powershell", crash)
+    for name in (
+        "check_bash",
+        "check_python",
+        "check_conductor_tests",
+        "check_line_policy",
+        "check_model_integrity",
+        "check_config_formats",
+        "check_secrets",
+        "check_host_generated",
+        "check_oversized",
+        "check_docs_commands",
+    ):
+        monkeypatch.setattr(
+            verify,
+            name,
+            lambda _root, check_id=name: CheckResult(check_id, PASS, "passed"),
+        )
+    monkeypatch.setattr(
+        verify,
+        "check_platform_twins",
+        lambda _root, _policy: CheckResult("platform_twins", PASS, "passed"),
+    )
+    monkeypatch.setattr(
+        verify,
+        "check_path_safety",
+        lambda _root, _scratch: CheckResult("path_safety", PASS, "passed"),
+    )
+    monkeypatch.setattr(
+        verify,
+        "check_package_allowlist",
+        lambda _root, _policy: CheckResult("package_allowlist", PASS, "passed"),
+    )
+
+    results = verify._execute_static_checks(tmp_path, tmp_path / "report", {})
+    assert results[0].check_id == "powershell"
+    assert results[0].status == FAIL
+    assert results[0].details == ["RuntimeError: fixture crash"]
 
 
 def test_python_gate_rejects_compile_errors_without_source_cache(
@@ -187,6 +311,40 @@ def test_line_policy_rejects_bom_and_crlf(tmp_path: Path) -> None:
     assert any("CRLF" in detail for detail in result.details)
 
 
+def test_line_policy_rejects_utf16_and_non_utf8(tmp_path: Path) -> None:
+    add_line_policy(tmp_path)
+    source = put(tmp_path, "src/example.txt", "alpha\n".encode("utf-16"))
+    result = check_line_policy(tmp_path)
+    assert result.status == FAIL
+    assert any("BOM" in detail or "UTF-16" in detail for detail in result.details)
+
+    source.write_bytes(b"\x80\x81")
+    result = check_line_policy(tmp_path)
+    assert result.status == FAIL
+    assert any("UTF-8" in detail for detail in result.details)
+
+
+def test_line_policy_rejects_crlf_in_tracked_blob(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "core.autocrlf", "false"],
+        check=True,
+    )
+    source = put(tmp_path, "src/example.txt", b"alpha\r\nbeta\r\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "src/example.txt"], check=True)
+    add_line_policy(tmp_path)
+
+    result = check_line_policy(tmp_path)
+    assert result.status == FAIL
+    assert any("tracked blob uses CRLF" in detail for detail in result.details)
+
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "--renormalize", "src/example.txt"],
+        check=True,
+    )
+    assert check_line_policy(tmp_path).status == PASS
+
+
 def test_platform_twin_gate_requires_pair_or_documented_scope(
     tmp_path: Path,
 ) -> None:
@@ -206,6 +364,43 @@ def test_platform_twin_gate_requires_pair_or_documented_scope(
 
     put(tmp_path, "tools/task.sh", "#!/usr/bin/env bash\ntrue\n")
     assert check_platform_twins(tmp_path, {}).status == PASS
+
+
+def test_platform_twin_gate_inventories_extensionless_shebangs(
+    tmp_path: Path,
+) -> None:
+    put(tmp_path, "bin/posix-tool", "#!/usr/bin/env bash\ntrue\n")
+    assert check_platform_twins(tmp_path, {}).status == FAIL
+
+    policy = {
+        "platform_scoped": [
+            {
+                "path": "bin/posix-tool",
+                "platform": "posix",
+                "reason": "Uses a POSIX-only process interface.",
+            }
+        ]
+    }
+    assert check_platform_twins(tmp_path, policy).status == PASS
+
+
+def test_repository_scopes_are_complete_and_reported_by_doctors() -> None:
+    policy = json.loads(
+        (REPO_ROOT / "verification/policy.json").read_text(encoding="utf-8")
+    )
+    scoped_paths = {entry["path"] for entry in policy["platform_scoped"]}
+    assert {
+        "bin/envoy-discover",
+        "bin/envoy-fetch",
+        "bin/oracle-menu",
+        "install",
+    } <= scoped_paths
+
+    for relative in ("bootstrap/doctor.ps1", "bootstrap/doctor.sh"):
+        doctor = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        assert "verification/policy.json" in doctor.replace("\\", "/")
+        assert "platform_scoped" in doctor
+        assert "platform scope:" in doctor
 
 
 def test_model_integrity_rejects_unknown_profile_and_tier_models(
@@ -253,6 +448,20 @@ def test_config_gate_parses_supported_formats(
     assert check_config_formats(tmp_path).status == PASS
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "root: [1,, 2]\n",
+        "root: {first: 1,, second: 2}\n",
+    ],
+)
+def test_yaml_gate_rejects_malformed_flow_values(
+    tmp_path: Path, invalid: str
+) -> None:
+    put(tmp_path, "config/settings.yaml", invalid)
+    assert check_config_formats(tmp_path).status == FAIL
+
+
 def test_path_safety_gate_uses_argv_and_generated_config(tmp_path: Path) -> None:
     root = tmp_path / "repository with spaces"
     root.mkdir()
@@ -295,6 +504,9 @@ def test_oversized_gate_rejects_files_above_limit(tmp_path: Path) -> None:
     assert check_oversized(tmp_path, max_bytes=8).status == FAIL
 
     source.write_bytes(b"12345678")
+    assert check_oversized(tmp_path, max_bytes=8).status == FAIL
+
+    source.write_bytes(b"1234567")
     assert check_oversized(tmp_path, max_bytes=8).status == PASS
 
 
@@ -363,6 +575,39 @@ def test_reports_are_machine_readable_human_readable_and_non_overwriting(
     with pytest.raises(FileExistsError):
         write_reports(report_base, report_dir.name, results)
     assert report_json.read_bytes() == original
+
+
+def test_cli_rejects_report_root_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    outside = tmp_path / "outside evidence"
+    monkeypatch.setattr(
+        verify,
+        "_execute_static_checks",
+        lambda *_args: [CheckResult("fixture", PASS, "passed")],
+    )
+    monkeypatch.setattr(verify, "_load_policy", lambda _root: {})
+    monkeypatch.setattr(verify, "_source_digest", lambda _root: "0" * 64)
+    monkeypatch.setattr(verify, "_git_revision", lambda _root: "fixture")
+
+    with pytest.raises(SystemExit) as exc:
+        verify.main(
+            [
+                "--root",
+                str(root),
+                "--report-root",
+                str(outside),
+                "--run-id",
+                "20260712T120000Z-feedface",
+            ]
+        )
+    assert exc.value.code == 2
+    assert not outside.exists()
+    assert "ReportRoot" not in (
+        REPO_ROOT / "verification/verify.ps1"
+    ).read_text(encoding="utf-8")
 
 
 def test_repository_policy_entrypoints_and_ci_are_present() -> None:
@@ -440,3 +685,72 @@ def test_checkpoint_twin_commits_from_a_path_with_spaces(tmp_path: Path) -> None
     assert subject == "fixture checkpoint"
     ledger = (repo / "memory/LEDGER.md").read_text(encoding="utf-8")
     assert "fixture checkpoint" in ledger
+
+
+@pytest.mark.parametrize("entrypoint", ["powershell", "bash"])
+def test_checkpoint_twins_reject_exactly_50_mib(
+    tmp_path: Path, entrypoint: str
+) -> None:
+    if entrypoint == "powershell" and not powershell_executable():
+        pytest.skip("PowerShell is unavailable on this platform")
+    if entrypoint == "bash" and not bash_executable():
+        pytest.skip("Bash is unavailable on this platform")
+
+    repo = tmp_path / f"{entrypoint} boundary repository"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Verifier Fixture"],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "config",
+            "user.email",
+            "verifier@example.invalid",
+        ],
+        check=True,
+    )
+    source_entrypoint = (
+        REPO_ROOT / "bin/checkpoint.ps1"
+        if entrypoint == "powershell"
+        else REPO_ROOT / "bin/checkpoint"
+    )
+    copied = repo / "bin" / source_entrypoint.name
+    copied.parent.mkdir()
+    shutil.copy2(source_entrypoint, copied)
+    boundary = repo / "exactly-50-mib.bin"
+    with boundary.open("wb") as handle:
+        handle.seek((50 * 1024 * 1024) - 1)
+        handle.write(b"\0")
+
+    if entrypoint == "powershell":
+        command = [
+            powershell_executable(),
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(copied),
+            "must be rejected",
+        ]
+    else:
+        command = [bash_executable(), str(copied), "must be rejected"]
+    completed = subprocess.run(
+        command,
+        cwd=repo,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "REFUSED" in completed.stdout + completed.stderr
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"],
+        capture_output=True,
+        check=False,
+    )
+    assert head.returncode != 0

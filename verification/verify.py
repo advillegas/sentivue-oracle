@@ -151,6 +151,33 @@ def _source_files(root: Path) -> list[Path]:
     return sorted(paths, key=lambda item: _relative(root, item))
 
 
+def _tracked_eol_metadata(root: Path) -> dict[str, tuple[str, str]]:
+    if not (root / ".git").exists():
+        return {}
+    completed = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--eol", "-z"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return {}
+    metadata: dict[str, tuple[str, str]] = {}
+    for raw_record in completed.stdout.split(b"\0"):
+        if not raw_record:
+            continue
+        record = raw_record.decode("utf-8", errors="replace")
+        fields, separator, name = record.partition("\t")
+        parts = fields.split()
+        if not separator or len(parts) < 2:
+            continue
+        metadata[name] = (
+            parts[0].removeprefix("i/"),
+            parts[1].removeprefix("w/"),
+        )
+    return metadata
+
+
 def _is_text(path: Path, data: bytes) -> bool:
     if path.suffix.lower() in _BINARY_SUFFIXES:
         return False
@@ -256,18 +283,15 @@ def check_powershell(root: Path) -> CheckResult:
 
     executable = _find_powershell()
     if not executable:
-        if non_ascii:
-            return CheckResult(
-                "powershell",
-                FAIL,
-                "PowerShell source is not ASCII-clean",
-                non_ascii + ["PowerShell parser unavailable; AST syntax was not checked."],
-            )
         return CheckResult(
             "powershell",
-            SKIP,
-            "PowerShell parser unavailable on this platform",
-            [f"ASCII source check passed for {len(files)} file(s)."],
+            FAIL,
+            "Required PowerShell parser is unavailable",
+            non_ascii
+            + [
+                f"Could not AST-check {len(files)} PowerShell file(s); "
+                "required static gates cannot be skipped."
+            ],
         )
 
     parser_script = (
@@ -321,6 +345,23 @@ def _is_bash_entrypoint(path: Path) -> bool:
     return b"bash" in first_line and first_line.startswith(b"#!")
 
 
+def _script_kind(path: Path) -> str | None:
+    suffix = path.suffix.lower()
+    if suffix == ".ps1":
+        return "powershell"
+    if suffix == ".sh":
+        return "posix"
+    try:
+        first_line = path.read_bytes().splitlines()[0].lower()
+    except (IndexError, OSError):
+        return None
+    if not first_line.startswith(b"#!"):
+        return None
+    if any(shell in first_line for shell in (b"bash", b"/sh", b"zsh", b"ksh")):
+        return "posix"
+    return "portable"
+
+
 def check_bash(root: Path) -> CheckResult:
     root = root.resolve()
     files = [path for path in _source_files(root) if _is_bash_entrypoint(path)]
@@ -328,9 +369,12 @@ def check_bash(root: Path) -> CheckResult:
     if not executable:
         return CheckResult(
             "bash",
-            SKIP,
-            "Bash parser unavailable on this platform",
-            [f"Could not syntax-check {len(files)} Bash file(s)."],
+            FAIL,
+            "Required Bash parser is unavailable",
+            [
+                f"Could not syntax-check {len(files)} Bash file(s); "
+                "required static gates cannot be skipped."
+            ],
         )
     if not files:
         return CheckResult("bash", PASS, "No Bash source files found")
@@ -399,8 +443,8 @@ def check_conductor_tests(root: Path) -> CheckResult:
     if not tests.is_dir():
         return CheckResult(
             "conductor_tests",
-            SKIP,
-            "Conductor test directory is absent",
+            FAIL,
+            "Required conductor test directory is absent",
         )
     command = _run_command(
         [sys.executable, "-m", "pytest", "conductor/tests", "-q"],
@@ -434,7 +478,7 @@ def check_conductor_tests(root: Path) -> CheckResult:
 def check_line_policy(root: Path) -> CheckResult:
     root = root.resolve()
     details = []
-    git_checkout = (root / ".git").exists()
+    tracked_eol = _tracked_eol_metadata(root)
     attributes = root / ".gitattributes"
     editorconfig = root / ".editorconfig"
     if not attributes.is_file():
@@ -453,19 +497,35 @@ def check_line_policy(root: Path) -> CheckResult:
     text_count = 0
     for path in _source_files(root):
         data = path.read_bytes()
-        if not _is_text(path, data):
-            continue
-        text_count += 1
         relative = _relative(root, path)
         if data.startswith((b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")):
             details.append(f"{relative}: BOM is not allowed")
-        # A pre-existing Windows worktree can retain CRLF until the first checkout
-        # after .gitattributes is added. The exact policy above guarantees LF in
-        # the Git object database; fixture roots still prove raw CRLF rejection.
-        if not git_checkout and b"\r\n" in data:
+            if relative not in tracked_eol and b"\r\n" in data:
+                details.append(f"{relative}: CRLF is not allowed")
+            if b"\r" in data.replace(b"\r\n", b""):
+                details.append(f"{relative}: bare CR is not allowed")
+            continue
+        if path.suffix.lower() in _BINARY_SUFFIXES:
+            continue
+        try:
+            data.decode("utf-8")
+        except UnicodeDecodeError:
+            details.append(f"{relative}: source is not valid UTF-8")
+            continue
+        if b"\0" in data:
+            details.append(f"{relative}: NUL bytes indicate a prohibited encoding")
+            continue
+        text_count += 1
+        if relative not in tracked_eol and b"\r\n" in data:
             details.append(f"{relative}: CRLF is not allowed")
         if b"\r" in data.replace(b"\r\n", b""):
             details.append(f"{relative}: bare CR is not allowed")
+
+    for relative, (index_eol, _worktree_eol) in sorted(tracked_eol.items()):
+        if index_eol in {"crlf", "mixed"}:
+            details.append(
+                f"{relative}: tracked blob uses CRLF or mixed EOL (i/{index_eol})"
+            )
 
     status = FAIL if details else PASS
     summary = (
@@ -481,13 +541,18 @@ def check_platform_twins(
 ) -> CheckResult:
     root = root.resolve()
     policy = policy or {}
-    files = {
-        _relative(root, path)
+    scripts = {
+        _relative(root, path): kind
         for path in _source_files(root)
-        if path.suffix.lower() in {".ps1", ".sh"}
+        if (kind := _script_kind(path)) is not None
+    }
+    platform_files = {
+        path for path, kind in scripts.items() if kind in {"powershell", "posix"}
     }
     details: list[str] = []
-    claimed: set[str] = set()
+    claimed: set[str] = {
+        path for path, kind in scripts.items() if kind == "portable"
+    }
 
     aliases = policy.get("platform_twins", [])
     if not isinstance(aliases, list):
@@ -534,13 +599,17 @@ def check_platform_twins(
         if path:
             scope[path] = entry
 
-    for path in sorted(files):
+    for path in sorted(platform_files):
         if path in claimed:
             continue
         source = Path(path)
-        other_suffix = ".sh" if source.suffix.lower() == ".ps1" else ".ps1"
-        counterpart = source.with_suffix(other_suffix).as_posix()
-        if counterpart in files:
+        if scripts[path] == "powershell":
+            counterpart = source.with_suffix(".sh").as_posix()
+        elif source.suffix.lower() == ".sh":
+            counterpart = source.with_suffix(".ps1").as_posix()
+        else:
+            counterpart = f"{path}.ps1"
+        if counterpart in platform_files:
             claimed.update({path, counterpart})
             continue
         if path in scope:
@@ -551,20 +620,23 @@ def check_platform_twins(
         )
 
     for path in sorted(scope):
-        if path not in files:
+        if path not in platform_files:
             continue
         source = Path(path)
-        counterpart = source.with_suffix(
-            ".sh" if source.suffix.lower() == ".ps1" else ".ps1"
-        ).as_posix()
-        if counterpart in files:
+        if scripts[path] == "powershell":
+            counterpart = source.with_suffix(".sh").as_posix()
+        elif source.suffix.lower() == ".sh":
+            counterpart = source.with_suffix(".ps1").as_posix()
+        else:
+            counterpart = f"{path}.ps1"
+        if counterpart in platform_files:
             details.append(
                 f"{path}: stale platform scope entry; twin {counterpart} exists"
             )
 
     status = FAIL if details else PASS
     summary = (
-        f"{len(files)} platform script(s) are paired or explicitly scoped"
+        f"{len(scripts)} tracked script(s) are portable, paired, or explicitly scoped"
         if status == PASS
         else "Platform twin inventory failed"
     )
@@ -830,6 +902,99 @@ def _validate_yaml_flow(content: str) -> None:
         raise ValueError("unterminated YAML quote or flow collection")
 
 
+def _split_yaml_flow_items(content: str) -> list[str]:
+    if not content.strip():
+        return []
+    items = []
+    start = 0
+    quote = ""
+    escaped = False
+    stack = []
+    pairs = {"]": "[", "}": "{", ")": "("}
+    for index, char in enumerate(content):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote == '"':
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char in "[{(":
+            stack.append(char)
+        elif char in "]})":
+            if not stack or stack.pop() != pairs[char]:
+                raise ValueError("unbalanced flow collection")
+        elif char == "," and not stack:
+            item = content[start:index].strip()
+            if not item:
+                raise ValueError("empty item in flow collection")
+            items.append(item)
+            start = index + 1
+    if quote or stack:
+        raise ValueError("unterminated flow collection item")
+    final = content[start:].strip()
+    if not final:
+        raise ValueError("empty item in flow collection")
+    items.append(final)
+    return items
+
+
+def _validate_yaml_flow_value(value: str) -> None:
+    text = value.strip()
+    if not text:
+        raise ValueError("empty flow value")
+    if text[0] not in "[{":
+        _validate_yaml_flow(text)
+        return
+    closer = "]" if text[0] == "[" else "}"
+    quote = ""
+    escaped = False
+    stack = []
+    end = -1
+    pairs = {"]": "[", "}": "{", ")": "("}
+    for index, char in enumerate(text):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\" and quote == '"':
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char in "[{(":
+            stack.append(char)
+        elif char in "]})":
+            if not stack or stack.pop() != pairs[char]:
+                raise ValueError("unbalanced flow collection")
+            if not stack:
+                end = index
+                break
+    if quote or stack or end < 0 or text[end] != closer:
+        raise ValueError("unterminated flow collection")
+    if text[end + 1 :].strip():
+        raise ValueError("unexpected content after flow collection")
+
+    items = _split_yaml_flow_items(text[1:end])
+    if text[0] == "[":
+        for item in items:
+            _validate_yaml_flow_value(item)
+        return
+    for item in items:
+        colon = _yaml_mapping_colon(item)
+        if colon < 1:
+            raise ValueError("flow mapping item needs a key and value")
+        key = item[:colon].strip()
+        item_value = item[colon + 1 :].strip()
+        if not key or not item_value:
+            raise ValueError("flow mapping item needs a key and value")
+        _validate_yaml_flow_value(item_value)
+
+
 def _parse_yaml_subset(text: str) -> None:
     levels = [0]
     can_indent = False
@@ -872,6 +1037,7 @@ def _parse_yaml_subset(text: str) -> None:
             continue
         colon = _yaml_mapping_colon(body)
         if is_list and colon < 0:
+            _validate_yaml_flow_value(body)
             can_indent = False
             continue
         if colon < 1:
@@ -880,6 +1046,8 @@ def _parse_yaml_subset(text: str) -> None:
         value = body[colon + 1 :].strip()
         if not key:
             raise ValueError(f"line {line_number}: empty mapping key")
+        if value and value not in {"|", ">", "|-", ">-", "|+", ">+"}:
+            _validate_yaml_flow_value(value)
         can_indent = not value or is_list
         if value in {"|", ">", "|-", ">-", "|+", ">+"}:
             block_parent = indent
@@ -1123,13 +1291,13 @@ def check_oversized(
     for path in files:
         size = path.stat().st_size
         largest = max(largest, size)
-        if size > max_bytes:
+        if size >= max_bytes:
             details.append(
-                f"{_relative(root, path)}: {size} bytes exceeds {max_bytes}"
+                f"{_relative(root, path)}: {size} bytes meets or exceeds {max_bytes}"
             )
     status = FAIL if details else PASS
     summary = (
-        f"{len(files)} source file(s) are at most {max_bytes} bytes"
+        f"{len(files)} source file(s) are smaller than {max_bytes} bytes"
         if status == PASS
         else "Oversized source files detected"
     )
@@ -1272,9 +1440,18 @@ def _result_payload(result: CheckResult) -> dict[str, Any]:
 def _overall_status(results: Sequence[CheckResult]) -> str:
     if any(result.status == FAIL for result in results):
         return FAIL
-    if any(result.status == PROVISIONAL for result in results):
+    if any(result.status in {SKIP, PROVISIONAL} for result in results):
         return PROVISIONAL
     return PASS
+
+
+def _verification_exit_code(results: Sequence[CheckResult]) -> int:
+    overall = _overall_status(results)
+    if overall == PASS:
+        return 0
+    if overall == PROVISIONAL:
+        return 2
+    return 1
 
 
 def _write_report_files(
@@ -1388,30 +1565,29 @@ def _execute_static_checks(
     root: Path, report_dir: Path, policy: Mapping[str, Any]
 ) -> list[CheckResult]:
     checks = [
-        lambda: check_powershell(root),
-        lambda: check_bash(root),
-        lambda: check_python(root),
-        lambda: check_conductor_tests(root),
-        lambda: check_line_policy(root),
-        lambda: check_platform_twins(root, policy),
-        lambda: check_model_integrity(root),
-        lambda: check_config_formats(root),
-        lambda: check_path_safety(root, report_dir / "artifacts"),
-        lambda: check_package_allowlist(root, policy),
-        lambda: check_secrets(root),
-        lambda: check_host_generated(root),
-        lambda: check_oversized(root),
-        lambda: check_docs_commands(root),
+        ("powershell", lambda: check_powershell(root)),
+        ("bash", lambda: check_bash(root)),
+        ("python", lambda: check_python(root)),
+        ("conductor_tests", lambda: check_conductor_tests(root)),
+        ("line_policy", lambda: check_line_policy(root)),
+        ("platform_twins", lambda: check_platform_twins(root, policy)),
+        ("model_integrity", lambda: check_model_integrity(root)),
+        ("config_formats", lambda: check_config_formats(root)),
+        ("path_safety", lambda: check_path_safety(root, report_dir / "artifacts")),
+        ("package_allowlist", lambda: check_package_allowlist(root, policy)),
+        ("secrets", lambda: check_secrets(root)),
+        ("host_generated", lambda: check_host_generated(root)),
+        ("oversized_files", lambda: check_oversized(root)),
+        ("docs_commands", lambda: check_docs_commands(root)),
     ]
     results = []
-    for check in checks:
+    for check_id, check in checks:
         try:
             results.append(check())
         except Exception as exc:
-            name = getattr(check, "__name__", "static_check")
             results.append(
                 CheckResult(
-                    name,
+                    check_id,
                     FAIL,
                     "Verifier check raised an unexpected exception",
                     [f"{type(exc).__name__}: {exc}"],
@@ -1435,20 +1611,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=Path(__file__).resolve().parents[1],
         help="Repository root.",
     )
-    parser.add_argument(
-        "--report-root",
-        type=Path,
-        help="Evidence parent (default: <root>/reports/verification).",
-    )
     parser.add_argument("--run-id", help="Explicit unique run ID.")
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
-    report_base = (
-        args.report_root.resolve()
-        if args.report_root
-        else root / "reports" / "verification"
-    )
+    report_base = root / "reports" / "verification"
     run_id = args.run_id or make_run_id()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", run_id):
         parser.error("--run-id must be a portable file name")
@@ -1499,7 +1666,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError:
         display_path = report_dir
     print(f"verification {overall}: {display_path}")
-    return 1 if overall == FAIL else 0
+    return _verification_exit_code(results)
 
 
 if __name__ == "__main__":

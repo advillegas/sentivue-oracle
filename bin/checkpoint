@@ -7,15 +7,15 @@ set -euo pipefail
 msg="${1:?usage: checkpoint \"message\"}"
 git add -A
 
-# large-file guard: nothing over 50 MB gets committed by an agent
+# large-file guard: nothing 50 MB or larger gets committed by an agent
 big=""
 while IFS= read -r f; do
   [[ -f "$f" ]] || continue
   sz=$(wc -c < "$f" | xargs)
-  if [[ "$sz" -gt $((50 * 1024 * 1024)) ]]; then big="$big  $f ($((sz / 1024 / 1024)) MB)\n"; fi
+  if [[ "$sz" -ge $((50 * 1024 * 1024)) ]]; then big="$big  $f ($((sz / 1024 / 1024)) MB)\n"; fi
 done < <(git diff --cached --name-only --diff-filter=AM)
 if [[ -n "$big" ]]; then
-  printf 'checkpoint: REFUSED — staged files over 50 MB:\n%b' "$big"
+  printf 'checkpoint: REFUSED — staged files 50 MB or larger:\n%b' "$big"
   echo "checkpoint: unstage them (git restore --staged <file>) and add to .gitignore; artifacts belong in artifacts/ or models/"
   exit 1
 fi

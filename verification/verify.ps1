@@ -2,8 +2,7 @@
 param(
     [switch]$StaticOnly,
     [string]$RunId,
-    [string]$Root,
-    [string]$ReportRoot
+    [string]$Root
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,11 +11,24 @@ if (-not $Root) {
     $Root = Split-Path -Parent $ScriptRoot
 }
 
-$Python = Get-Command "python" -ErrorAction SilentlyContinue
+$Python = $null
 $Prefix = @()
-if (-not $Python) {
-    $Python = Get-Command "py" -ErrorAction SilentlyContinue
-    $Prefix = @("-3")
+$Candidates = @(
+    @{ Name = "python"; Prefix = @() },
+    @{ Name = "py"; Prefix = @("-3") }
+)
+foreach ($Candidate in $Candidates) {
+    $Command = Get-Command $Candidate.Name -ErrorAction SilentlyContinue
+    if (-not $Command) {
+        continue
+    }
+    $CandidatePrefix = @($Candidate.Prefix)
+    & $Command.Source @CandidatePrefix -c "import sys; raise SystemExit(sys.version_info < (3, 12))" *> $null
+    if ($LASTEXITCODE -eq 0) {
+        $Python = $Command
+        $Prefix = $CandidatePrefix
+        break
+    }
 }
 if (-not $Python) {
     Write-Error "verification: Python 3.12 or newer is required"
@@ -31,9 +43,6 @@ if ($StaticOnly) {
 }
 if ($RunId) {
     $Arguments += @("--run-id", $RunId)
-}
-if ($ReportRoot) {
-    $Arguments += @("--report-root", $ReportRoot)
 }
 
 & $Python.Source @Arguments

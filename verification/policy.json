@@ -53,6 +53,26 @@
   ],
   "platform_scoped": [
     {
+      "path": "bin/envoy-discover",
+      "platform": "posix",
+      "reason": "Implements the POSIX envoy discovery client with shell utilities."
+    },
+    {
+      "path": "bin/envoy-fetch",
+      "platform": "posix",
+      "reason": "Implements the POSIX fetch-only envoy boundary with shell utilities."
+    },
+    {
+      "path": "bin/oracle-menu",
+      "platform": "macos",
+      "reason": "Provides the interactive terminal menu for the macOS appliance."
+    },
+    {
+      "path": "install",
+      "platform": "macos",
+      "reason": "Runs the guided macOS Homebrew and launchd installation flow."
+    },
+    {
       "path": "bootstrap/build-installers.ps1",
       "platform": "windows",
       "reason": "Builds both self-extracting release formats with Windows packaging tools."

@@ -25,14 +25,14 @@ foreach ($RelativePath in $Staged) {
     $FullPath = Join-Path (Get-Location).Path $RelativePath
     if (Test-Path -LiteralPath $FullPath -PathType Leaf) {
         $Size = (Get-Item -LiteralPath $FullPath).Length
-        if ($Size -gt (50 * 1024 * 1024)) {
+        if ($Size -ge (50 * 1024 * 1024)) {
             $Oversized += "$RelativePath ($([Math]::Floor($Size / 1MB)) MB)"
         }
     }
 }
 if ($Oversized.Count -gt 0) {
     Write-Error (
-        "checkpoint: REFUSED - staged files over 50 MB:`n  " +
+        "checkpoint: REFUSED - staged files 50 MB or larger:`n  " +
         ($Oversized -join "`n  ") +
         "`ncheckpoint: unstage them and add them to .gitignore"
     )

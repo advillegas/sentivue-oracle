@@ -32,6 +32,20 @@ done
 command -v oracle >/dev/null && ok "oracle on PATH" \
   || meh "oracle not on PATH" "ln -sf $ROOT/bin/oracle \$(brew --prefix)/bin/oracle"
 
+echo "== platform scopes =="
+POLICY="verification/policy.json"
+if [[ -f "$POLICY" ]] && command -v jq >/dev/null 2>&1; then
+  scope_count=0
+  while IFS=$'\t' read -r scope_path scope_platform scope_reason; do
+    [[ -n "$scope_path" ]] || continue
+    ok "platform scope: $scope_path [$scope_platform] - $scope_reason"
+    scope_count=$((scope_count+1))
+  done < <(jq -r '.platform_scoped[] | [.path, .platform, .reason] | @tsv' "$POLICY")
+  [[ "$scope_count" -gt 0 ]] || bad "platform scope policy is empty" "restore verification/policy.json"
+else
+  bad "platform scope policy unavailable" "restore verification/policy.json and install jq"
+fi
+
 echo "== models (per profile) =="
 while IFS='|' read -r name _ _ slot _; do
   name="$(echo "$name" | xargs)"; slot="$(echo "$slot" | xargs)"; [[ -z "$name" ]] && continue

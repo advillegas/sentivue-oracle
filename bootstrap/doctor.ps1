@@ -34,6 +34,26 @@ foreach ($eng in @("claude.cmd", "opencode.cmd", "kilo.cmd")) {
     if (Test-Path ".tools\npm\$eng") { OK "engine: $eng" } else { BAD "engine missing: $eng" "bin\oracle.ps1 setup" }
 }
 
+Write-Host "== platform scopes =="
+$PolicyPath = Join-Path $Root "verification\policy.json"
+if (Test-Path $PolicyPath) {
+    try {
+        $Policy = Get-Content -Raw -LiteralPath $PolicyPath | ConvertFrom-Json
+        $Scopes = @($Policy.platform_scoped)
+        if ($Scopes.Count -eq 0) {
+            BAD "platform scope policy is empty" "restore verification\policy.json"
+        } else {
+            foreach ($Scope in $Scopes) {
+                OK ("platform scope: {0} [{1}] - {2}" -f $Scope.path, $Scope.platform, $Scope.reason)
+            }
+        }
+    } catch {
+        BAD "platform scope policy is invalid: $($_.Exception.Message)" "restore verification\policy.json"
+    }
+} else {
+    BAD "platform scope policy missing" "restore verification\policy.json"
+}
+
 Write-Host "== serving =="
 $up = $false
 try { Invoke-RestMethod -Uri "http://127.0.0.1:9099/health" -TimeoutSec 3 | Out-Null; $up = $true } catch {}
