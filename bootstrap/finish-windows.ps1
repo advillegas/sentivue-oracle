@@ -1,5 +1,5 @@
-# finish-windows.ps1 — one-shot: commit + package + create PRIVATE GitHub repo + push.
-# Run from anywhere:  powershell -ExecutionPolicy Bypass -File C:\Users\Aaron\sentivue-oracle\bootstrap\finish-windows.ps1
+# finish-windows.ps1 - one-shot: commit + package + create PRIVATE GitHub repo + push.
+# Run from the repository: powershell -ExecutionPolicy Bypass -File bootstrap\finish-windows.ps1
 param(
     [string]$RepoName = "sentivue-oracle",   # target GitHub repo name
     [switch]$SkipPush                        # commit + package only
@@ -49,13 +49,13 @@ try {
 # ---- 4. private GitHub repo + push -------------------------------------------
 if ($SkipPush) { Write-Host "==> GitHub push skipped (-SkipPush); vault mirror is current"; exit 0 }
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-    Write-Host "==> gh CLI not installed — push skipped."
+    Write-Host "==> gh CLI not installed - push skipped."
     Write-Host "    Install GitHub CLI, run 'gh auth login', then re-run this script."
     exit 0
 }
 gh auth status 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "==> gh not authenticated — run 'gh auth login' first, then re-run."
+    Write-Host "==> gh not authenticated - run 'gh auth login' first, then re-run."
     exit 0
 }
 # PRIVACY: repo must be private, always.

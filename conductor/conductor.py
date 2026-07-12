@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 SentiVue Oracle conductor â€” the self-governing mission loop.
 

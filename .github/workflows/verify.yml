@@ -1,0 +1,38 @@
+name: verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test runner
+        run: python -m pip install "pytest>=8,<9"
+      - name: Run verifier tests
+        run: python -m pytest verification/tests -q
+      - name: Run shared verifier
+        shell: powershell
+        run: verification/verify.ps1 -StaticOnly
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test runner
+        run: python -m pip install "pytest>=8,<9"
+      - name: Run verifier tests
+        run: python -m pytest verification/tests -q
+      - name: Run shared verifier
+        run: bash verification/verify.sh --static-only

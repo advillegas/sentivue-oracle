@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "package_allowlist": {
+    "roots": [
+      ".cursor",
+      ".github",
+      ".obsidian",
+      ".vscode",
+      "bench",
+      "bin",
+      "bootstrap",
+      "conductor",
+      "connectors",
+      "data",
+      "docs",
+      "engines",
+      "env",
+      "harness",
+      "memory",
+      "serving",
+      "skills",
+      "verification"
+    ],
+    "files": [
+      ".editorconfig",
+      ".gitattributes",
+      ".gitignore",
+      "AGENTS.md",
+      "LOOP.md",
+      "Makefile",
+      "README.md",
+      "Uninstall.cmd",
+      "VERSIONS.lock",
+      "install"
+    ]
+  },
+  "platform_twins": [
+    {
+      "powershell": "bin/oracle.ps1",
+      "posix": "bin/oracle",
+      "reason": "The operator CLI keeps its historical extensionless POSIX entry point."
+    },
+    {
+      "powershell": "bin/checkpoint.ps1",
+      "posix": "bin/checkpoint",
+      "reason": "The checkpoint command keeps its historical extensionless POSIX entry point."
+    },
+    {
+      "powershell": "serving/serve-windows.ps1",
+      "posix": "serving/service.sh",
+      "reason": "Both scripts own the native service lifecycle for their operating system."
+    }
+  ],
+  "platform_scoped": [
+    {
+      "path": "bootstrap/build-installers.ps1",
+      "platform": "windows",
+      "reason": "Builds both self-extracting release formats with Windows packaging tools."
+    },
+    {
+      "path": "bootstrap/envoy.sh",
+      "platform": "posix",
+      "reason": "Controls the POSIX firewall window and process trap for the envoy."
+    },
+    {
+      "path": "bootstrap/finish-windows.ps1",
+      "platform": "windows",
+      "reason": "Completes Windows authoring-machine setup and local vault wiring."
+    },
+    {
+      "path": "bootstrap/harden-offline.sh",
+      "platform": "macos",
+      "reason": "Maintains the macOS pf-based offline compatibility entry point."
+    },
+    {
+      "path": "bootstrap/install.sh",
+      "platform": "macos",
+      "reason": "Installs macOS Homebrew and launchd dependencies."
+    },
+    {
+      "path": "bootstrap/package.sh",
+      "platform": "posix",
+      "reason": "Builds the POSIX tar distribution with platform-native tools."
+    },
+    {
+      "path": "bootstrap/release.ps1",
+      "platform": "windows",
+      "reason": "Publishes Windows-authored release artifacts through PowerShell tooling."
+    },
+    {
+      "path": "bootstrap/render-config.sh",
+      "platform": "posix",
+      "reason": "Renders the POSIX llama-swap service configuration."
+    },
+    {
+      "path": "bootstrap/verify-offline.sh",
+      "platform": "macos",
+      "reason": "Runs macOS launchd and pf runtime probes."
+    },
+    {
+      "path": "connectors/gitea/setup-gitea.sh",
+      "platform": "macos",
+      "reason": "Installs the optional Gitea vault UI through Homebrew and launchd."
+    },
+    {
+      "path": "connectors/ide/brand.ps1",
+      "platform": "windows",
+      "reason": "Patches the Windows VSCodium installation resources."
+    },
+    {
+      "path": "connectors/ide/pack-extension.ps1",
+      "platform": "windows",
+      "reason": "Packages the local VSIX with Windows PowerShell tooling."
+    },
+    {
+      "path": "harness/ecc/install-ecc.sh",
+      "platform": "posix",
+      "reason": "Installs the POSIX-only curated ECC shell integration."
+    }
+  ]
+}
