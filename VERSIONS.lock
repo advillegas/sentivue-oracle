@@ -111,12 +111,16 @@ RUST_BREW_SHA256=unresolved
 # --- supabase (docker images; verified on Docker Hub 2026-07-09, all arm64) ---
 SUPABASE_POSTGRES_IMAGE=supabase/postgres:15.8.1.135
 SUPABASE_POSTGRES_DIGEST=unresolved
+SUPABASE_POSTGRES_ARCHIVE_SHA256=unresolved
 POSTGREST_IMAGE=postgrest/postgrest:v12.2.12
 POSTGREST_DIGEST=unresolved
+POSTGREST_ARCHIVE_SHA256=unresolved
 POSTGRES_META_IMAGE=supabase/postgres-meta:v0.91.0
 POSTGRES_META_DIGEST=unresolved
+POSTGRES_META_ARCHIVE_SHA256=unresolved
 SUPABASE_STUDIO_IMAGE=supabase/studio:2026.07.07-sha-a6a04f2
 SUPABASE_STUDIO_DIGEST=unresolved
+SUPABASE_STUDIO_ARCHIVE_SHA256=unresolved
 
 # --- mcp servers (verified on PyPI 2026-07-09; warmed into uv caches at bootstrap) ---
 MCP_DUCKDB=mcp-server-duckdb==1.1.0     # uvx (ktanaka101)
@@ -124,5 +128,6 @@ MCP_DUCKDB_SHA256=unresolved
 MCP_POSTGRES=postgres-mcp==0.3.0        # uvx (crystaldba)
 MCP_POSTGRES_SHA256=unresolved
 
-# --- model files: revisions live in serving/models.manifest; dynamic resolutions
-#     and per-shard hashes are written to the dependency export manifest. ---
+# --- model files: revisions live in serving/models.manifest; independently
+#     verified shard hashes live in serving/model-authorities.json. Local scans
+#     are acquisition evidence only and can never create serving authority. ---

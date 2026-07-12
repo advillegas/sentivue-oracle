@@ -6,17 +6,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HERE="$ROOT/harness/skill-packs"
 source "$ROOT/VERSIONS.lock"
+DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
+ARTIFACT_MANIFEST="$DEPENDENCY_CACHE/manifest.json"
+PYTHON_BIN="${ORACLE_PYTHON:-$ROOT/env/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python || true)"
+[[ -n "$PYTHON_BIN" ]] || { echo "ERROR: Python is required." >&2; exit 1; }
 CC="$ROOT/engines/claude-code/home/skills"
 OC="$ROOT/engines/opencode/xdg/opencode/skill"
 mkdir -p "$CC" "$OC" "$HERE/vendor"
 
-vendored() {  # vendored <name> <repo> <pin>
-  local v="$HERE/vendor/$1"
-  [[ -d "$v" ]] || {
-    echo "ERROR: $1 vendor tree is absent from the validated dependency export." >&2
-    return 1
-  }
-  echo "==> $1 policy-bound vendor tree present ($3)" >&2
+vendored() {  # vendored <name> <artifact-id> <requested> <resolved>
+  local name="$1" artifact_id="$2" requested="$3" resolved="$4" v="$HERE/vendor/$1"
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" install-source \
+    --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+    --artifact-id "$artifact_id" --destination "$v" \
+    --expected-version "$resolved" --expected-requested-version "$requested"
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-source \
+    --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+    --artifact-id "$artifact_id" --destination "$v" \
+    --expected-version "$resolved" --expected-requested-version "$requested" >/dev/null
+  echo "==> $name policy-bound vendor tree installed ($resolved)" >&2
   echo "$v"
 }
 
@@ -33,8 +42,8 @@ sync_pack() {  # sync_pack <vendor-dir> <prefix> <skills-root>
   echo "$count"
 }
 
-SP="$(vendored superpowers "$SUPERPOWERS_REPO" "$SUPERPOWERS_PIN")"
+SP="$(vendored superpowers source-superpowers "$SUPERPOWERS_PIN" "$SUPERPOWERS_COMMIT")"
 echo "==> superpowers: $(sync_pack "$SP" sp skills) skills synced (prefix 'sp-')"
-GS="$(vendored gstack "$GSTACK_REPO" "$GSTACK_PIN")"
+GS="$(vendored gstack source-gstack "$GSTACK_PIN" "$GSTACK_COMMIT")"
 echo "==> gstack: $(sync_pack "$GS" gs .) skills synced (prefix 'gs-')"
 echo "Both packs live in harness/skill-packs/vendor; re-run after changing pins."

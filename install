@@ -16,6 +16,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
 YES=0; PROFILE=""; NO_MODELS=0
+MODELS=""; OPUS=""; SONNET=""; HAIKU=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -97,6 +98,30 @@ atomic_from_stdin() {
   fi
 }
 
+load_profile_state() {
+  local key value
+  if [[ -f "$ROOT/serving/models.profile" ]]; then
+    MODELS="$(grep -Ev '^[[:space:]]*(#|$)' "$ROOT/serving/models.profile" |
+      paste -sd, -)"
+  else
+    MODELS="$(awk -F'|' '!/^[[:space:]]*(#|$)/ {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $1)
+      if ($1 != "") print $1
+    }' "$ROOT/serving/models.manifest" | paste -sd, -)"
+  fi
+  [[ -n "$MODELS" ]] || die "persisted model selection is empty"
+  [[ -f "$ROOT/serving/tiers.env" ]] || die "persisted model tiers are missing"
+  while IFS='=' read -r key value; do
+    case "$key" in
+      OPUS_MODEL) OPUS="$value" ;;
+      SONNET_MODEL) SONNET="$value" ;;
+      HAIKU_MODEL) HAIKU="$value" ;;
+    esac
+  done < "$ROOT/serving/tiers.env"
+  [[ -n "$OPUS" && -n "$SONNET" && -n "$HAIKU" ]] ||
+    die "persisted model tiers are incomplete"
+}
+
 init_state || die "Pinned Python is required before offline installation can begin."
 
 # ---------------------------------------------------------------- preflight
@@ -168,8 +193,9 @@ else ok "profile already chosen ($(cat serving/tiers.env 2>/dev/null | tr '\n' '
 
 # ---------------------------------------------------------------- models
 if [[ $NO_MODELS -eq 0 ]] && ! phase_done models; then
+  load_profile_state
   say "Validate policy-bound local model snapshot"
-  free_gb=$(df -g . | awk 'NR==2 {print $4}')
+  free_gb=$(df -Pk . | awk 'NR==2 {print int($4 / 1048576)}')
   case "$(head -1 serving/tiers.env)" in
     OPUS_MODEL=kimi*) need=800 ;;
     OPUS_MODEL=qwen3-coder-480b) need=400 ;;
@@ -193,7 +219,13 @@ if [[ $NO_MODELS -eq 0 ]] && ! phase_done models; then
       die "Model $model_name is not a trusted offline snapshot."
   done
   init_state || die "Could not refresh install state after model validation."
-  own_tree "$ROOT/models"
+  for model_name in "${selected_models[@]}"; do
+    model_name="$(echo "$model_name" | xargs)"
+    "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state own-model \
+      --root "$ROOT" --home "$HOME" --cache "$DEPENDENCY_CACHE" \
+      --model-name "$model_name" ||
+      die "Could not register selected model ownership for $model_name."
+  done
   mark_done models
 elif [[ $NO_MODELS -eq 1 ]]; then warn "skipping model downloads (--no-models)"
 else ok "models already downloaded"; fi

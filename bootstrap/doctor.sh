@@ -67,6 +67,15 @@ if [[ -n "$python_bin" ]]; then
       bad "dependency-cache validation failed" \
         "re-export dependencies with bootstrap/export-dependencies.sh"
     fi
+    if "$python_bin" verification/lifecycle.py validate-dependencies \
+        --root "$ROOT" --manifest "$artifact_manifest" \
+        --cache "$dependency_cache" --reproducible --include-optional \
+        >/dev/null 2>&1; then
+      ok "optional dependency exports are also resolved"
+    else
+      meh "optional dependency exports remain unresolved" \
+        "import only the optional components needed on this platform"
+    fi
   else
     meh "dependency-cache manifest missing" \
       "export online artifacts before reproducible/offline install"

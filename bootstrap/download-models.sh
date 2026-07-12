@@ -49,6 +49,7 @@ while IFS='|' read -r name repo include slot ctx flags revision; do
 done
 
 echo
-echo "All downloads complete:"
+echo "Acquisition complete (untrusted evidence only):"
 du -sh models/* 2>/dev/null || true
-echo "Next: make render && make serve"
+echo "Next: independently verify the revision and shard digests, promote"
+echo "serving/model-authorities.json, then run bootstrap/import-model.sh."

@@ -8,6 +8,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENDOR="$ROOT/harness/agent-mcp/vendor"
 source "$ROOT/VERSIONS.lock"
+DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
+ARTIFACT_MANIFEST="$DEPENDENCY_CACHE/manifest.json"
+PYTHON_BIN="${ORACLE_PYTHON:-$ROOT/env/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python || true)"
+[[ -n "$PYTHON_BIN" ]] || { echo "ERROR: Python is required." >&2; exit 1; }
 PORT=8100
 DASH_PORT=3847
 SRV_PID="$ROOT/state/agent-mcp.pid"
@@ -20,28 +25,40 @@ local_env() {
   export AGENT_MCP_PORT="$PORT"
   export AGENT_MCP_PROJECT_DIR="$ROOT"
   export NEXT_TELEMETRY_DISABLED=1
+  export UV_OFFLINE=1
+  export UV_CACHE_DIR="$DEPENDENCY_CACHE/uv"
+}
+
+validate_vendor() {
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-source \
+    --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+    --artifact-id source-agent-mcp --destination "$VENDOR" \
+    --expected-version "$AGENT_MCP_COMMIT" \
+    --expected-requested-version "$AGENT_MCP_PIN" >/dev/null
 }
 
 case "${1:-status}" in
   install)
     command -v uv >/dev/null || { echo "ERROR: uv missing - run bootstrap/ensure-tools.sh"; exit 1; }
-    if [[ ! -d "$VENDOR/.git" ]]; then
-      echo "==> cloning Agent-MCP ${AGENT_MCP_PIN} (shallow, pinned)"
-      git clone --depth 1 --branch "$AGENT_MCP_PIN" "$AGENT_MCP_REPO" "$VENDOR"
-    else
-      echo "==> Agent-MCP vendor checkout present"
-    fi
-    ( cd "$VENDOR" && (uv sync 2>/dev/null || { uv venv; uv pip install -e .; }) )
-    # upstream uses Starlette's on_startup kwarg (removed in 0.47) but pins loosely
-    ( cd "$VENDOR" && uv pip install "starlette<0.47" )
+    "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" install-source \
+      --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+      --artifact-id source-agent-mcp --destination "$VENDOR" \
+      --expected-version "$AGENT_MCP_COMMIT" \
+      --expected-requested-version "$AGENT_MCP_PIN" >/dev/null
+    validate_vendor
+    local_env
+    ( cd "$VENDOR" && uv sync --offline --frozen )
     if [[ -f "$VENDOR/agent_mcp/dashboard/package.json" ]]; then
-      echo "==> dashboard deps (npm install)"
-      ( cd "$VENDOR/agent_mcp/dashboard" && npm install --no-audit --no-fund >/dev/null )
+      [[ -f "$VENDOR/agent_mcp/dashboard/package-lock.json" ]] ||
+        { echo "ERROR: validated Agent-MCP export has no dashboard lock."; exit 1; }
+      echo "==> dashboard deps (offline lock install)"
+      ( cd "$VENDOR/agent_mcp/dashboard" &&
+        npm ci --offline --ignore-scripts --no-audit --no-fund >/dev/null )
     fi
     echo "==> Agent-MCP installed. Start the viewer with: oracle agents-ui"
     ;;
   start)
-    [[ -d "$VENDOR" ]] || { echo "not installed - run: bash harness/agent-mcp/setup-agent-mcp.sh install"; exit 1; }
+    validate_vendor || { echo "not installed from a validated export"; exit 1; }
     if [[ -f "$ROOT/state/conductor.lock" ]]; then
       echo "WARNING: a mission is running (state/conductor.lock). On shared-CPU hardware"
       echo "         the viewer's model calls compete with engine inference."
@@ -50,11 +67,12 @@ case "${1:-status}" in
     local_env
     # --no-index: the auto-RAG indexer floods the local embedding slot with
     # multi-minute batches and starves engine inference on shared hardware.
-    ( cd "$VENDOR" && nohup uv run --no-sync -m agent_mcp.cli --port "$PORT" --project-dir "$ROOT" --no-tui --no-index \
+    ( cd "$VENDOR" && nohup uv run --offline --no-sync -m agent_mcp.cli --port "$PORT" --project-dir "$ROOT" --no-tui --no-index \
         > "$ROOT/logs/agent-mcp.out.log" 2> "$ROOT/logs/agent-mcp.err.log" & echo $! > "$SRV_PID" )
     if [[ -f "$VENDOR/agent_mcp/dashboard/package.json" ]]; then
-      # bypass upstream's dev wrapper (binds 0.0.0.0); run next directly, loopback only
-      ( cd "$VENDOR/agent_mcp/dashboard" && nohup npx next dev --port "$DASH_PORT" --hostname 127.0.0.1 \
+      next_bin="$VENDOR/agent_mcp/dashboard/node_modules/.bin/next"
+      [[ -x "$next_bin" ]] || { echo "ERROR: offline dashboard runtime is missing"; exit 1; }
+      ( cd "$VENDOR/agent_mcp/dashboard" && nohup "$next_bin" dev --port "$DASH_PORT" --hostname 127.0.0.1 \
           > "$ROOT/logs/agent-mcp-dash.out.log" 2> "$ROOT/logs/agent-mcp-dash.err.log" & echo $! > "$DASH_PID" )
     fi
     echo "Agent-MCP server:    http://127.0.0.1:$PORT  (MCP endpoint /mcp)"

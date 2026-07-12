@@ -7,15 +7,23 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 source "$ROOT/VERSIONS.lock"
 VENDOR="$ROOT/harness/ecc/vendor"
 PROFILE="$ROOT/harness/ecc/profile.txt"
+DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
+PYTHON_BIN="${ORACLE_PYTHON:-$ROOT/env/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python || true)"
+[[ -n "$PYTHON_BIN" ]] || { echo "ERROR: Python is required." >&2; exit 1; }
 CC_DIR="$ROOT/engines/claude-code/home/skills"
 OC_DIR="$ROOT/engines/opencode/xdg/opencode/skill"
 mkdir -p "$CC_DIR" "$OC_DIR"
 
-[[ -d "$VENDOR" ]] || {
-  echo "ERROR: ECC vendor tree is absent from the validated dependency export." >&2
-  exit 1
-}
-echo "==> ECC policy-bound vendor tree present (${ECC_PIN})"
+"$PYTHON_BIN" "$ROOT/verification/lifecycle.py" install-source \
+  --root "$ROOT" --manifest "$DEPENDENCY_CACHE/manifest.json" \
+  --cache "$DEPENDENCY_CACHE" --artifact-id source-ecc --destination "$VENDOR" \
+  --expected-version "$ECC_COMMIT" --expected-requested-version "$ECC_PIN" >/dev/null
+"$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-source \
+  --root "$ROOT" --manifest "$DEPENDENCY_CACHE/manifest.json" \
+  --cache "$DEPENDENCY_CACHE" --artifact-id source-ecc --destination "$VENDOR" \
+  --expected-version "$ECC_COMMIT" --expected-requested-version "$ECC_PIN" >/dev/null
+echo "==> ECC policy-bound vendor tree installed (${ECC_COMMIT})"
 
 # Catalog every skill directory (any depth: <name>/SKILL.md) as "name<TAB>dir".
 CATALOG="$(mktemp)"

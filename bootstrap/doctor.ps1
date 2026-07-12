@@ -67,6 +67,14 @@ if ($python) {
         } else {
             BAD "dependency-cache validation failed" "re-export dependencies with bootstrap\export-dependencies.ps1"
         }
+        & $python $lifecycle validate-dependencies --root $Root --manifest $manifest `
+            --cache $cache --reproducible --include-optional *> $null
+        if ($LASTEXITCODE -eq 0) {
+            OK "optional dependency exports are also resolved"
+        } else {
+            MEH "optional dependency exports remain unresolved" `
+                "import only the optional components needed on this platform"
+        }
     } else {
         MEH "dependency-cache manifest missing" "export online artifacts before reproducible/offline install"
     }

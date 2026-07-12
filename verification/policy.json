@@ -99,6 +99,8 @@
       "kind": "git",
       "version_key": "AGENT_MCP_PIN",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["darwin-arm64", "windows-x64"],
       "source": {
         "identity_key": "AGENT_MCP_REPO",
         "url": "{identity}/archive/{resolved}.tar.gz",
@@ -111,6 +113,8 @@
       "kind": "git",
       "version_key": "LOOP_ENG_PIN",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["darwin-arm64", "windows-x64"],
       "source": {
         "identity_key": "LOOP_ENG_REPO",
         "url": "{identity}/archive/{resolved}.tar.gz",
@@ -123,6 +127,8 @@
       "kind": "npm",
       "version_key": "LOOP_AUDIT_NPM",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["darwin-arm64", "windows-x64"],
       "source": {
         "identity": "https://registry.npmjs.org/@cobusgreyling/loop-audit/-/loop-audit-{resolved}.tgz",
         "digest_key": "LOOP_AUDIT_NPM_SHA256"
@@ -133,6 +139,8 @@
       "kind": "npm",
       "version_key": "LOOP_INIT_NPM",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["darwin-arm64", "windows-x64"],
       "source": {
         "identity": "https://registry.npmjs.org/@cobusgreyling/loop-init/-/loop-init-{resolved}.tgz",
         "digest_key": "LOOP_INIT_NPM_SHA256"
@@ -143,6 +151,8 @@
       "kind": "npm",
       "version_key": "LOOP_COST_NPM",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["darwin-arm64", "windows-x64"],
       "source": {
         "identity": "https://registry.npmjs.org/@cobusgreyling/loop-cost/-/loop-cost-{resolved}.tgz",
         "digest_key": "LOOP_COST_NPM_SHA256"
@@ -153,6 +163,8 @@
       "kind": "npm",
       "version_key": "LOOP_SYNC_NPM",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["darwin-arm64", "windows-x64"],
       "source": {
         "identity": "https://registry.npmjs.org/@cobusgreyling/loop-sync/-/loop-sync-{resolved}.tgz",
         "digest_key": "LOOP_SYNC_NPM_SHA256"
@@ -391,6 +403,8 @@
       "kind": "native",
       "version_key": "GITEA_VERSION",
       "allow_dynamic": true,
+      "optional": true,
+      "platforms": ["darwin-arm64"],
       "source": {
         "identity": "unresolved",
         "resolved_version_key": "GITEA_RESOLVED_VERSION",
@@ -402,6 +416,8 @@
       "kind": "toolchain",
       "version_key": "RUST_VERSION",
       "allow_dynamic": true,
+      "optional": true,
+      "platforms": ["darwin-arm64", "windows-x64"],
       "source": {
         "identity": "unresolved",
         "resolved_version_key": "RUST_RESOLVED_VERSION",
@@ -413,9 +429,12 @@
       "kind": "container",
       "version_key": "SUPABASE_POSTGRES_IMAGE",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["docker"],
       "source": {
-        "identity_key": "SUPABASE_POSTGRES_IMAGE",
-        "digest_key": "SUPABASE_POSTGRES_DIGEST"
+        "identity": "oci://{version}@{identity_digest}",
+        "identity_digest_key": "SUPABASE_POSTGRES_DIGEST",
+        "artifact_digest_key": "SUPABASE_POSTGRES_ARCHIVE_SHA256"
       }
     },
     {
@@ -423,9 +442,12 @@
       "kind": "container",
       "version_key": "POSTGREST_IMAGE",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["docker"],
       "source": {
-        "identity_key": "POSTGREST_IMAGE",
-        "digest_key": "POSTGREST_DIGEST"
+        "identity": "oci://{version}@{identity_digest}",
+        "identity_digest_key": "POSTGREST_DIGEST",
+        "artifact_digest_key": "POSTGREST_ARCHIVE_SHA256"
       }
     },
     {
@@ -433,9 +455,12 @@
       "kind": "container",
       "version_key": "POSTGRES_META_IMAGE",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["docker"],
       "source": {
-        "identity_key": "POSTGRES_META_IMAGE",
-        "digest_key": "POSTGRES_META_DIGEST"
+        "identity": "oci://{version}@{identity_digest}",
+        "identity_digest_key": "POSTGRES_META_DIGEST",
+        "artifact_digest_key": "POSTGRES_META_ARCHIVE_SHA256"
       }
     },
     {
@@ -443,9 +468,12 @@
       "kind": "container",
       "version_key": "SUPABASE_STUDIO_IMAGE",
       "allow_dynamic": false,
+      "optional": true,
+      "platforms": ["docker"],
       "source": {
-        "identity_key": "SUPABASE_STUDIO_IMAGE",
-        "digest_key": "SUPABASE_STUDIO_DIGEST"
+        "identity": "oci://{version}@{identity_digest}",
+        "identity_digest_key": "SUPABASE_STUDIO_DIGEST",
+        "artifact_digest_key": "SUPABASE_STUDIO_ARCHIVE_SHA256"
       }
     },
     {

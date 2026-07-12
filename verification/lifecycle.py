@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import fnmatch
 import gzip
 import hashlib
 import json
@@ -44,7 +45,7 @@ VERSION_PATTERN = re.compile(
     r"^v?[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?$"
 )
 PORTABLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-v1"
+INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-reparse-v2"
 
 HARD_EXCLUDED_PARTS = {
     ".agent",
@@ -502,6 +503,138 @@ def _parse_models_text(text: str) -> tuple[list[dict[str, str]], list[str]]:
     return models, errors
 
 
+def _declared_models(root: Path) -> dict[str, dict[str, str]]:
+    try:
+        models, errors = _parse_models_text(
+            (root / "serving" / "models.manifest").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError) as exc:
+        raise LifecycleError(f"model manifest is unreadable: {exc}") from exc
+    if errors:
+        raise LifecycleError("; ".join(errors))
+    return {model["name"]: model for model in models}
+
+
+def _model_authorities(root: Path) -> dict[str, dict[str, Any]]:
+    path = root / "serving" / "model-authorities.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError(f"model authority policy is unreadable: {exc}") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != SCHEMA_VERSION:
+        raise LifecycleError("model authority policy has an unsupported schema")
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, dict):
+        raise LifecycleError("model authority policy models must be an object")
+    authorities: dict[str, dict[str, Any]] = {}
+    for name, raw in raw_models.items():
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name)
+            or not isinstance(raw, dict)
+        ):
+            raise LifecycleError("model authority policy contains an invalid model entry")
+        repository = raw.get("repository")
+        revision = raw.get("revision")
+        include = raw.get("include")
+        files = raw.get("files")
+        if (
+            not isinstance(repository, str)
+            or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*",
+                repository,
+            )
+            or not isinstance(revision, str)
+            or not COMMIT_PATTERN.fullmatch(revision)
+            or not isinstance(include, str)
+            or not include
+            or not isinstance(files, list)
+            or not files
+        ):
+            raise LifecycleError(f"model authority is incomplete: {name}")
+        seen: set[str] = set()
+        normalized_files: list[dict[str, Any]] = []
+        for index, file_entry in enumerate(files):
+            if not isinstance(file_entry, dict):
+                raise LifecycleError(
+                    f"model authority {name} file {index} is not an object"
+                )
+            relative = validate_relative_path(str(file_entry.get("path", "")))
+            digest = str(file_entry.get("sha256", ""))
+            size = file_entry.get("size")
+            if (
+                relative in seen
+                or not relative.lower().endswith(".gguf")
+                or not fnmatch.fnmatchcase(relative, include)
+                or not SHA256_PATTERN.fullmatch(digest)
+                or not isinstance(size, int)
+                or isinstance(size, bool)
+                or size < 0
+            ):
+                raise LifecycleError(
+                    f"model authority {name} file {index} is invalid"
+                )
+            seen.add(relative)
+            normalized_files.append(
+                {"path": relative, "sha256": digest, "size": size}
+            )
+        authorities[name] = {
+            "repository": repository,
+            "revision": revision,
+            "include": include,
+            "files": sorted(normalized_files, key=lambda item: item["path"]),
+        }
+    return authorities
+
+
+def _model_authority_digest(authority: Mapping[str, Any]) -> str:
+    return _sha256_bytes(_json_bytes(dict(authority)))
+
+
+def _declared_model(
+    root: Path,
+    model_name: str,
+    repository: str,
+    requested_revision: str,
+    resolved_revision: str,
+) -> dict[str, str]:
+    declared = _declared_models(root).get(model_name)
+    if declared is None:
+        raise LifecycleError(f"model is not declared in models.manifest: {model_name}")
+    if declared["repository"] != repository:
+        raise LifecycleError("model repository differs from models.manifest")
+    revision = declared["revision"]
+    if requested_revision != revision:
+        raise LifecycleError("requested model revision differs from models.manifest")
+    if not COMMIT_PATTERN.fullmatch(resolved_revision):
+        raise LifecycleError("resolved model revision must be a 40-character commit")
+    if revision != "dynamic" and resolved_revision != revision:
+        raise LifecycleError("resolved model revision differs from models.manifest")
+    return declared
+
+
+def _local_model_files(
+    model_root: Path,
+    include: str,
+) -> list[tuple[str, Path]]:
+    if not model_root.is_dir() or _is_reparse_point(model_root):
+        raise LifecycleError(f"model directory is missing or unsafe: {model_root}")
+    files: list[tuple[str, Path]] = []
+    for path in sorted(model_root.rglob("*.gguf")):
+        if _is_reparse_point(path) or not path.is_file():
+            raise LifecycleError(f"model snapshot contains an unsafe file: {path}")
+        relative = path.relative_to(model_root).as_posix()
+        validate_relative_path(relative)
+        if not fnmatch.fnmatchcase(relative, include):
+            raise LifecycleError(
+                f"model file is outside the declared include pattern: {relative}"
+            )
+        files.append((relative, path))
+    if not files:
+        raise LifecycleError(f"model snapshot has no GGUF files: {model_root.name}")
+    return files
+
+
 def _artifact_requirements(
     versions: Mapping[str, str],
     models: Sequence[Mapping[str, str]],
@@ -566,8 +699,16 @@ def _source_identity(
         identity = versions.get(key, "")
     else:
         return ""
-    return identity.replace("{version}", requested_version).replace(
-        "{resolved}", resolved_version
+    identity_digest_key = source.get("identity_digest_key")
+    identity_digest = (
+        versions.get(identity_digest_key, "")
+        if isinstance(identity_digest_key, str)
+        else ""
+    )
+    return (
+        identity.replace("{version}", requested_version)
+        .replace("{resolved}", resolved_version)
+        .replace("{identity_digest}", identity_digest)
     )
 
 
@@ -597,7 +738,7 @@ def _authoritative_source_url(
 def _trusted_digest(
     source: Mapping[str, Any], versions: Mapping[str, str]
 ) -> str:
-    key = source.get("digest_key")
+    key = source.get("artifact_digest_key", source.get("digest_key"))
     if not isinstance(key, str):
         return ""
     value = versions.get(key, "").lower()
@@ -660,12 +801,17 @@ def _dependency_policy_errors(
         kind = raw.get("kind")
         version_key = raw.get("version_key")
         allow_dynamic = raw.get("allow_dynamic", False)
+        optional = raw.get("optional", False)
+        platforms = raw.get("platforms", [])
         if (
             not isinstance(artifact_id, str)
             or not PORTABLE_ID_PATTERN.fullmatch(artifact_id)
             or kind not in DEPENDENCY_KINDS
             or not isinstance(version_key, str)
             or not isinstance(allow_dynamic, bool)
+            or not isinstance(optional, bool)
+            or not isinstance(platforms, list)
+            or any(not isinstance(item, str) or not item for item in platforms)
         ):
             errors.append(f"dependency_inputs[{index}] has invalid fields")
             continue
@@ -687,6 +833,8 @@ def _dependency_policy_errors(
         for source_key_name in (
             "identity_key",
             "digest_key",
+            "artifact_digest_key",
+            "identity_digest_key",
             "revision_key",
             "resolved_version_key",
         ):
@@ -703,13 +851,24 @@ def _dependency_policy_errors(
             errors.append(
                 f"{artifact_id}: source identity key {identity_key} is absent from VERSIONS.lock"
             )
-        digest_key = source.get("digest_key")
+        digest_key = source.get("artifact_digest_key", source.get("digest_key"))
         if not isinstance(digest_key, str):
             errors.append(f"{artifact_id}: trusted digest key is missing")
         elif digest_key not in versions:
             errors.append(
                 f"{artifact_id}: trusted digest key {digest_key} is absent from VERSIONS.lock"
             )
+        if kind == "container":
+            identity_digest_key = source.get("identity_digest_key")
+            if not isinstance(identity_digest_key, str):
+                errors.append(
+                    f"{artifact_id}: immutable container identity digest key is missing"
+                )
+            elif identity_digest_key not in versions:
+                errors.append(
+                    f"{artifact_id}: container identity digest key "
+                    f"{identity_digest_key} is absent from VERSIONS.lock"
+                )
         if kind == "git":
             revision_key = source.get("revision_key")
             if not isinstance(revision_key, str):
@@ -1206,6 +1365,49 @@ def _find_powershell() -> str | None:
     return str(fixed) if fixed.is_file() else None
 
 
+def _installer_atomic_helper() -> str:
+    """Return the ASCII PowerShell helper injected into protected installers."""
+
+    return r'''
+# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v2
+function Assert-SafeAtomicPath([string]$Path) {
+    $full = [IO.Path]::GetFullPath($Path)
+    if (Test-Path -LiteralPath $full) {
+        $target = Get-Item -LiteralPath $full -Force
+        if (($target.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "atomic write target is a reparse point: $full"
+        }
+    }
+    $cursor = Split-Path -Parent $full
+    while ($cursor) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "atomic write ancestor is a reparse point: $cursor"
+            }
+        }
+        $next = Split-Path -Parent $cursor
+        if (-not $next -or $next -eq $cursor) { break }
+        $cursor = $next
+    }
+}
+function Write-Utf8NoBomAtomic([string]$Path, [string]$Text) {
+    Assert-SafeAtomicPath -Path $Path
+    $parent = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    Assert-SafeAtomicPath -Path $Path
+    $temporary = Join-Path $parent (".{0}.{1}.tmp" -f [IO.Path]::GetFileName($Path), [Guid]::NewGuid().ToString("N"))
+    try {
+        [IO.File]::WriteAllText($temporary, $Text, (New-Object Text.UTF8Encoding($false)))
+        Assert-SafeAtomicPath -Path $Path
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+'''.strip("\n")
+
+
 def _harden_built_installer(path: Path) -> dict[str, Any]:
     """Apply the required post-build transform without changing the protected source."""
 
@@ -1252,20 +1454,7 @@ def _harden_built_installer(path: Path) -> dict[str, Any]:
         raise LifecycleError("protected installer PowerShell preamble changed")
     if text.count("Set-Content -Path") != 2:
         raise LifecycleError("protected installer config-write patterns changed")
-    helper = r'''
-# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-v1
-function Write-Utf8NoBomAtomic([string]$Path, [string]$Text) {
-    $parent = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    $temporary = Join-Path $parent (".{0}.{1}.tmp" -f [IO.Path]::GetFileName($Path), [Guid]::NewGuid().ToString("N"))
-    try {
-        [IO.File]::WriteAllText($temporary, $Text, (New-Object Text.UTF8Encoding($false)))
-        Move-Item -LiteralPath $temporary -Destination $Path -Force
-    } finally {
-        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-    }
-}
-'''.strip("\n")
+    helper = _installer_atomic_helper()
     text = text.replace(
         '$ErrorActionPreference = "Stop"',
         '$ErrorActionPreference = "Stop"\n' + helper,
@@ -1433,6 +1622,7 @@ def _require_release_inputs_match_revision(root: Path, revision: str) -> None:
         "bootstrap/build-installers.ps1",
         "verification/policy.json",
         "serving/models.manifest",
+        "serving/model-authorities.json",
         "env/pyproject.toml",
         "env/uv.lock",
     ):
@@ -1446,6 +1636,101 @@ def _require_release_inputs_match_revision(root: Path, revision: str) -> None:
             raise LifecycleError(
                 f"release authority input differs from immutable revision: {relative}"
             )
+
+
+def _build_release_bundle(
+    root: Path,
+    version: str,
+    output_dir: Path,
+    revision: str,
+) -> ReleaseBundle:
+    source_bundle = build_source_archives(root, revision, output_dir, version)
+    installers, transforms = _build_installers(
+        root.resolve(),
+        source_bundle.revision,
+        source_bundle.output_dir,
+        version,
+    )
+    artifacts = [*source_bundle.archives, *installers]
+    checksums, provenance = _write_release_metadata(
+        source_bundle.output_dir,
+        version,
+        source_bundle.revision,
+        artifacts,
+        build_transforms=transforms,
+    )
+    bundle = ReleaseBundle(
+        version=version,
+        revision=source_bundle.revision,
+        output_dir=source_bundle.output_dir,
+        archives=artifacts,
+        checksums=checksums,
+        provenance=provenance,
+    )
+    verified = verify_release_bundle(bundle.output_dir)
+    if verified.revision != bundle.revision or verified.version != bundle.version:
+        raise LifecycleError("release preflight provenance changed unexpectedly")
+    return bundle
+
+
+def _release_paths(bundle: ReleaseBundle) -> list[Path]:
+    return [*bundle.archives, bundle.checksums, bundle.provenance]
+
+
+def _files_equal(first: Path, second: Path) -> bool:
+    with first.open("rb") as first_handle, second.open("rb") as second_handle:
+        while True:
+            first_chunk = first_handle.read(1024 * 1024)
+            second_chunk = second_handle.read(1024 * 1024)
+            if first_chunk != second_chunk:
+                return False
+            if not first_chunk:
+                return True
+
+
+def _reuse_immutable_release_output(
+    expected: ReleaseBundle,
+    output_dir: Path,
+) -> ReleaseBundle:
+    """Compare every existing byte to a fresh rebuild, then create only missing files."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    expected_paths = {path.name: path for path in _release_paths(expected)}
+    for existing in output_dir.iterdir():
+        if not existing.is_file() or existing.name not in expected_paths:
+            raise LifecycleError(
+                f"existing release output differs from immutable rebuild: {existing.name}"
+            )
+        authoritative = expected_paths[existing.name]
+        if (
+            existing.stat().st_size != authoritative.stat().st_size
+            or _sha256_file(existing) != _sha256_file(authoritative)
+            or not _files_equal(existing, authoritative)
+        ):
+            raise LifecycleError(
+                f"existing release output differs from immutable rebuild: {existing.name}"
+            )
+    for name, authoritative in sorted(expected_paths.items()):
+        destination = output_dir / name
+        if destination.exists():
+            continue
+        try:
+            with destination.open("xb") as output:
+                with authoritative.open("rb") as source:
+                    shutil.copyfileobj(source, output)
+                output.flush()
+                os.fsync(output.fileno())
+        except FileExistsError as exc:
+            raise LifecycleError(
+                f"release output appeared during create-only resume: {name}"
+            ) from exc
+    verified = verify_release_bundle(output_dir)
+    if (
+        verified.version != expected.version
+        or verified.revision != expected.revision
+    ):
+        raise LifecycleError("resumed release output differs from immutable rebuild")
+    return verified
 
 
 def preflight_release(
@@ -1480,51 +1765,19 @@ def preflight_release(
             + "; ".join(dependency_errors)
         )
     output_dir = output_dir.resolve()
-    existing_checksums = output_dir / "SHA256SUMS"
-    existing_provenance = output_dir / "PROVENANCE.json"
-    if existing_checksums.is_file() and existing_provenance.is_file():
-        existing = verify_release_bundle(output_dir)
-        installer_suffixes = {
-            path.suffix.lower()
-            for path in existing.archives
-            if path.suffix.lower() in {".command", ".cmd"}
-        }
-        if (
-            existing.version != version
-            or existing.revision != resolved_revision
-            or installer_suffixes != {".command", ".cmd"}
-        ):
-            raise LifecycleError(
-                "existing release output is not the complete requested bundle"
+    if output_dir.is_dir() and any(output_dir.iterdir()):
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".release-rebuild-", dir=output_dir.parent
+        ) as temporary_directory:
+            expected = _build_release_bundle(
+                root,
+                version,
+                Path(temporary_directory),
+                resolved_revision,
             )
-        return existing
-    source_bundle = build_source_archives(root, revision, output_dir, version)
-    installers, transforms = _build_installers(
-        root.resolve(),
-        source_bundle.revision,
-        source_bundle.output_dir,
-        version,
-    )
-    artifacts = [*source_bundle.archives, *installers]
-    checksums, provenance = _write_release_metadata(
-        source_bundle.output_dir,
-        version,
-        source_bundle.revision,
-        artifacts,
-        build_transforms=transforms,
-    )
-    bundle = ReleaseBundle(
-        version=version,
-        revision=source_bundle.revision,
-        output_dir=source_bundle.output_dir,
-        archives=artifacts,
-        checksums=checksums,
-        provenance=provenance,
-    )
-    verified = verify_release_bundle(bundle.output_dir)
-    if verified.revision != bundle.revision or verified.version != bundle.version:
-        raise LifecycleError("release preflight provenance changed unexpectedly")
-    return bundle
+            return _reuse_immutable_release_output(expected, output_dir)
+    return _build_release_bundle(root, version, output_dir, resolved_revision)
 
 
 def _existing_tag_targets(
@@ -1828,8 +2081,8 @@ def record_cached_artifact(
     if trust not in {"policy-bound", "untrusted"}:
         raise LifecycleError("artifact trust classification is invalid")
     parsed = urllib.parse.urlparse(source_url)
-    if parsed.scheme not in {"file", "https"}:
-        raise LifecycleError("artifact source URL must use file or https")
+    if parsed.scheme not in {"file", "https", "oci"}:
+        raise LifecycleError("artifact source URL must use file, https, or oci")
     safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", artifact_id).strip("-")
     relative = PurePosixPath("files", safe_id, source_file.name).as_posix()
     validate_relative_path(relative)
@@ -1866,6 +2119,231 @@ def record_cached_artifact(
     if validation:
         raise LifecycleError("; ".join(validation))
     return record
+
+
+SOURCE_RECEIPT = ".oracle-source.json"
+
+
+def _extract_source_archive(archive_path: Path, destination: Path) -> Path:
+    destination.mkdir(parents=True, exist_ok=False)
+    if archive_path.suffix.lower() == ".zip":
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                for info in archive.infolist():
+                    relative = validate_relative_path(info.filename.rstrip("/"))
+                    target = destination / Path(*PurePosixPath(relative).parts)
+                    unix_type = (info.external_attr >> 16) & 0o170000
+                    if unix_type == stat.S_IFLNK:
+                        raise LifecycleError("source archive contains a symbolic link")
+                    if info.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(info) as source, target.open("xb") as output:
+                        shutil.copyfileobj(source, output)
+                    mode = (info.external_attr >> 16) & 0o777
+                    if mode:
+                        os.chmod(target, mode)
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise LifecycleError(f"invalid source zip archive: {archive_path}") from exc
+    else:
+        try:
+            with tarfile.open(archive_path, "r:*") as archive:
+                for member in archive.getmembers():
+                    relative = validate_relative_path(member.name.rstrip("/"))
+                    target = destination / Path(*PurePosixPath(relative).parts)
+                    if member.issym() or member.islnk():
+                        raise LifecycleError("source archive contains a link")
+                    if member.isdir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    if not member.isfile():
+                        raise LifecycleError(
+                            "source archive contains a non-file member"
+                        )
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise LifecycleError("source archive member is unreadable")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with source, target.open("xb") as output:
+                        shutil.copyfileobj(source, output)
+                    os.chmod(target, member.mode & 0o777)
+        except (tarfile.TarError, OSError) as exc:
+            raise LifecycleError(f"invalid source tar archive: {archive_path}") from exc
+    children = list(destination.iterdir())
+    if len(children) == 1 and children[0].is_dir() and not _is_reparse_point(children[0]):
+        return children[0]
+    return destination
+
+
+def _source_tree_digest(source_root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(source_root.rglob("*"), key=lambda item: item.as_posix()):
+        relative = path.relative_to(source_root).as_posix()
+        if relative == SOURCE_RECEIPT:
+            continue
+        if _is_reparse_point(path):
+            raise LifecycleError(f"installed source tree contains a reparse point: {path}")
+        encoded = relative.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+        if path.is_dir():
+            digest.update(b"D")
+        elif path.is_file():
+            digest.update(b"F")
+            digest.update(path.stat().st_size.to_bytes(8, "big"))
+            digest.update(bytes.fromhex(_sha256_file(path)))
+        else:
+            raise LifecycleError(f"installed source tree has an unsafe entry: {path}")
+    return digest.hexdigest()
+
+
+def _expected_source_tree(
+    archive_path: Path,
+    parent: Path,
+) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    temporary = tempfile.TemporaryDirectory(prefix=".source-validate-", dir=parent)
+    temporary_root = Path(temporary.name)
+    try:
+        content_root = _extract_source_archive(
+            archive_path, temporary_root / "extracted"
+        )
+    except Exception:
+        temporary.cleanup()
+        raise
+    return temporary, content_root
+
+
+def install_source_archive(
+    root: Path,
+    manifest_path: Path,
+    cache_root: Path,
+    artifact_id: str,
+    destination: Path,
+    *,
+    expected_version: str,
+    expected_requested_version: str,
+) -> Path:
+    """Replace a source checkout only from a policy-bound offline export."""
+
+    root = root.resolve()
+    destination = destination.absolute()
+    archive_path = resolve_cached_artifact(
+        manifest_path,
+        cache_root,
+        artifact_id,
+        expected_version=expected_version,
+        expected_requested_version=expected_requested_version,
+        policy_root=root,
+        require_policy_bound=True,
+    )
+    records, errors = _load_artifact_records(manifest_path)
+    if errors:
+        raise LifecycleError("; ".join(errors))
+    record = records[artifact_id]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if _is_reparse_point(destination):
+        raise LifecycleError(f"source destination is a reparse point: {destination}")
+    temporary, content_root = _expected_source_tree(
+        archive_path, destination.parent
+    )
+    try:
+        tree_digest = _source_tree_digest(content_root)
+        staged = Path(temporary.name) / "staged"
+        shutil.copytree(content_root, staged)
+        receipt = {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_id": artifact_id,
+            "resolved_version": record.resolved_version,
+            "source_url": record.source_url,
+            "archive_sha256": record.sha256,
+            "tree_sha256": tree_digest,
+        }
+        atomic_write_bytes(staged / SOURCE_RECEIPT, _json_bytes(receipt))
+        if destination.exists():
+            if not destination.is_dir():
+                raise LifecycleError(
+                    f"source destination is not a directory: {destination}"
+                )
+            shutil.rmtree(destination)
+        os.replace(staged, destination)
+    finally:
+        temporary.cleanup()
+    validation = validate_source_install(
+        root,
+        manifest_path,
+        cache_root,
+        artifact_id,
+        destination,
+        expected_version=expected_version,
+        expected_requested_version=expected_requested_version,
+    )
+    if validation:
+        raise LifecycleError("; ".join(validation))
+    return destination
+
+
+def validate_source_install(
+    root: Path,
+    manifest_path: Path,
+    cache_root: Path,
+    artifact_id: str,
+    destination: Path,
+    *,
+    expected_version: str,
+    expected_requested_version: str,
+) -> list[str]:
+    """Validate source identity, archive bytes, receipt, and extracted tree bytes."""
+
+    errors: list[str] = []
+    try:
+        archive_path = resolve_cached_artifact(
+            manifest_path,
+            cache_root,
+            artifact_id,
+            expected_version=expected_version,
+            expected_requested_version=expected_requested_version,
+            policy_root=root,
+            require_policy_bound=True,
+        )
+        records, record_errors = _load_artifact_records(manifest_path)
+        if record_errors:
+            raise LifecycleError("; ".join(record_errors))
+        record = records[artifact_id]
+        if _is_reparse_point(destination) or not destination.is_dir():
+            raise LifecycleError("installed source tree is missing or unsafe")
+        receipt_path = destination / SOURCE_RECEIPT
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if not isinstance(receipt, dict):
+            raise LifecycleError("installed source receipt is not an object")
+        temporary, expected_root = _expected_source_tree(
+            archive_path, destination.parent
+        )
+        try:
+            expected_tree_digest = _source_tree_digest(expected_root)
+        finally:
+            temporary.cleanup()
+        expected_receipt = {
+            "schema_version": SCHEMA_VERSION,
+            "artifact_id": artifact_id,
+            "resolved_version": record.resolved_version,
+            "source_url": record.source_url,
+            "archive_sha256": record.sha256,
+            "tree_sha256": expected_tree_digest,
+        }
+        if receipt != expected_receipt:
+            errors.append(f"{artifact_id}: installed source receipt mismatch")
+        if _source_tree_digest(destination) != expected_tree_digest:
+            errors.append(f"{artifact_id}: installed source tree digest mismatch")
+    except (
+        LifecycleError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+    ) as exc:
+        errors.append(f"{artifact_id}: installed source validation failed: {exc}")
+    return errors
 
 
 def _load_dependency_policy(
@@ -1927,6 +2405,17 @@ def _trusted_export_digest(
             raise LifecycleError(
                 f"{artifact_id}: immutable trusted revision is unresolved"
             )
+    elif raw.get("kind") == "container":
+        identity_digest_key = source.get("identity_digest_key")
+        identity_digest = (
+            versions.get(identity_digest_key, "")
+            if isinstance(identity_digest_key, str)
+            else ""
+        )
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity_digest):
+            raise LifecycleError(
+                f"{artifact_id}: immutable container identity digest is unresolved"
+            )
     elif not _is_exact_pin(trusted_resolved):
         raise LifecycleError(
             f"{artifact_id}: trusted resolved version is unresolved"
@@ -1960,6 +2449,41 @@ def _trusted_export_digest(
     if not SHA256_PATTERN.fullmatch(digest):
         raise LifecycleError(f"{artifact_id}: immutable trusted digest is unresolved")
     return digest
+
+
+def import_artifact(
+    root: Path,
+    cache_root: Path,
+    *,
+    artifact_id: str,
+    source_file: Path,
+    source_url: str,
+    requested_version: str,
+    resolved_version: str,
+) -> ArtifactRecord:
+    """Import a local file only when tracked policy independently binds its bytes."""
+
+    expected_digest = _trusted_export_digest(
+        root,
+        artifact_id=artifact_id,
+        source_url=source_url,
+        requested_version=requested_version,
+        resolved_version=resolved_version,
+    )
+    actual_digest = _sha256_file(source_file)
+    if actual_digest != expected_digest:
+        raise LifecycleError(
+            f"{artifact_id}: imported content differs from trusted digest"
+        )
+    return record_cached_artifact(
+        cache_root,
+        artifact_id=artifact_id,
+        source_file=source_file,
+        source_url=source_url,
+        requested_version=requested_version,
+        resolved_version=resolved_version,
+        trust="policy-bound",
+    )
 
 
 def export_artifact(
@@ -2052,7 +2576,7 @@ def record_model_snapshot(
     requested_revision: str,
     resolved_revision: str,
 ) -> ArtifactRecord:
-    """Record the resolved model revision and hashes of every local GGUF shard."""
+    """Record untrusted acquisition evidence for local GGUF shards."""
 
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", model_name):
         raise LifecycleError("model name is not portable")
@@ -2061,20 +2585,19 @@ def record_model_snapshot(
         repository,
     ):
         raise LifecycleError("model repository must be an owner/name identifier")
-    if not COMMIT_PATTERN.fullmatch(resolved_revision):
-        raise LifecycleError("resolved model revision must be a 40-character commit")
     root = root.resolve()
     cache_root = cache_root.resolve()
+    declared = _declared_model(
+        root,
+        model_name,
+        repository,
+        requested_revision,
+        resolved_revision,
+    )
     model_base = models_root.resolve() if models_root is not None else root / "models"
     model_root = model_base / model_name
-    if not model_root.is_dir() or model_root.is_symlink():
-        raise LifecycleError(f"model directory is missing or unsafe: {model_root}")
     files: list[dict[str, Any]] = []
-    for path in sorted(model_root.rglob("*.gguf")):
-        if path.is_symlink() or not path.is_file():
-            raise LifecycleError(f"model snapshot contains an unsafe file: {path}")
-        relative = path.relative_to(model_root).as_posix()
-        validate_relative_path(relative)
+    for relative, path in _local_model_files(model_root, declared["include"]):
         files.append(
             {
                 "path": relative,
@@ -2082,31 +2605,16 @@ def record_model_snapshot(
                 "size": path.stat().st_size,
             }
         )
-    if not files:
-        raise LifecycleError(f"model snapshot has no GGUF files: {model_name}")
     payload = {
         "schema_version": SCHEMA_VERSION,
         "artifact_id": f"model:{model_name}",
         "model_name": model_name,
         "repository": repository,
+        "include": declared["include"],
         "requested_revision": requested_revision,
         "resolved_revision": resolved_revision,
         "files": files,
     }
-    trust = "untrusted"
-    try:
-        declared_models, declared_errors = _parse_models_text(
-            (root / "serving" / "models.manifest").read_text(encoding="utf-8")
-        )
-        if not declared_errors and any(
-            item["name"] == model_name
-            and item["repository"] == repository
-            and item["revision"] == resolved_revision
-            for item in declared_models
-        ):
-            trust = "policy-bound"
-    except (OSError, UnicodeDecodeError):
-        pass
     cache_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".model-snapshot-", dir=cache_root
@@ -2122,7 +2630,117 @@ def record_model_snapshot(
             ),
             requested_version=requested_revision,
             resolved_version=resolved_revision,
-            trust=trust,
+            trust="untrusted",
+        )
+
+
+def import_model_snapshot(
+    root: Path,
+    cache_root: Path,
+    *,
+    model_name: str,
+    authority_file: Path,
+    models_root: Path | None = None,
+) -> ArtifactRecord:
+    """Import independently supplied, tracked model identities and shard hashes."""
+
+    root = root.resolve()
+    cache_root = cache_root.resolve()
+    tracked_authority_path = root / "serving" / "model-authorities.json"
+    if authority_file.resolve() == tracked_authority_path.resolve():
+        raise LifecycleError(
+            "model import requires a separate independently supplied authority file"
+        )
+    try:
+        supplied_payload = json.loads(authority_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError(f"supplied model authority is unreadable: {exc}") from exc
+    if (
+        not isinstance(supplied_payload, dict)
+        or supplied_payload.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(supplied_payload.get("models"), dict)
+    ):
+        raise LifecycleError("supplied model authority has an unsupported schema")
+    supplied = supplied_payload["models"].get(model_name)
+    tracked = _model_authorities(root).get(model_name)
+    if not isinstance(supplied, dict) or tracked is None:
+        raise LifecycleError(
+            f"model authority is not promoted in tracked policy: {model_name}"
+        )
+    normalized_supplied = {
+        "repository": supplied.get("repository"),
+        "revision": supplied.get("revision"),
+        "include": supplied.get("include"),
+        "files": sorted(
+            supplied.get("files", []),
+            key=lambda item: str(item.get("path", "")) if isinstance(item, dict) else "",
+        ),
+    }
+    if normalized_supplied != tracked:
+        raise LifecycleError(
+            f"supplied model authority differs from tracked policy: {model_name}"
+        )
+    declared = _declared_model(
+        root,
+        model_name,
+        tracked["repository"],
+        tracked["revision"],
+        tracked["revision"],
+    )
+    if declared["include"] != tracked["include"]:
+        raise LifecycleError("model authority include differs from models.manifest")
+    model_base = models_root.resolve() if models_root is not None else root / "models"
+    model_root = model_base / model_name
+    local_files = {
+        relative: path
+        for relative, path in _local_model_files(model_root, tracked["include"])
+    }
+    expected_files = {
+        str(item["path"]): item for item in tracked["files"]
+    }
+    if set(local_files) != set(expected_files):
+        missing = sorted(set(expected_files) - set(local_files))
+        unexpected = sorted(set(local_files) - set(expected_files))
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if unexpected:
+            detail.append("unexpected " + ", ".join(unexpected))
+        raise LifecycleError("model authority file set mismatch: " + "; ".join(detail))
+    for relative, expected in expected_files.items():
+        path = local_files[relative]
+        if path.stat().st_size != expected["size"]:
+            raise LifecycleError(f"model size mismatch: {relative}")
+        if _sha256_file(path) != expected["sha256"]:
+            raise LifecycleError(f"model checksum mismatch: {relative}")
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "artifact_id": f"model:{model_name}",
+        "model_name": model_name,
+        "repository": tracked["repository"],
+        "include": tracked["include"],
+        "requested_revision": tracked["revision"],
+        "resolved_revision": tracked["revision"],
+        "authority_sha256": _model_authority_digest(tracked),
+        "files": tracked["files"],
+    }
+    cache_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".model-authority-", dir=cache_root
+    ) as temporary_directory:
+        snapshot = Path(temporary_directory) / f"{model_name}.model.json"
+        atomic_write_bytes(snapshot, _json_bytes(payload))
+        return record_cached_artifact(
+            cache_root,
+            artifact_id=f"model:{model_name}",
+            source_file=snapshot,
+            source_url=(
+                f"https://huggingface.co/{tracked['repository']}/tree/"
+                f"{tracked['revision']}"
+            ),
+            requested_version=tracked["revision"],
+            resolved_version=tracked["revision"],
+            trust="policy-bound",
         )
 
 
@@ -2165,6 +2783,32 @@ def validate_model_snapshot(
     raw_files = payload.get("files")
     if not isinstance(raw_files, list) or not raw_files:
         return [f"{record.artifact_id}: model snapshot has no files"]
+    authority: dict[str, Any] | None = None
+    if record.trust == "policy-bound":
+        try:
+            authority = _model_authorities(root).get(model_name)
+        except LifecycleError as exc:
+            return [f"{record.artifact_id}: {exc}"]
+        if authority is None:
+            return [f"{record.artifact_id}: policy-bound model authority is missing"]
+        try:
+            declared = _declared_models(root).get(model_name)
+        except LifecycleError as exc:
+            return [f"{record.artifact_id}: {exc}"]
+        if (
+            declared is None
+            or declared["repository"] != authority["repository"]
+            or declared["revision"] != authority["revision"]
+            or declared["include"] != authority["include"]
+            or payload.get("repository") != authority["repository"]
+            or payload.get("include") != authority["include"]
+            or payload.get("requested_revision") != authority["revision"]
+            or payload.get("resolved_revision") != authority["revision"]
+            or payload.get("authority_sha256")
+            != _model_authority_digest(authority)
+            or raw_files != authority["files"]
+        ):
+            return [f"{record.artifact_id}: policy-bound model authority mismatch"]
     model_root = root.resolve() / "models" / model_name
     seen: set[str] = set()
     for index, raw in enumerate(raw_files):
@@ -2192,7 +2836,68 @@ def validate_model_snapshot(
             or _sha256_file(target) != expected_hash
         ):
             errors.append(f"{record.artifact_id}: checksum mismatch: {path_text}")
+    if authority is not None:
+        try:
+            actual_files = {
+                relative
+                for relative, _path in _local_model_files(
+                    model_root, authority["include"]
+                )
+            }
+        except LifecycleError as exc:
+            errors.append(f"{record.artifact_id}: {exc}")
+        else:
+            unexpected = actual_files - seen
+            for relative in sorted(unexpected):
+                errors.append(
+                    f"{record.artifact_id}: unexpected model file: {relative}"
+                )
     return errors
+
+
+def validated_model_paths(
+    root: Path,
+    cache_root: Path,
+    model_name: str,
+) -> list[Path]:
+    """Return only shards authorized by tracked identities and a trusted cache record."""
+
+    root = root.resolve()
+    cache_root = cache_root.resolve()
+    manifest_path = cache_root / "manifest.json"
+    try:
+        snapshot_path = resolve_cached_artifact(
+            manifest_path,
+            cache_root,
+            f"model:{model_name}",
+            policy_root=root,
+            require_policy_bound=True,
+        )
+    except LifecycleError as exc:
+        raise LifecycleError(
+            f"policy-bound model snapshot is unavailable for {model_name}: {exc}"
+        ) from exc
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError(
+            f"policy-bound model snapshot is unreadable for {model_name}: {exc}"
+        ) from exc
+    paths = [
+        root / "models" / model_name / Path(*PurePosixPath(item["path"]).parts)
+        for item in payload["files"]
+    ]
+    if not paths:
+        raise LifecycleError(f"policy-bound model snapshot has no files: {model_name}")
+    return paths
+
+
+def preferred_model_path(root: Path, cache_root: Path, model_name: str) -> Path:
+    paths = validated_model_paths(root, cache_root, model_name)
+    first_shards = [
+        path for path in paths if re.search(r"-00001-of-[0-9]+\.gguf$", path.name)
+    ]
+    return sorted(first_shards or paths, key=lambda path: str(path))[0]
 
 
 def validate_dependency_inputs(
@@ -2203,6 +2908,7 @@ def validate_dependency_inputs(
     reproducible: bool = False,
     artifact_ids: set[str] | None = None,
     include_models: bool = True,
+    include_optional: bool = False,
 ) -> list[str]:
     """Validate central pins and, in reproducible mode, exact cached artifacts."""
 
@@ -2273,6 +2979,12 @@ def validate_dependency_inputs(
             continue
         if artifact_ids is not None and artifact_id not in artifact_ids:
             continue
+        if (
+            raw.get("optional", False)
+            and artifact_ids is None
+            and not include_optional
+        ):
+            continue
         value = versions.get(version_key)
         if value is None:
             continue
@@ -2292,6 +3004,17 @@ def validate_dependency_inputs(
                 errors.append(
                     f"{artifact_id}: immutable trusted revision is unresolved"
                 )
+            if raw.get("kind") == "container":
+                identity_digest_key = source.get("identity_digest_key")
+                identity_digest = (
+                    versions.get(identity_digest_key, "")
+                    if isinstance(identity_digest_key, str)
+                    else ""
+                )
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity_digest):
+                    errors.append(
+                        f"{artifact_id}: immutable container identity digest is unresolved"
+                    )
             record = records.get(artifact_id)
             if record is None:
                 errors.append(f"{artifact_id}: reproducible mode needs a resolved artifact")
@@ -2451,26 +3174,16 @@ def _load_json_template(path: Path, default: Mapping[str, Any]) -> dict[str, Any
 def _detect_model_ids(
     root: Path, models: Sequence[Mapping[str, str]]
 ) -> list[str]:
-    detected = []
+    cache_root = root / "incoming" / "dependency-cache"
+    detected: list[str] = []
     for model in models:
-        model_root = root / "models" / model["name"]
-        if model_root.is_dir() and any(model_root.rglob("*.gguf")):
+        try:
+            validated_model_paths(root, cache_root, model["name"])
+        except LifecycleError:
+            continue
+        else:
             detected.append(model["name"])
-    if detected:
-        return detected
-    try:
-        with urllib.request.urlopen(
-            "http://127.0.0.1:9099/v1/models", timeout=3
-        ) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        known = {model["name"] for model in models}
-        return [
-            item["id"]
-            for item in payload.get("data", [])
-            if isinstance(item, dict) and item.get("id") in known
-        ]
-    except Exception:
-        return []
+    return detected
 
 
 def _model_file_size(root: Path, model_name: str) -> int:
@@ -2502,7 +3215,7 @@ def _pick_tier(
 def sync_model_configs(root: Path, home: Path) -> list[Path]:
     """Generate machine configs without changing tracked source templates."""
 
-    root = root.resolve()
+    root = _guard_state_root(root)
     home = home.resolve()
     manifest_path = root / "serving" / "models.manifest"
     try:
@@ -2516,7 +3229,8 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
     ids = _detect_model_ids(root, models)
     if not ids:
         raise LifecycleError(
-            "no validated models detected; generated engine configuration is unavailable"
+            "no policy-bound model snapshot is valid; generated engine "
+            "configuration is unavailable"
         )
     by_name = {model["name"]: model for model in models}
     detected = [by_name[name] for name in ids if name in by_name]
@@ -2690,8 +3404,33 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
     return sorted(writes, key=lambda path: str(path))
 
 
+def _guard_state_root(root: Path) -> Path:
+    root = Path(os.path.abspath(os.fspath(root)))
+    for candidate in [*reversed(root.parents), root]:
+        if candidate == Path(candidate.anchor):
+            continue
+        if _is_reparse_point(candidate):
+            raise LifecycleError(
+                f"install state root has a reparse ancestor: {candidate}"
+            )
+    return root
+
+
 def _state_path(root: Path) -> Path:
-    return root / STATE_DIRECTORY / STATE_FILE
+    root = _guard_state_root(root)
+    state_directory = root / STATE_DIRECTORY
+    state_file = state_directory / STATE_FILE
+    if _is_reparse_point(state_directory):
+        raise LifecycleError(
+            f"install state directory is a reparse point: {state_directory}"
+        )
+    if state_directory.exists() and not state_directory.is_dir():
+        raise LifecycleError(
+            f"install state directory is not a directory: {state_directory}"
+        )
+    if _is_reparse_point(state_file):
+        raise LifecycleError(f"install state file is a reparse point: {state_file}")
+    return state_file
 
 
 def _input_digest(root: Path, source_revision: str) -> str:
@@ -2699,6 +3438,7 @@ def _input_digest(root: Path, source_revision: str) -> str:
     inputs = (
         "VERSIONS.lock",
         "serving/models.manifest",
+        "serving/model-authorities.json",
         "verification/policy.json",
         "env/uv.lock",
         "ARTIFACTS.json",
@@ -2742,7 +3482,10 @@ def _read_state(root: Path) -> dict[str, Any]:
 
 
 def _write_state(root: Path, state: Mapping[str, Any]) -> None:
-    atomic_write_bytes(_state_path(root), _json_bytes(dict(state)))
+    path = _state_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path = _state_path(root)
+    atomic_write_bytes(path, _json_bytes(dict(state)))
 
 
 def _current_revision(root: Path) -> str:
@@ -2775,16 +3518,18 @@ def initialize_install_state(
 ) -> dict[str, Any]:
     """Initialize or upgrade state without losing ownership history."""
 
-    root = root.resolve()
+    root = Path(os.path.abspath(os.fspath(root)))
     home = home.resolve()
+    _guard_state_root(root)
     root.mkdir(parents=True, exist_ok=True)
     home.mkdir(parents=True, exist_ok=True)
+    _guard_state_root(root)
     revision = source_revision or _current_revision(root)
     if not COMMIT_PATTERN.fullmatch(revision):
         raise LifecycleError("install source revision must be a 40-character commit")
     legacy = root / STATE_DIRECTORY
-    if legacy.is_symlink():
-        raise LifecycleError("legacy install state must not be a symbolic link")
+    if _is_reparse_point(legacy):
+        raise LifecycleError("legacy install state must not be a reparse point")
     if legacy.is_file():
         try:
             legacy.read_text(encoding="utf-8")
@@ -2827,7 +3572,7 @@ def initialize_install_state(
 
 
 def phase_is_current(root: Path, phase: str) -> bool:
-    root = root.resolve()
+    root = _guard_state_root(root)
     state = _read_state(root)
     phase_record = state["phases"].get(phase)
     if isinstance(phase_record, str):
@@ -2874,7 +3619,7 @@ def begin_install_phase(root: Path, phase: str) -> None:
     """Associate subsequently registered ownership with one install phase."""
 
     _validate_phase_name(phase)
-    root = root.resolve()
+    root = _guard_state_root(root)
     state = _read_state(root)
     state["pending_phase"] = phase
     state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
@@ -2885,7 +3630,7 @@ def begin_install_phase(root: Path, phase: str) -> None:
 
 def mark_install_phase(root: Path, phase: str) -> None:
     _validate_phase_name(phase)
-    root = root.resolve()
+    root = _guard_state_root(root)
     state = _read_state(root)
     phase_paths = [
         item
@@ -2952,7 +3697,7 @@ def _owned_entry(root: Path, home: Path, candidate: Path) -> dict[str, Any]:
 def register_owned_path(root: Path, home: Path, path: Path) -> dict[str, Any]:
     """Record a path that Oracle actually created, with a content fingerprint."""
 
-    root = root.resolve()
+    root = _guard_state_root(root)
     home = home.resolve()
     entry = _owned_entry(root, home, path)
     scope = entry["scope"]
@@ -3001,7 +3746,7 @@ def register_owned_tree(
 ) -> list[dict[str, Any]]:
     """Replace ownership records for a tree with every path currently present."""
 
-    root = root.resolve()
+    root = _guard_state_root(root)
     home = home.resolve()
     tree = tree.absolute()
     if _is_reparse_point(tree) or not tree.is_dir():
@@ -3057,6 +3802,20 @@ def register_owned_tree(
     return entries
 
 
+def register_model_ownership(
+    root: Path,
+    home: Path,
+    cache_root: Path,
+    model_name: str,
+) -> list[dict[str, Any]]:
+    """Own only authority-selected model shard files, never the models tree."""
+
+    entries = []
+    for path in validated_model_paths(root, cache_root, model_name):
+        entries.append(register_owned_path(root, home, path))
+    return entries
+
+
 def register_owned_service(
     root: Path,
     *,
@@ -3066,7 +3825,7 @@ def register_owned_service(
     """Record one narrowly validated service that Oracle created."""
 
     _validate_owned_service({"kind": kind, "identifier": identifier})
-    root = root.resolve()
+    root = _guard_state_root(root)
     state = _read_state(root)
     entry = {"kind": kind, "identifier": identifier}
     state["owned_services"] = [
@@ -3317,7 +4076,7 @@ def uninstall(
 ) -> UninstallPlan:
     """Plan or apply ownership-scoped removal.  Dry-run is the default."""
 
-    root = root.resolve()
+    root = _guard_state_root(root)
     home = home.resolve()
     if purge and not confirm_purge:
         raise LifecycleError("purge requires the separate confirmation flag")
@@ -3448,6 +4207,7 @@ def _command_validate_dependencies(args: argparse.Namespace) -> int:
         artifact_manifest=args.manifest,
         cache_root=args.cache,
         reproducible=args.reproducible,
+        include_optional=args.include_optional,
     )
     if errors:
         for error in errors:
@@ -3485,6 +4245,20 @@ def _command_export_artifact(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_import_artifact(args: argparse.Namespace) -> int:
+    record = import_artifact(
+        args.root,
+        args.cache,
+        artifact_id=args.artifact_id,
+        source_file=args.file,
+        source_url=args.url,
+        requested_version=args.requested_version,
+        resolved_version=args.resolved_version,
+    )
+    print(json.dumps(record.to_payload(), sort_keys=True))
+    return 0
+
+
 def _command_artifact_path(args: argparse.Namespace) -> int:
     path = resolve_cached_artifact(
         args.manifest,
@@ -3510,6 +4284,55 @@ def _command_record_model(args: argparse.Namespace) -> int:
         resolved_revision=args.resolved_revision,
     )
     print(json.dumps(record.to_payload(), sort_keys=True))
+    return 0
+
+
+def _command_import_model(args: argparse.Namespace) -> int:
+    record = import_model_snapshot(
+        args.root,
+        args.cache,
+        models_root=args.models_root,
+        model_name=args.model_name,
+        authority_file=args.authority,
+    )
+    print(json.dumps(record.to_payload(), sort_keys=True))
+    return 0
+
+
+def _command_model_path(args: argparse.Namespace) -> int:
+    print(preferred_model_path(args.root, args.cache, args.model_name))
+    return 0
+
+
+def _command_install_source(args: argparse.Namespace) -> int:
+    path = install_source_archive(
+        args.root,
+        args.manifest,
+        args.cache,
+        args.artifact_id,
+        args.destination,
+        expected_version=args.expected_version,
+        expected_requested_version=args.expected_requested_version,
+    )
+    print(path)
+    return 0
+
+
+def _command_validate_source(args: argparse.Namespace) -> int:
+    errors = validate_source_install(
+        args.root,
+        args.manifest,
+        args.cache,
+        args.artifact_id,
+        args.destination,
+        expected_version=args.expected_version,
+        expected_requested_version=args.expected_requested_version,
+    )
+    if errors:
+        for error in errors:
+            print(f"FAIL: {error}", file=sys.stderr)
+        return 1
+    print("source install validated")
     return 0
 
 
@@ -3551,6 +4374,13 @@ def _command_state(args: argparse.Namespace) -> int:
             )
         register_owned_service(
             args.root, kind=args.service_kind, identifier=args.identifier
+        )
+        return 0
+    if args.state_action == "own-model":
+        if not args.model_name or args.cache is None:
+            raise LifecycleError("state own-model requires --model-name and --cache")
+        register_model_ownership(
+            args.root, args.home, args.cache, args.model_name
         )
         return 0
     raise LifecycleError("unknown state action")
@@ -3611,6 +4441,7 @@ def build_parser() -> argparse.ArgumentParser:
     dependencies.add_argument("--manifest", type=Path)
     dependencies.add_argument("--cache", type=Path)
     dependencies.add_argument("--reproducible", action="store_true")
+    dependencies.add_argument("--include-optional", action="store_true")
     dependencies.set_defaults(handler=_command_validate_dependencies)
 
     record = subparsers.add_parser("record-artifact")
@@ -3633,6 +4464,16 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--trusted", action="store_true")
     export.set_defaults(handler=_command_export_artifact)
 
+    import_dependency = subparsers.add_parser("import-artifact")
+    import_dependency.add_argument("--root", type=Path, required=True)
+    import_dependency.add_argument("--cache", type=Path, required=True)
+    import_dependency.add_argument("--artifact-id", required=True)
+    import_dependency.add_argument("--file", type=Path, required=True)
+    import_dependency.add_argument("--url", required=True)
+    import_dependency.add_argument("--requested-version", required=True)
+    import_dependency.add_argument("--resolved-version", required=True)
+    import_dependency.set_defaults(handler=_command_import_artifact)
+
     artifact_path = subparsers.add_parser("artifact-path")
     artifact_path.add_argument("--manifest", type=Path, required=True)
     artifact_path.add_argument("--cache", type=Path, required=True)
@@ -3653,6 +4494,34 @@ def build_parser() -> argparse.ArgumentParser:
     record_model.add_argument("--resolved-revision", required=True)
     record_model.set_defaults(handler=_command_record_model)
 
+    import_model = subparsers.add_parser("import-model")
+    import_model.add_argument("--root", type=Path, required=True)
+    import_model.add_argument("--cache", type=Path, required=True)
+    import_model.add_argument("--models-root", type=Path)
+    import_model.add_argument("--model-name", required=True)
+    import_model.add_argument("--authority", type=Path, required=True)
+    import_model.set_defaults(handler=_command_import_model)
+
+    model_path = subparsers.add_parser("model-path")
+    model_path.add_argument("--root", type=Path, required=True)
+    model_path.add_argument("--cache", type=Path, required=True)
+    model_path.add_argument("--model-name", required=True)
+    model_path.set_defaults(handler=_command_model_path)
+
+    for command_name, handler in (
+        ("install-source", _command_install_source),
+        ("validate-source", _command_validate_source),
+    ):
+        source_command = subparsers.add_parser(command_name)
+        source_command.add_argument("--root", type=Path, required=True)
+        source_command.add_argument("--manifest", type=Path, required=True)
+        source_command.add_argument("--cache", type=Path, required=True)
+        source_command.add_argument("--artifact-id", required=True)
+        source_command.add_argument("--destination", type=Path, required=True)
+        source_command.add_argument("--expected-version", required=True)
+        source_command.add_argument("--expected-requested-version", required=True)
+        source_command.set_defaults(handler=handler)
+
     state = subparsers.add_parser("state")
     state.add_argument(
         "state_action",
@@ -3664,6 +4533,7 @@ def build_parser() -> argparse.ArgumentParser:
             "own",
             "own-tree",
             "own-service",
+            "own-model",
         ),
     )
     state.add_argument("--root", type=Path, required=True)
@@ -3673,6 +4543,8 @@ def build_parser() -> argparse.ArgumentParser:
     state.add_argument("--path", type=Path)
     state.add_argument("--service-kind")
     state.add_argument("--identifier")
+    state.add_argument("--model-name")
+    state.add_argument("--cache", type=Path)
     state.set_defaults(handler=_command_state)
 
     remove = subparsers.add_parser("uninstall")

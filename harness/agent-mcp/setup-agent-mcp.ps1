@@ -14,6 +14,16 @@ $StateDir = Join-Path $Root "state"
 $LogDir = Join-Path $Root "logs"
 $SrvPid = Join-Path $StateDir "agent-mcp.pid"
 $DashPid = Join-Path $StateDir "agent-mcp-dash.pid"
+$DependencyCache = if ($env:ORACLE_DEPENDENCY_CACHE) {
+    $env:ORACLE_DEPENDENCY_CACHE
+} else {
+    Join-Path $Root "incoming\dependency-cache"
+}
+$ArtifactManifest = Join-Path $DependencyCache "manifest.json"
+$Python = Join-Path $Root "env\.venv\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $Python)) {
+    $Python = (Get-Command python -ErrorAction Stop).Source
+}
 $Port = 8100
 $DashPort = 3847
 
@@ -33,6 +43,8 @@ function Set-LocalEnv {
     $env:PYTHONUTF8 = "1"
     $env:PYTHONIOENCODING = "utf-8"
     $env:NEXT_TELEMETRY_DISABLED = "1"
+    $env:UV_OFFLINE = "1"
+    $env:UV_CACHE_DIR = Join-Path $DependencyCache "uv"
 }
 
 function Find-Uv {
@@ -48,42 +60,52 @@ function Find-Uv {
     return $null
 }
 
+function Assert-ValidatedVendor {
+    & $Python (Join-Path $Root "verification\lifecycle.py") validate-source `
+        --root $Root --manifest $ArtifactManifest --cache $DependencyCache `
+        --artifact-id "source-agent-mcp" --destination $Vendor `
+        --expected-version $pins['AGENT_MCP_COMMIT'] `
+        --expected-requested-version $pins['AGENT_MCP_PIN'] | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Agent-MCP source identity validation failed" }
+}
+
 switch ($Cmd) {
     "install" {
         $uv = Find-Uv
-        if (-not $uv) {
-            Write-Host "==> uv missing - installing (winget)"
-            winget install --id astral-sh.uv -e --silent --accept-package-agreements --accept-source-agreements | Out-Null
-            $uv = Find-Uv
-            if (-not $uv) { Write-Host "ERROR: uv installed but not found - open a fresh terminal and re-run"; exit 1 }
-        }
-        if (-not (Test-Path (Join-Path $Vendor ".git"))) {
-            Write-Host "==> cloning Agent-MCP $($pins['AGENT_MCP_PIN']) (shallow, pinned)"
-            git clone --depth 1 --branch $pins['AGENT_MCP_PIN'] $pins['AGENT_MCP_REPO'] $Vendor
-        } else {
-            Write-Host "==> Agent-MCP vendor checkout present"
-        }
+        if (-not $uv) { throw "uv is missing from the validated offline toolchain" }
+        & $Python (Join-Path $Root "verification\lifecycle.py") install-source `
+            --root $Root --manifest $ArtifactManifest --cache $DependencyCache `
+            --artifact-id "source-agent-mcp" --destination $Vendor `
+            --expected-version $pins['AGENT_MCP_COMMIT'] `
+            --expected-requested-version $pins['AGENT_MCP_PIN'] | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Agent-MCP policy-bound source install failed" }
+        Assert-ValidatedVendor
+        Set-LocalEnv
         Push-Location $Vendor
-        Write-Host "==> python env (uv sync via $uv)"
+        Write-Host "==> python env (offline frozen uv sync via $uv)"
         # uv logs to stderr; PS 5.1 + EAP Stop would turn that into a fake error
         $eap = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-        & $uv sync 2>&1 | Out-Host
-        if ($LASTEXITCODE -ne 0) { & $uv venv 2>&1 | Out-Host; & $uv pip install -e . 2>&1 | Out-Host }
-        # upstream uses Starlette's on_startup kwarg (removed in 0.47) but pins loosely
-        & $uv pip install "starlette<0.47" 2>&1 | Out-Host
+        & $uv sync --offline --frozen 2>&1 | Out-Host
+        $syncExit = $LASTEXITCODE
         $ErrorActionPreference = $eap
         Pop-Location
+        if ($syncExit -ne 0) { throw "Agent-MCP offline locked environment is incomplete" }
         $dash = Join-Path $Vendor "agent_mcp\dashboard"
         if (Test-Path (Join-Path $dash "package.json")) {
-            Write-Host "==> dashboard deps (npm install)"
+            if (-not (Test-Path (Join-Path $dash "package-lock.json"))) {
+                throw "validated Agent-MCP export has no dashboard lock"
+            }
+            Write-Host "==> dashboard deps (offline lock install)"
             Push-Location $dash
-            npm install --no-audit --no-fund | Out-Null
+            npm ci --offline --ignore-scripts --no-audit --no-fund | Out-Null
+            $npmExit = $LASTEXITCODE
             Pop-Location
+            if ($npmExit -ne 0) { throw "offline dashboard dependency install failed" }
         }
         Write-Host "==> Agent-MCP installed. Start the viewer with: bin\oracle.ps1 agents-ui"
     }
     "start" {
-        if (-not (Test-Path $Vendor)) { Write-Host "not installed - run: harness\agent-mcp\setup-agent-mcp.ps1 install"; exit 1 }
+        Assert-ValidatedVendor
         $condLock = Join-Path $StateDir "conductor.lock"
         if (Test-Path $condLock) {
             Write-Host "WARNING: a mission is running (state\conductor.lock). On shared-CPU"
@@ -105,10 +127,12 @@ switch ($Cmd) {
         Set-Content $SrvPid $p.Id
         $dash = Join-Path $Vendor "agent_mcp\dashboard"
         if (Test-Path (Join-Path $dash "package.json")) {
-            # bypass upstream's dev wrapper (spawns bare 'npx' = ENOENT on Windows,
-            # binds 0.0.0.0); run next directly, loopback only
-            $d = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", `
-                "npx next dev --port $DashPort --hostname 127.0.0.1" `
+            $next = Join-Path $dash "node_modules\.bin\next.cmd"
+            if (-not (Test-Path -LiteralPath $next)) {
+                throw "offline dashboard runtime is missing"
+            }
+            $d = Start-Process -FilePath $next -ArgumentList `
+                "dev", "--port", "$DashPort", "--hostname", "127.0.0.1" `
                 -WorkingDirectory $dash -WindowStyle Hidden -PassThru `
                 -RedirectStandardOutput (Join-Path $LogDir "agent-mcp-dash.out.log") `
                 -RedirectStandardError (Join-Path $LogDir "agent-mcp-dash.err.log")

@@ -107,7 +107,12 @@ archives. Exported online dependencies live separately under
 `incoming/dependency-cache/`; carry that cache with the source archive. Acquisition
 records are untrusted evidence until their source identity, resolved revision, and
 digest are independently verified and promoted into `VERSIONS.lock`; reproducible
-install/release reject anything less. A plain
+install/release reject anything less. Local archives (including optional OCI image
+archives) are imported with `bootstrap/import-dependency.sh` or
+`bootstrap/import-dependency.ps1`; the command verifies the tracked source identity
+and archive digest before granting policy-bound status. Optional, platform-scoped
+components are reported separately by the doctors and do not block unrelated release
+preflight. A plain
 `git clone` from the vault remains available for source-only transfer.
 
 ### Pre-downloading the models on Windows (optional, saves a night)
@@ -119,10 +124,12 @@ straight onto an exFAT external drive:
 powershell -ExecutionPolicy Bypass -File bootstrap\download-models.ps1 -Dest E:\oracle-models
 ```
 
-Same manifest/profile as the Mac scripts, resumable, auto-retries. Then on the
-Mac either copy the folder to `~/sentivue-oracle/models` or symlink it
-(`ln -s /Volumes/<drive>/oracle-models ~/sentivue-oracle/models`) and the
-installer's download phase will see everything already present and skip it.
+Same manifest/profile as the Mac scripts, resumable, auto-retries. A download records
+untrusted acquisition evidence only. Independently verify the upstream commit and
+every expected shard digest, promote those identities into the tracked
+`serving/model-authorities.json`, copy only the selected shards under `models/`, and
+run `bootstrap/import-model.ps1` (or `.sh`). Arbitrary local GGUFs and `dynamic`
+revisions are never admitted to generated configs or serving.
 
 ## Quickstart (on the Mac Studio)
 
@@ -131,12 +138,12 @@ tar -xzf sentivue-oracle-*.tar.gz && cd sentivue-oracle
 bash install
 ```
 
-The installer walks through: preflight (hardware/disk checks) → bootstrap (brew,
-pinned engines, python env, skills, ECC) → **model profile choice**
-(`full` ~700 GB · `coder` ~315 GB · `minimal` ~40 GB smoke test) → resumable
-downloads → serve → offline verification. Every phase is checkpointed; re-running
-`bash install` resumes after a failure or an interrupted download. Reduced
-profiles automatically remap the opus/sonnet tiers onto models that exist.
+The installer walks through: preflight (hardware/disk checks) → policy-bound offline
+bootstrap → **model profile choice** (`full` ~700 GB · `coder` ~315 GB · `minimal`
+~40 GB smoke test) → promoted model-snapshot validation → serve → offline
+verification. Every phase is checkpointed; re-running `bash install` resumes after a
+failure. Reduced profiles remap the opus/sonnet tiers only onto authority-validated
+models.
 
 Afterwards, everything is one command:
 
@@ -273,12 +280,13 @@ desktop-shortcut menu has it as option `0`.
   like the result. `Cmd+Alt+O` opens an OpenCode tab; the Agents sidebar also offers
   **Kilo Code** tabs (the Kilo CLI — same models and `kilo.jsonc` as the side panel).
   Also available from the terminal `+` dropdown ("Oracle Agent" profiles).
-- **Model auto-detection** — every IDE launch runs `sync-models`, which asks the
-  serving layer (or scans `models/`) for what's actually installed, then rewires
+- **Model authority detection** — every IDE launch runs `sync-models`, which validates
+  policy-bound model snapshots against tracked revisions, include patterns, and
+  independently supplied shard digests, then rewires
   Continue and Kilo Code through explicitly selected files under `state/generated/`,
   plus the engine tier maps
   (`serving/tiers.env`), and the opus/sonnet/haiku aliases to models that exist on
-  this machine. Download a new model and it shows up everywhere on the next launch.
+  this machine. Merely copying or downloading a GGUF never makes it loadable.
 - **`oracle agents-ui`** (optional) — the **orchestration viewer**: a vendored,
   pinned [Agent-MCP](https://github.com/rinadelph/Agent-MCP) deployment pointed
   entirely at llama-swap (its embeddings ride the local `text-embedding-3-large`
@@ -338,7 +346,8 @@ Full detail in [`docs/SECURITY.md`](docs/SECURITY.md). In brief:
   (fetch-only, allowlisted, quarantined, provenance-tracked) — and nothing else.
 - Network acquisition is an explicit export/model-download phase. Installers consume
   only a policy-bound `incoming/dependency-cache/`, exact package locks, and trusted
-  model revisions; `make verify` proves the resulting stack works offline.
+  model revisions plus independently promoted shard identities; `make verify` proves
+  the resulting stack works offline.
 
 ## Model ensemble (defaults, editable in `serving/models.manifest`)
 

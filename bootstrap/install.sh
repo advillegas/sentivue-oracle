@@ -35,21 +35,18 @@ artifact_path() {
 
 install_source_tree() {
   local artifact_id="$1" requested="$2" resolved="$3" destination="$4"
-  local archive stage source
-  archive="$(artifact_path "$artifact_id" "$requested" "$resolved")"
-  stage="$(mktemp -d "$ROOT/.source-stage.XXXXXX")"
-  if ! tar -xf "$archive" -C "$stage"; then
-    rm -rf "$stage"
-    return 1
-  fi
-  source="$stage"
-  if [[ "$(find "$stage" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 1 ]]; then
-    source="$(find "$stage" -mindepth 1 -maxdepth 1 | head -1)"
-  fi
-  rm -rf "$destination"
-  mkdir -p "$(dirname "$destination")"
-  cp -R "$source" "$destination"
-  rm -rf "$stage"
+  local python_bin
+  python_bin="$(find_python)" || return 1
+  "$python_bin" "$ROOT/verification/lifecycle.py" install-source \
+    --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+    --artifact-id "$artifact_id" --destination "$destination" \
+    --expected-version "$resolved" --expected-requested-version "$requested" \
+    >/dev/null
+  "$python_bin" "$ROOT/verification/lifecycle.py" validate-source \
+    --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+    --artifact-id "$artifact_id" --destination "$destination" \
+    --expected-version "$resolved" --expected-requested-version "$requested" \
+    >/dev/null
 }
 
 install_cached_binary() {

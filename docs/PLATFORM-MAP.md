@@ -36,10 +36,12 @@ commits + ledgers in one step (with a 50 MB blob guard). `envoy-fetch` /
 
 ## bootstrap/
 
-Install and lifecycle. `install.sh` is the Mac one-time bootstrap;
-`ensure-tools.ps1|.sh` self-provisions the toolbelt (a missing tool is a task,
-not a blocker); `doctor.sh` / `doctor.ps1` are the read-only diagnostics;
-`download-models.ps1|.sh` fetch pinned GGUFs; `render-config.sh` +
+Install and lifecycle. `install.sh` is the offline Mac bootstrap;
+`doctor.sh` / `doctor.ps1` are the read-only diagnostics;
+`download-models.ps1|.sh` are explicit online acquisition commands whose local
+hash scans remain untrusted; `import-dependency.ps1|.sh` and
+`import-model.ps1|.sh` admit independently policy-bound offline inputs;
+`render-config.sh` +
 `serving/serve-windows.ps1` render llama-swap configs; `sync-skills.ps1|.sh`
 link `skills/` into both engines; `vault.sh|.ps1` manage the offline git vault;
 `build-installers.ps1` produces the double-clickable installers; `envoy.sh`
@@ -70,8 +72,8 @@ Everything the engines plug into. `mcp.claude.json` (DuckDB + Postgres MCP),
 `mcp.agent-mcp.json` (optional orchestration server), `net-allowlist.txt` +
 `discovery-blocklist.txt` (envoy policy), `supabase/` (self-hosted compose),
 `gitea/` (vault web UI), and `ide/` — the Cursor-parity IDE: `setup-ide.ps1|.sh`
-(VSCodium + Continue + Kilo), `sync-models.ps1|.sh` (machine-wide model
-auto-detection: rewires Continue, Kilo, engine tiers, and OpenCode's model map
+(VSCodium + Continue + Kilo), `sync-models.ps1|.sh` (validates promoted model
+authorities, then rewires Continue, Kilo, engine tiers, and OpenCode's model map
 on every launch), `agent-tab.ps1|.sh` (terminal agents, optional worktrees),
 `oracle-agents/` (the Agents sidebar extension: conversations with live
 thinking, mission status, session journals), `pack-extension.ps1` (VSIX build).
@@ -95,11 +97,15 @@ Vendored, pinned third-party layers (all in `VERSIONS.lock`): `ecc/` (curated
 skill subset), `skill-packs/` (superpowers `sp-*` + gstack `gs-*`, 67 skills),
 `agent-mcp/` (optional orchestration viewer, loopback-only),
 `loop-engineering/` (patterns + the loop-audit/init/cost/sync CLIs). Vendor
-checkouts are gitignored; installers re-materialize them from pins.
+checkouts are gitignored; installers re-materialize them only from validated
+source archives whose commit, upstream identity, archive digest, and extracted
+tree digest all match policy.
 
 ## serving/
 
-Local inference. `models.manifest` (pinned ensemble + slots + sampling),
+Local inference. `models.manifest` (ensemble + slots + sampling + immutable
+upstream revision), `model-authorities.json` (independently promoted include
+patterns and expected shard digests),
 `profiles.conf` (hardware-adaptive profiles), `serve-windows.ps1` and
 `service.sh` + `render-config.sh` (llama-swap on 127.0.0.1:9099 with KV
 prefix-cache reuse, OpenAI-compat aliases, hardware-adaptive placement),

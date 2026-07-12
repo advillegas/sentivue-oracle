@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -692,6 +693,11 @@ def test_model_snapshot_records_resolved_revision_and_file_hashes(
     root = tmp_path / "root"
     cache = tmp_path / "dependency cache"
     root.mkdir()
+    put(
+        root,
+        "serving/models.manifest",
+        "chat | example/chat | *.gguf | fast | 32768 | | dynamic\n",
+    )
     shard = put(root, "models/chat/model-00001-of-00002.gguf", b"first")
     put(root, "models/chat/model-00002-of-00002.gguf", b"second")
 
@@ -746,13 +752,19 @@ def test_reproducible_inputs_accept_resolved_hashed_artifacts(
         encoding="utf-8",
     )
     put(tmp_path, "models/chat/model.gguf", b"GGUF model")
-    record_model_snapshot(
+    promote_fixture_models(
         tmp_path,
         cache,
-        model_name="chat",
-        repository="example/chat",
-        requested_revision="f" * 40,
-        resolved_revision="f" * 40,
+        [
+            (
+                "chat",
+                "example/chat",
+                "model.gguf",
+                "f" * 40,
+                "model.gguf",
+                b"GGUF model",
+            )
+        ],
     )
 
     assert validate_dependency_inputs(
@@ -1057,7 +1069,7 @@ def test_generated_model_configs_are_atomic_owned_and_preserve_user_files(
     home = tmp_path / "home with spaces"
     root.mkdir()
     home.mkdir()
-    put(root, "VERSIONS.lock", "TOOL_VERSION=1.0.0\n")
+    put(root, "VERSIONS.lock", "# fixture\n")
     put(
         root,
         "serving/models.manifest",
@@ -1071,6 +1083,28 @@ def test_generated_model_configs_are_atomic_owned_and_preserve_user_files(
     )
     put(root, "models/chat-model/model.gguf", b"GGUF chat")
     put(root, "models/embed-model/embed.gguf", b"GGUF embed")
+    promote_fixture_models(
+        root,
+        root / "incoming/dependency-cache",
+        [
+            (
+                "chat-model",
+                "example/chat",
+                "model.gguf",
+                "a" * 40,
+                "model.gguf",
+                b"GGUF chat",
+            ),
+            (
+                "embed-model",
+                "example/embed",
+                "embed.gguf",
+                "b" * 40,
+                "embed.gguf",
+                b"GGUF embed",
+            ),
+        ],
+    )
     claude_template = put(
         root,
         "engines/claude-code/home/settings.json",
@@ -1127,13 +1161,27 @@ def test_generated_configs_refuse_symbolic_link_parent(
     home = tmp_path / "home"
     root.mkdir()
     home.mkdir()
-    put(root, "VERSIONS.lock", "TOOL_VERSION=1.0.0\n")
+    put(root, "VERSIONS.lock", "# fixture\n")
     put(
         root,
         "serving/models.manifest",
         "chat | example/chat | model.gguf | fast | 32768 | | " + "a" * 40 + "\n",
     )
     put(root, "models/chat/model.gguf", b"GGUF")
+    promote_fixture_models(
+        root,
+        root / "incoming/dependency-cache",
+        [
+            (
+                "chat",
+                "example/chat",
+                "model.gguf",
+                "a" * 40,
+                "model.gguf",
+                b"GGUF",
+            )
+        ],
+    )
     original_is_reparse = lifecycle._is_reparse_point
     linked_parent = root / "state"
 
@@ -1846,6 +1894,675 @@ def test_review_renderers_use_platform_argument_quoting() -> None:
     assert "$server $common -m $mp" not in windows
 
 
+def model_authority_fixture(
+    root: Path,
+    *,
+    content: bytes = b"authoritative model",
+    revision: str = "a" * 40,
+) -> Path:
+    put(root, "VERSIONS.lock", "# fixture\n")
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps({"dependency_inputs": []}) + "\n",
+    )
+    put(
+        root,
+        "serving/models.manifest",
+        "# name | repo | include | slot | ctx | flags | revision\n"
+        f"chat | example/chat | approved/*.gguf | fast | 32768 | | {revision}\n",
+    )
+    authority = {
+        "schema_version": 1,
+        "models": {
+            "chat": {
+                "repository": "example/chat",
+                "revision": revision,
+                "include": "approved/*.gguf",
+                "files": [
+                    {
+                        "path": "approved/model.gguf",
+                        "size": len(content),
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                    }
+                ],
+            }
+        },
+    }
+    serialized = json.dumps(authority, sort_keys=True) + "\n"
+    put(
+        root,
+        "serving/model-authorities.json",
+        serialized,
+    )
+    return put(root, "authority-input.json", serialized)
+
+
+def promote_fixture_models(
+    root: Path,
+    cache: Path,
+    specs: list[tuple[str, str, str, str, str, bytes]],
+) -> None:
+    authorities: dict[str, object] = {}
+    for name, repository, include, revision, relative, content in specs:
+        authorities[name] = {
+            "repository": repository,
+            "revision": revision,
+            "include": include,
+            "files": [
+                {
+                    "path": relative,
+                    "size": len(content),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            ],
+        }
+    serialized = (
+        json.dumps(
+            {"schema_version": 1, "models": authorities}, sort_keys=True
+        )
+        + "\n"
+    )
+    put(
+        root,
+        "serving/model-authorities.json",
+        serialized,
+    )
+    authority_file = put(root, "authority-input.json", serialized)
+    policy = root / "verification/policy.json"
+    if not policy.is_file():
+        put(root, "verification/policy.json", '{"dependency_inputs": []}\n')
+    for name, _repository, _include, _revision, _relative, _content in specs:
+        lifecycle.import_model_snapshot(
+            root,
+            cache,
+            model_name=name,
+            authority_file=authority_file,
+        )
+
+
+def test_second_review_local_model_scan_cannot_establish_trust(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    cache = tmp_path / "cache"
+    authority = model_authority_fixture(root)
+    put(root, "models/chat/arbitrary.gguf", b"arbitrary")
+
+    with pytest.raises(LifecycleError, match="include pattern"):
+        record_model_snapshot(
+            root,
+            cache,
+            model_name="chat",
+            repository="example/chat",
+            requested_revision="a" * 40,
+            resolved_revision="a" * 40,
+        )
+
+    (root / "models/chat/arbitrary.gguf").unlink()
+    put(
+        root,
+        "models/chat/approved/model.gguf",
+        b"X" * len(b"authoritative model"),
+    )
+    evidence = record_model_snapshot(
+        root,
+        cache,
+        model_name="chat",
+        repository="example/chat",
+        requested_revision="a" * 40,
+        resolved_revision="a" * 40,
+    )
+    assert evidence.trust == "untrusted"
+    assert any(
+        "untrusted acquisition evidence" in error
+        for error in validate_dependency_inputs(
+            root,
+            artifact_manifest=cache / "manifest.json",
+            cache_root=cache,
+            reproducible=True,
+            artifact_ids={"model:chat"},
+        )
+    )
+
+    with pytest.raises(LifecycleError, match="separate independently supplied"):
+        lifecycle.import_model_snapshot(
+            root,
+            cache,
+            model_name="chat",
+            authority_file=root / "serving/model-authorities.json",
+        )
+    with pytest.raises(LifecycleError, match="checksum mismatch"):
+        lifecycle.import_model_snapshot(
+            root,
+            cache,
+            model_name="chat",
+            authority_file=authority,
+        )
+
+
+def test_second_review_only_policy_bound_model_files_can_be_loaded(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    home = tmp_path / "home"
+    cache = root / "incoming/dependency-cache"
+    authority = model_authority_fixture(root)
+    put(root, "models/chat/approved/model.gguf", b"authoritative model")
+    put(
+        root,
+        "engines/claude-code/home/settings.json",
+        '{"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:9099"}}\n',
+    )
+    put(
+        root,
+        "engines/opencode/xdg/opencode/opencode.json",
+        '{"provider": {"oracle": {"models": {}}}}\n',
+    )
+    initialize_install_state(root, home, source_revision="c" * 40)
+
+    with pytest.raises(LifecycleError, match="policy-bound model snapshot"):
+        sync_model_configs(root, home)
+
+    promoted = lifecycle.import_model_snapshot(
+        root,
+        cache,
+        model_name="chat",
+        authority_file=authority,
+    )
+    assert promoted.trust == "policy-bound"
+    assert validate_model_snapshot(root, cache, promoted) == []
+    assert sync_model_configs(root, home)
+    assert lifecycle.validated_model_paths(root, cache, "chat") == [
+        root / "models/chat/approved/model.gguf"
+    ]
+
+    put(root, "models/chat/approved/extra.gguf", b"not authorized")
+    assert any(
+        "unexpected model file" in error
+        for error in validate_model_snapshot(root, cache, promoted)
+    )
+    with pytest.raises(LifecycleError, match="policy-bound model snapshot"):
+        lifecycle.validated_model_paths(root, cache, "chat")
+
+
+def test_second_review_renderers_resolve_only_validated_model_paths() -> None:
+    posix = (REPO_ROOT / "bootstrap/render-config.sh").read_text(encoding="utf-8")
+    windows = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
+
+    assert "model-path --model-name" in posix
+    assert "find \"models/$1\"" not in posix
+    assert "model-path --model-name" in windows
+    assert "Get-ChildItem $modelDir -Filter \"*.gguf\"" not in windows
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "harness/skill-packs/install-skill-packs.sh",
+        "harness/skill-packs/install-skill-packs.ps1",
+        "harness/agent-mcp/setup-agent-mcp.sh",
+        "harness/agent-mcp/setup-agent-mcp.ps1",
+        "harness/loop-engineering/install-loop-eng.sh",
+        "harness/loop-engineering/install-loop-eng.ps1",
+    ],
+)
+def test_second_review_optional_source_setups_use_validated_cache(
+    relative: str,
+) -> None:
+    source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+
+    assert "git clone" not in source
+    assert "winget install" not in source
+    assert "install-source" in source
+    assert "validate-source" in source
+    if "loop-eng" in relative:
+        assert "--offline" in source
+        assert "@cobusgreyling/" not in source
+
+
+def test_second_review_source_install_rejects_modified_existing_checkout(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    cache = tmp_path / "cache"
+    destination = root / "harness/vendor/source"
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("source-commit/tool.txt", "authoritative\n")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    revision = "b" * 40
+    put(
+        root,
+        "VERSIONS.lock",
+        f"SOURCE_PIN={revision}\n"
+        f"SOURCE_COMMIT={revision}\n"
+        f"SOURCE_SHA256={digest}\n"
+        "SOURCE_REPO=https://example.invalid/source\n",
+    )
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "dependency_inputs": [
+                    {
+                        "id": "source-test",
+                        "kind": "git",
+                        "version_key": "SOURCE_PIN",
+                        "allow_dynamic": False,
+                        "source": {
+                            "identity_key": "SOURCE_REPO",
+                            "url": "{identity}/archive/{resolved}.zip",
+                            "revision_key": "SOURCE_COMMIT",
+                            "digest_key": "SOURCE_SHA256",
+                        },
+                    }
+                ]
+            }
+        )
+        + "\n",
+    )
+    put(root, "serving/models.manifest", "# no models\n")
+    lifecycle.import_artifact(
+        root,
+        cache,
+        artifact_id="source-test",
+        source_file=archive,
+        source_url=f"https://example.invalid/source/archive/{revision}.zip",
+        requested_version=revision,
+        resolved_version=revision,
+    )
+    lifecycle.install_source_archive(
+        root,
+        cache / "manifest.json",
+        cache,
+        "source-test",
+        destination,
+        expected_version=revision,
+        expected_requested_version=revision,
+    )
+    assert lifecycle.validate_source_install(
+        root,
+        cache / "manifest.json",
+        cache,
+        "source-test",
+        destination,
+        expected_version=revision,
+        expected_requested_version=revision,
+    ) == []
+
+    (destination / "tool.txt").write_text("locally changed\n", encoding="utf-8")
+    assert any(
+        "installed source tree digest mismatch" in error
+        for error in lifecycle.validate_source_install(
+            root,
+            cache / "manifest.json",
+            cache,
+            "source-test",
+            destination,
+            expected_version=revision,
+            expected_requested_version=revision,
+        )
+    )
+
+
+def test_second_review_optional_oci_archives_have_an_import_authority_path(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    cache = tmp_path / "cache"
+    archive = put(tmp_path, "image.tar", b"offline OCI archive")
+    archive_digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    image_digest = "sha256:" + ("d" * 64)
+    put(
+        root,
+        "VERSIONS.lock",
+        "IMAGE=registry.example.invalid/db:1.0\n"
+        f"IMAGE_DIGEST={image_digest}\n"
+        f"IMAGE_ARCHIVE_SHA256={archive_digest}\n",
+    )
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "dependency_inputs": [
+                    {
+                        "id": "container-db",
+                        "kind": "container",
+                        "version_key": "IMAGE",
+                        "allow_dynamic": False,
+                        "optional": True,
+                        "platforms": ["docker"],
+                        "source": {
+                            "identity": "oci://{version}@{identity_digest}",
+                            "identity_digest_key": "IMAGE_DIGEST",
+                            "artifact_digest_key": "IMAGE_ARCHIVE_SHA256",
+                        },
+                    }
+                ]
+            }
+        )
+        + "\n",
+    )
+    put(root, "serving/models.manifest", "# no models\n")
+
+    assert validate_dependency_inputs(root, reproducible=True) == []
+    optional_errors = validate_dependency_inputs(
+        root, reproducible=True, include_optional=True
+    )
+    assert any("resolved artifact" in error for error in optional_errors)
+
+    record = lifecycle.import_artifact(
+        root,
+        cache,
+        artifact_id="container-db",
+        source_file=archive,
+        source_url=f"oci://registry.example.invalid/db:1.0@{image_digest}",
+        requested_version="registry.example.invalid/db:1.0",
+        resolved_version="registry.example.invalid/db:1.0",
+    )
+    assert record.trust == "policy-bound"
+    assert (
+        validate_dependency_inputs(
+            root,
+            artifact_manifest=cache / "manifest.json",
+            cache_root=cache,
+            reproducible=True,
+            include_optional=True,
+        )
+        == []
+    )
+
+
+def test_second_review_install_resumes_after_completed_profile_under_set_u(
+    tmp_path: Path,
+) -> None:
+    bash = (
+        Path("C:/Program Files/Git/bin/bash.exe")
+        if os.name == "nt"
+        else Path(shutil.which("bash") or "")
+    )
+    if not bash.is_file():
+        pytest.skip("Bash is unavailable")
+    root = tmp_path / "resume root"
+    home = tmp_path / "home"
+    fake_bin = root / "fake-bin"
+    root.mkdir()
+    home.mkdir()
+    fake_bin.mkdir()
+    shutil.copy2(REPO_ROOT / "install", root / "install")
+    put(root, "serving/models.profile", "chat\n")
+    put(
+        root,
+        "serving/models.manifest",
+        "chat | example/chat | model.gguf | fast | 8192 | | " + ("e" * 40) + "\n",
+    )
+    put(
+        root,
+        "serving/tiers.env",
+        "OPUS_MODEL=chat\nSONNET_MODEL=chat\nHAIKU_MODEL=chat\n",
+    )
+    put(root, "models/chat/model.gguf", b"model")
+    fake_python = put(
+        fake_bin,
+        "python3",
+        """#!/usr/bin/env bash
+if [[ "${1:-}" == "-c" ]]; then exit 0; fi
+case " $* " in
+  *" state phase-current "*" --phase models "*) exit 1 ;;
+  *) exit 0 ;;
+esac
+""",
+    )
+    fake_curl = put(fake_bin, "curl", "#!/usr/bin/env bash\nexit 0\n")
+    fake_df = put(
+        fake_bin,
+        "df",
+        "#!/usr/bin/env bash\n"
+        "printf 'Filesystem Blocks Used Available Capacity Mounted\\n"
+        "fixture 1000 1 999 1%% /\\n'\n",
+    )
+    for path in (fake_python, fake_curl, fake_df):
+        path.chmod(0o755)
+    put(
+        root,
+        "connectors/ide/sync-models.sh",
+        '#!/usr/bin/env bash\nmkdir -p "$PWD/state/generated"\n',
+    ).chmod(0o755)
+    put(
+        root,
+        "bootstrap/render-config.sh",
+        '#!/usr/bin/env bash\nmkdir -p "$PWD/serving"; : > "$PWD/serving/llama-swap.rendered.yaml"\n',
+    ).chmod(0o755)
+    put(
+        root,
+        "serving/service.sh",
+        '#!/usr/bin/env bash\nmkdir -p "$PWD/logs" "$HOME/Library/LaunchAgents"; '
+        ': > "$HOME/Library/LaunchAgents/com.sentivue.llamaswap.plist"\n',
+    ).chmod(0o755)
+    put(root, "bootstrap/verify-offline.sh", "#!/usr/bin/env bash\nexit 0\n").chmod(
+        0o755
+    )
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+
+    completed = subprocess.run(
+        [str(bash), str(root / "install"), "--yes"],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_second_review_model_ownership_excludes_unselected_files(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    home = tmp_path / "home"
+    cache = tmp_path / "cache"
+    authority = model_authority_fixture(root)
+    selected = put(root, "models/chat/approved/model.gguf", b"authoritative model")
+    initialize_install_state(root, home, source_revision="f" * 40)
+    lifecycle.import_model_snapshot(
+        root,
+        cache,
+        model_name="chat",
+        authority_file=authority,
+    )
+    begin_install_phase(root, "models")
+    lifecycle.register_model_ownership(root, home, cache, "chat")
+    mark_install_phase(root, "models")
+    user_file = put(root, "models/user-copy.gguf", b"user")
+
+    uninstall(root, home, apply=True)
+
+    assert not selected.exists()
+    assert user_file.read_bytes() == b"user"
+
+
+def test_second_review_install_state_rejects_reparse_directory_and_final_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    home = tmp_path / "home"
+    state_directory = root / ".install-state"
+    original = lifecycle._is_reparse_point
+    monkeypatch.setattr(
+        lifecycle,
+        "_is_reparse_point",
+        lambda path: Path(path) == state_directory or original(Path(path)),
+    )
+    with pytest.raises(LifecycleError, match="reparse"):
+        initialize_install_state(root, home, source_revision="1" * 40)
+    assert not (state_directory / "state.json").exists()
+
+    monkeypatch.setattr(lifecycle, "_is_reparse_point", original)
+    initialize_install_state(root, home, source_revision="1" * 40)
+    state_file = state_directory / "state.json"
+    monkeypatch.setattr(
+        lifecycle,
+        "_is_reparse_point",
+        lambda path: Path(path) == state_file or original(Path(path)),
+    )
+    with pytest.raises(LifecycleError, match="reparse"):
+        begin_install_phase(root, "bootstrap")
+
+
+def test_second_review_state_mutations_check_lexical_root_before_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "real-root"
+    home = tmp_path / "home"
+    unsafe_alias = tmp_path / "junction-root"
+    initialize_install_state(root, home, source_revision="3" * 40)
+    original_resolve = Path.resolve
+    original_is_reparse = lifecycle._is_reparse_point
+
+    def fake_resolve(self: Path, *args: object, **kwargs: object) -> Path:
+        if self == unsafe_alias:
+            return root
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", fake_resolve)
+    monkeypatch.setattr(
+        lifecycle,
+        "_is_reparse_point",
+        lambda path: Path(path) == unsafe_alias or original_is_reparse(Path(path)),
+    )
+
+    with pytest.raises(LifecycleError, match="reparse"):
+        begin_install_phase(unsafe_alias, "bootstrap")
+
+
+def test_second_review_transformed_installer_writer_checks_reparse_paths(
+    tmp_path: Path,
+) -> None:
+    windows = put(
+        tmp_path,
+        "installer.cmd",
+        b"""@echo off
+#==PSPAYLOAD==#
+$ErrorActionPreference = "Stop"
+if ($sel.Name -eq "full") { Remove-Item (Join-Path $dest "serving\\models.profile") -ErrorAction SilentlyContinue }
+else { Set-Content -Path (Join-Path $dest "serving\\models.profile") -Value (($sel.Models -split ",") -join "`n") }
+Set-Content -Path (Join-Path $dest "serving\\tiers.env") -Value @("OPUS_MODEL=$($sel.Opus)", "SONNET_MODEL=$($sel.Sonnet)", "HAIKU_MODEL=$($sel.Haiku)")
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "connectors\\ide\\setup-ide.ps1") install
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\\download-models.ps1")
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bin\\oracle.ps1") setup
+#==B64PAYLOAD==#
+UEFZTE9BRA==
+""",
+    )
+    lifecycle._harden_built_installer(windows)
+    hardened = windows.read_text(encoding="ascii")
+    helper = lifecycle._installer_atomic_helper()
+
+    assert "FileAttributes]::ReparsePoint" in hardened
+    assert hardened.count("Assert-SafeAtomicPath") >= 4
+    assert "Assert-SafeAtomicPath -Path $Path" in helper
+
+    if os.name != "nt":
+        return
+    outside = tmp_path / "outside"
+    junction = tmp_path / "junction"
+    outside.mkdir()
+    linked = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(outside)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if linked.returncode != 0:
+        pytest.skip(f"junctions unavailable: {linked.stderr}")
+    probe = put(
+        tmp_path,
+        "probe.ps1",
+        helper
+        + "\nWrite-Utf8NoBomAtomic -Path "
+        + repr(str(junction / "victim.txt"))
+        + " -Value 'unsafe'\n",
+    )
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(probe)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "reparse" in (completed.stdout + completed.stderr).lower()
+    assert not (outside / "victim.txt").exists()
+
+
+def test_second_review_preflight_rebuilds_before_reusing_local_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "root"
+    output = tmp_path / "out"
+    root.mkdir()
+    output.mkdir()
+    revision = "2" * 40
+    existing_paths = [
+        put(output, "source.zip", b"tampered"),
+        put(output, "installer.command", b"mac"),
+        put(output, "installer.cmd", b"windows"),
+    ]
+    existing = lifecycle.ReleaseBundle(
+        version="v1.2.3",
+        revision=revision,
+        output_dir=output,
+        archives=existing_paths,
+        checksums=put(output, "SHA256SUMS", b"self-authored"),
+        provenance=put(output, "PROVENANCE.json", b"{}"),
+    )
+    monkeypatch.setattr(lifecycle, "_resolve_revision", lambda *_args: revision)
+    monkeypatch.setattr(lifecycle, "_current_revision", lambda *_args: revision)
+    monkeypatch.setattr(
+        lifecycle, "_require_release_inputs_match_revision", lambda *_args: None
+    )
+    monkeypatch.setattr(lifecycle, "validate_dependency_inputs", lambda *_a, **_k: [])
+    monkeypatch.setattr(lifecycle, "verify_release_bundle", lambda *_args: existing)
+    builds: list[Path] = []
+
+    def build_expected(
+        _root: Path,
+        _version: str,
+        destination: Path,
+        _revision: str,
+    ) -> lifecycle.ReleaseBundle:
+        builds.append(destination)
+        archives = [
+            put(destination, "source.zip", b"authoritative"),
+            put(destination, "installer.command", b"mac"),
+            put(destination, "installer.cmd", b"windows"),
+        ]
+        return lifecycle.ReleaseBundle(
+            version="v1.2.3",
+            revision=revision,
+            output_dir=destination,
+            archives=archives,
+            checksums=put(destination, "SHA256SUMS", b"expected"),
+            provenance=put(destination, "PROVENANCE.json", b"expected provenance"),
+        )
+
+    monkeypatch.setattr(
+        lifecycle, "_build_release_bundle", build_expected, raising=False
+    )
+    with pytest.raises(LifecycleError, match="immutable rebuild"):
+        lifecycle.preflight_release(root, "v1.2.3", output, revision)
+    assert len(builds) == 1
+    assert builds[0] != output
+
+
 @pytest.mark.parametrize("remote_tag_exists", [False, True])
 def test_review_publication_resumes_tag_only_and_pushed_tag_states(
     tmp_path: Path,
@@ -1931,15 +2648,35 @@ def test_review_release_preflight_reuses_complete_verified_bundle(
     )
     monkeypatch.setattr(lifecycle, "validate_dependency_inputs", lambda *_a, **_k: [])
     monkeypatch.setattr(lifecycle, "verify_release_bundle", lambda *_a: bundle)
-    monkeypatch.setattr(
-        lifecycle,
-        "build_source_archives",
-        lambda *_a, **_k: pytest.fail("verified bundle should be reused"),
-    )
+    rebuilt: list[Path] = []
+
+    def rebuild(
+        _root: Path, _version: str, destination: Path, _revision: str
+    ) -> lifecycle.ReleaseBundle:
+        rebuilt.append(destination)
+        expected_archives = [
+            put(destination, path.name, path.read_bytes()) for path in artifacts
+        ]
+        return lifecycle.ReleaseBundle(
+            version="v1.2.3",
+            revision=revision,
+            output_dir=destination,
+            archives=expected_archives,
+            checksums=put(
+                destination, "SHA256SUMS", bundle.checksums.read_bytes()
+            ),
+            provenance=put(
+                destination, "PROVENANCE.json", bundle.provenance.read_bytes()
+            ),
+        )
+
+    monkeypatch.setattr(lifecycle, "_build_release_bundle", rebuild)
 
     resumed = lifecycle.preflight_release(root, "v1.2.3", output, revision)
 
     assert resumed == bundle
+    assert len(rebuilt) == 1
+    assert rebuilt[0] != output
 
 
 def test_review_release_rejects_dirty_dependency_authority(

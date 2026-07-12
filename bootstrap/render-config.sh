@@ -7,6 +7,7 @@ cd "$ROOT"
 MANIFEST="serving/models.manifest"
 PROFILE="serving/models.profile"
 OUT="serving/llama-swap.rendered.yaml"
+DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
 PYTHON_BIN="${ORACLE_PYTHON:-python3}"
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python
 command -v "$PYTHON_BIN" >/dev/null 2>&1 || {
@@ -24,17 +25,14 @@ quote_argument() {
 }
 SERVER_ARG="$(quote_argument "$SERVER")"
 
-is_active() {  # active if profiled OR already downloaded (no profile file => all)
+is_active() {  # no profile means all declared models are selected
   [[ ! -f "$PROFILE" ]] && return 0
-  grep -qx "$1" "$PROFILE" && return 0
-  [[ -n "$(find "models/$1" -name '*.gguf' -type f 2>/dev/null | head -1)" ]]
+  grep -qx "$1" "$PROFILE"
 }
 
-first_gguf() {  # first shard of a multi-part GGUF, or the single .gguf
-  local f
-  f=$(find "models/$1" -name "*-00001-of-*.gguf" -type f 2>/dev/null | head -1)
-  [[ -z "$f" ]] && f=$(find "models/$1" -name "*.gguf" -type f 2>/dev/null | sort | head -1)
-  echo "$f"
+validated_model_path() {
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" model-path --model-name "$1" \
+    --root "$ROOT" --cache "$DEPENDENCY_CACHE"
 }
 
 TMP="$(mktemp "${OUT}.tmp.XXXXXX")"
@@ -70,11 +68,12 @@ while IFS='|' read -r name repo include slot ctx flags revision; do
   ctx="$(echo "$ctx" | xargs)";   flags="$(echo "${flags:-}" | xargs)"
   [[ -z "$name" ]] && continue
   is_active "$name" || { echo "  (profile) skipping $name"; continue; }
-  path="$(first_gguf "$name")"
-  if [[ -z "$path" ]]; then
-    echo "MISSING: models/$name — run 'make models' (or ./install)"; missing=1; continue
+  if ! path="$(validated_model_path "$name")"; then
+    echo "UNTRUSTED OR MISSING: models/$name — import a promoted model authority"
+    missing=1
+    continue
   fi
-  MODEL_ARG="$(quote_argument "$ROOT/$path")"
+  MODEL_ARG="$(quote_argument "$path")"
   echo "  $name -> $path"
   case "$slot" in
     big)

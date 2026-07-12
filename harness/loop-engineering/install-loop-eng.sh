@@ -5,22 +5,41 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VENDOR="$ROOT/harness/loop-engineering/vendor"
 source "$ROOT/VERSIONS.lock"
+DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
+ARTIFACT_MANIFEST="$DEPENDENCY_CACHE/manifest.json"
+PYTHON_BIN="${ORACLE_PYTHON:-$ROOT/env/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python || true)"
+[[ -n "$PYTHON_BIN" ]] || { echo "ERROR: Python is required." >&2; exit 1; }
 
-if [[ ! -d "$VENDOR/.git" ]]; then
-  echo "==> cloning loop-engineering ${LOOP_ENG_PIN} (shallow, pinned)"
-  git clone --depth 1 --branch "$LOOP_ENG_PIN" "$LOOP_ENG_REPO" "$VENDOR"
-else
-  echo "==> loop-engineering vendor checkout present"
-fi
+"$PYTHON_BIN" "$ROOT/verification/lifecycle.py" install-source \
+  --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+  --artifact-id source-loop-engineering --destination "$VENDOR" \
+  --expected-version "$LOOP_ENG_COMMIT" \
+  --expected-requested-version "$LOOP_ENG_PIN" >/dev/null
+"$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-source \
+  --root "$ROOT" --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+  --artifact-id source-loop-engineering --destination "$VENDOR" \
+  --expected-version "$LOOP_ENG_COMMIT" \
+  --expected-requested-version "$LOOP_ENG_PIN" >/dev/null
 
 echo "==> loop CLIs (pinned, repo-local npm prefix)"
 export npm_config_prefix="$ROOT/.tools/npm"
+export npm_config_cache="$DEPENDENCY_CACHE/npm"
+export npm_config_offline=true
 mkdir -p "$npm_config_prefix"
-npm install -g --no-audit --no-fund \
-  "@cobusgreyling/loop-audit@${LOOP_AUDIT_NPM}" \
-  "@cobusgreyling/loop-init@${LOOP_INIT_NPM}" \
-  "@cobusgreyling/loop-cost@${LOOP_COST_NPM}" \
-  "@cobusgreyling/loop-sync@${LOOP_SYNC_NPM}" >/dev/null
+artifact_path() {
+  "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" artifact-path \
+    --manifest "$ARTIFACT_MANIFEST" --cache "$DEPENDENCY_CACHE" \
+    --artifact-id "$1" --expected-version "$2" \
+    --expected-requested-version "$2" --root "$ROOT" --reproducible
+}
+LOOP_AUDIT_ARCHIVE="$(artifact_path npm-loop-audit "$LOOP_AUDIT_NPM")"
+LOOP_INIT_ARCHIVE="$(artifact_path npm-loop-init "$LOOP_INIT_NPM")"
+LOOP_COST_ARCHIVE="$(artifact_path npm-loop-cost "$LOOP_COST_NPM")"
+LOOP_SYNC_ARCHIVE="$(artifact_path npm-loop-sync "$LOOP_SYNC_NPM")"
+npm install -g --offline --no-audit --no-fund \
+  "$LOOP_AUDIT_ARCHIVE" "$LOOP_INIT_ARCHIVE" \
+  "$LOOP_COST_ARCHIVE" "$LOOP_SYNC_ARCHIVE" >/dev/null
 
 bash "$ROOT/bootstrap/sync-skills.sh"
 echo "==> loop-engineering installed: patterns in harness/loop-engineering/vendor, CLIs in .tools/npm"

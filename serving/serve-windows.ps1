@@ -68,15 +68,25 @@ function Quote-CommandArgument([string]$Value) {
     return $quoted.Trim()
 }
 
+function Get-ValidatedModelPath([string]$ModelName) {
+    $python = Join-Path $Root "env\.venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $python)) {
+        $python = (Get-Command python -ErrorAction Stop).Source
+    }
+    $modelPath = & $python (Join-Path $Root "verification\lifecycle.py") `
+        model-path --model-name $ModelName --root $Root --cache $DependencyCache
+    if ($LASTEXITCODE -ne 0) {
+        throw "policy-bound model snapshot is unavailable: $ModelName"
+    }
+    return $modelPath.Trim()
+}
+
 $LlamaTag = Get-LockedVersion "LLAMA_CPP_WIN_TAG"
 $SwapVer = Get-LockedVersion "LLAMA_SWAP_VERSION"
 
 function Get-ActiveModels {
-    # A model is active if the profile selects it OR it is already downloaded -
-    # anything sitting in models\ was put there on purpose and should be served.
-    # InProfile drives placement: profile models keep their slot (resident for
-    # fast/embed); downloaded extras become on-demand swap models so they never
-    # bloat resident memory.
+    # No profile means all declared models are selected. Local files never add
+    # themselves to the serving set; model-path validates tracked authority.
     $profileFile = Join-Path $Root "serving\models.profile"
     $active = $null
     if (Test-Path $profileFile) {
@@ -87,10 +97,7 @@ function Get-ActiveModels {
             $f = $_ -split "\|"
             [pscustomobject]@{ Name = $f[0].Trim(); Slot = $f[3].Trim(); Ctx = $f[4].Trim(); Flags = $f[5].Trim()
                                InProfile = ($null -eq $active) -or ($active -contains $f[0].Trim()) }
-        } | Where-Object {
-            $downloaded = [bool](Get-ChildItem (Join-Path $Root "models\$($_.Name)") -Recurse -Filter "*.gguf" -ErrorAction SilentlyContinue | Select-Object -First 1)
-            $_.InProfile -or $downloaded
-        }
+        } | Where-Object { $_.InProfile }
     return $rows
 }
 
@@ -149,13 +156,14 @@ switch ($Cmd) {
         $lines = @("healthCheckTimeout: 900", "logLevel: info", "", "models:")
         $resident = @(); $big = @(); $missing = @()
         foreach ($r in Get-ActiveModels) {
-            $dir = Join-Path $Root "models\$($r.Name)"
-            $all = Get-ChildItem $dir -Recurse -Filter "*.gguf" -ErrorAction SilentlyContinue | Sort-Object Name
-            $gguf = $all | Select-Object -First 1
-            if (-not $gguf) { $missing += $r.Name; continue }
-            $mp = $gguf.FullName
+            try {
+                $mp = Get-ValidatedModelPath $r.Name
+            } catch {
+                $missing += $r.Name
+                continue
+            }
             $modelArg = Quote-CommandArgument $mp
-            $sizeGB = ($all | Measure-Object Length -Sum).Sum / 1GB
+            $sizeGB = (Get-Item -LiteralPath $mp).Length / 1GB
             $gpu = ""
             if ($sizeGB -gt [Math]::Max(1.0, $vramGB * 0.8)) { $gpu = " --n-gpu-layers 0" }
             # Context floor matters more than parallelism: agentic engines need

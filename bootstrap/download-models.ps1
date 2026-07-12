@@ -176,5 +176,7 @@ foreach ($r in $rows) {
     if ($LASTEXITCODE -ne 0) { throw "model provenance failed: $($r.Name)" }
 }
 Write-Host ""
-Write-Host "All downloads complete. Move '$Dest' to the Mac as ~/sentivue-oracle/models"
-Write-Host "(or symlink it), then on the Mac:  oracle serve; oracle verify"
+Write-Host "Acquisition complete (untrusted evidence only)."
+Write-Host "Independently verify revisions and shard digests, promote"
+Write-Host "serving\model-authorities.json, copy selected files under models\,"
+Write-Host "then run bootstrap\import-model.ps1 before serving."
