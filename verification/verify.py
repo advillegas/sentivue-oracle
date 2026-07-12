@@ -81,6 +81,64 @@ _BINARY_SUFFIXES = {
     ".woff2",
     ".zip",
 }
+_PROHIBITED_ARTIFACT_SUFFIXES = {
+    ".7z",
+    ".a",
+    ".apk",
+    ".appimage",
+    ".bin",
+    ".bz2",
+    ".ckpt",
+    ".dmg",
+    ".dll",
+    ".dylib",
+    ".engine",
+    ".exe",
+    ".gguf",
+    ".gz",
+    ".iso",
+    ".jar",
+    ".lib",
+    ".mlmodel",
+    ".msi",
+    ".o",
+    ".obj",
+    ".onnx",
+    ".ot",
+    ".pdb",
+    ".pkg",
+    ".pt",
+    ".pth",
+    ".rar",
+    ".safetensors",
+    ".so",
+    ".tar",
+    ".tflite",
+    ".tgz",
+    ".vsix",
+    ".wasm",
+    ".whl",
+    ".xz",
+    ".zip",
+}
+_PROHIBITED_ARTIFACT_PARTS = {
+    ".tools",
+    ".venv",
+    "artifacts",
+    "models",
+    "node_modules",
+    "toolchains",
+}
+_COMPILED_ARTIFACT_MAGICS = (
+    b"MZ",
+    b"\x7fELF",
+    b"\x00asm",
+    b"\xca\xfe\xba\xbe",
+    b"\xce\xfa\xed\xfe",
+    b"\xcf\xfa\xed\xfe",
+    b"\xfe\xed\xfa\xce",
+    b"\xfe\xed\xfa\xcf",
+)
 _WALK_EXCLUDED_PARTS = {".git", ".superpowers", "reports"}
 
 
@@ -1162,35 +1220,98 @@ def check_package_allowlist(
         )
     roots = allowlist.get("roots", [])
     files = allowlist.get("files", [])
-    if not isinstance(roots, list) or not isinstance(files, list):
+    source_assets = allowlist.get("source_assets", [])
+    if (
+        not isinstance(roots, list)
+        or not isinstance(files, list)
+        or not isinstance(source_assets, list)
+    ):
         return CheckResult(
             "package_allowlist",
             FAIL,
             "Package allowlist is malformed",
-            ["package_allowlist.roots and .files must be lists."],
+            [
+                "package_allowlist.roots, .files, and .source_assets "
+                "must be lists."
+            ],
         )
     allowed_roots = set(roots)
     allowed_files = set(files)
     details = []
-    for path in _source_files(root):
+    source_files = _source_files(root)
+    for path in source_files:
         relative = _relative(root, path)
         first = relative.split("/", 1)[0]
-        if relative in allowed_files or first in allowed_roots:
+        if relative not in allowed_files and first not in allowed_roots:
+            details.append(f"{relative}: outside package allowlist")
+
+        data = path.read_bytes()
+        path_parts = {part.lower() for part in relative.split("/")[:-1]}
+        suffix = path.suffix.lower()
+        if path_parts.intersection(_PROHIBITED_ARTIFACT_PARTS):
+            details.append(f"{relative}: prohibited generated artifact directory")
             continue
-        details.append(f"{relative}: outside package allowlist")
+        if suffix in _PROHIBITED_ARTIFACT_SUFFIXES:
+            details.append(f"{relative}: prohibited binary, model, or archive artifact")
+            continue
+        if data.startswith(_COMPILED_ARTIFACT_MAGICS):
+            details.append(f"{relative}: prohibited compiled binary content")
+            continue
+
+        declared_source_asset = any(
+            isinstance(pattern, str) and fnmatch.fnmatch(relative, pattern)
+            for pattern in source_assets
+        )
+        if not _is_text(path, data) and not declared_source_asset:
+            details.append(f"{relative}: undeclared binary source asset")
     status = FAIL if details else PASS
     summary = (
-        f"{len(_source_files(root))} source file(s) are package-allowlisted"
+        f"{len(source_files)} source file(s) are package-allowlisted"
         if status == PASS
-        else "Package allowlist rejected source files"
+        else "Package allowlist rejected source or prohibited artifact files"
     )
     return CheckResult("package_allowlist", status, summary, details)
+
+
+def _is_obvious_secret_placeholder(value: str) -> bool:
+    lowered = value.lower()
+    markers = (
+        "changeme",
+        "dummy",
+        "example",
+        "fake",
+        "placeholder",
+        "redacted",
+        "replace",
+        "sample",
+        "your_",
+    )
+    if any(marker in lowered for marker in markers):
+        return True
+
+    body = re.sub(
+        r"^(?:github_pat_|ghp_|hf_|sk-ant-|sk-|npm_|pypi-)",
+        "",
+        lowered,
+    )
+    alphanumeric = "".join(char for char in body if char.isalnum())
+    if alphanumeric and len(set(alphanumeric)) <= 3:
+        return True
+    return any(
+        sequence in alphanumeric
+        for sequence in (
+            "0123456789",
+            "1234567890",
+            "abcdefghijklmnopqrstuvwxyz",
+        )
+    )
 
 
 def check_secrets(root: Path) -> CheckResult:
     root = root.resolve()
     patterns = [
         ("GitHub token", re.compile(r"\b(?:ghp|github_pat)_[A-Za-z0-9_]{30,}\b")),
+        ("Hugging Face token", re.compile(r"\bhf_[A-Za-z0-9]{30,}\b")),
         ("AWS access key", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
         ("OpenAI-style key", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
         (
@@ -1208,7 +1329,10 @@ def check_secrets(root: Path) -> CheckResult:
         scanned += 1
         text = data.decode("utf-8")
         for label, pattern in patterns:
-            if pattern.search(text):
+            if any(
+                not _is_obvious_secret_placeholder(match.group(0))
+                for match in pattern.finditer(text)
+            ):
                 details.append(f"{_relative(root, path)}: possible {label}")
     status = FAIL if details else PASS
     summary = (
@@ -1310,13 +1434,30 @@ def check_oversized(
 
 
 def _clean_command_path(candidate: str) -> str:
-    return candidate.strip("`'\"()[]{}<>,.;:").replace("\\", "/").removeprefix("./")
+    cleaned = candidate.strip("`'\"()[]{}<>,;:").rstrip(".")
+    return cleaned.replace("\\", "/").removeprefix("./")
+
+
+def _documented_path_variants(candidate: str) -> list[str]:
+    cleaned = _clean_command_path(candidate)
+    if not cleaned or any(character in cleaned for character in "<>{}$*?"):
+        return []
+    if "|" not in cleaned:
+        return [cleaned]
+
+    base, *alternatives = cleaned.split("|")
+    variants = [base]
+    for alternative in alternatives:
+        if not alternative.startswith(".") or "/" in alternative:
+            return []
+        variants.append(str(Path(base).with_suffix(alternative)).replace("\\", "/"))
+    return variants
 
 
 def check_docs_commands(root: Path) -> CheckResult:
     root = root.resolve()
     details = []
-    patterns = [
+    command_patterns = [
         re.compile(
             r"\b(?:bash|sh)\s+((?:\./)?(?:bin|bootstrap|conductor|connectors|"
             r"engines|harness|serving|verification)[\\/][A-Za-z0-9_./\\-]+)"
@@ -1327,13 +1468,17 @@ def check_docs_commands(root: Path) -> CheckResult:
         ),
         re.compile(
             r"\bpython(?:3)?\s+((?:\./)?(?:bin|bootstrap|conductor|connectors|"
-            r"engines|harness|serving|verification)[\\/][A-Za-z0-9_./\\-]+\.py)"
-        ),
-        re.compile(
-            r"`((?:bin|bootstrap|conductor|connectors|engines|harness|serving|"
-            r"verification)[\\/][^`\s]+?\.(?:ps1|sh|py|cmd))"
+            r"engines|harness|serving|verification)[\\/][A-Za-z0-9_./\\-]+)"
         ),
     ]
+    inline_path = re.compile(
+        r"`((?:\./)?(?:bin|bootstrap|conductor|connectors|engines|harness|"
+        r"serving|verification)[\\/][^`\s]+)([^`]*)`"
+    )
+    command_cue = re.compile(
+        r"\b(?:call|execute|invoke|launch|run|use)\s*[:(]?\s*$",
+        re.IGNORECASE,
+    )
     makefile = root / "Makefile"
     make_targets = set()
     if makefile.is_file():
@@ -1352,14 +1497,25 @@ def check_docs_commands(root: Path) -> CheckResult:
         )
         text = path.read_text(encoding="utf-8")
         for line_number, line in enumerate(text.splitlines(), 1):
-            for pattern in patterns:
+            line_candidates = set()
+            for pattern in command_patterns:
                 for match in pattern.finditer(line):
-                    candidate = _clean_command_path(match.group(1))
-                    if candidate and not (root / candidate).is_file():
-                        details.append(
-                            f"{_relative(root, path)}:{line_number}: command entry point "
-                            f"does not exist: {candidate}"
-                        )
+                    line_candidates.update(
+                        _documented_path_variants(match.group(1))
+                    )
+            for match in inline_path.finditer(line):
+                has_arguments = bool(match.group(2).strip())
+                has_command_cue = bool(command_cue.search(line[: match.start()]))
+                if has_arguments or has_command_cue:
+                    line_candidates.update(
+                        _documented_path_variants(match.group(1))
+                    )
+            for candidate in sorted(line_candidates):
+                if not (root / candidate).is_file():
+                    details.append(
+                        f"{_relative(root, path)}:{line_number}: command entry point "
+                        f"does not exist: {candidate}"
+                    )
             make_commands = (
                 re.finditer(
                     r"`make\s+([A-Za-z0-9_-]+)`|"
@@ -1506,11 +1662,21 @@ def _write_report_files(
         encoding="utf-8",
         newline="\n",
     )
+    checksum_path = report_dir / "SHA256SUMS"
+    evidence_files = sorted(
+        (
+            path
+            for path in report_dir.rglob("*")
+            if path.is_file() and path != checksum_path
+        ),
+        key=lambda path: path.relative_to(report_dir).as_posix(),
+    )
     checksums = []
-    for path in (report_path, summary_path):
+    for path in evidence_files:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        checksums.append(f"{digest}  {path.name}")
-    (report_dir / "SHA256SUMS").write_text(
+        relative = path.relative_to(report_dir).as_posix()
+        checksums.append(f"{digest}  {relative}")
+    checksum_path.write_text(
         "\n".join(checksums) + "\n",
         encoding="ascii",
         newline="\n",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import plistlib
@@ -108,6 +109,22 @@ def bash_executable() -> str | None:
     return shutil.which("bash")
 
 
+def isolated_checkpoint_env(root: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    git_context = {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    }
+    for name in list(env):
+        if name.upper() in git_context or name.upper() == "ORACLE_ROOT":
+            env.pop(name)
+    env["ORACLE_ROOT"] = str(root)
+    return env
+
+
 def test_powershell_gate_rejects_non_ascii_and_parses_ast(tmp_path: Path) -> None:
     put(tmp_path, "scripts/good.ps1", "$value = 1\n")
     put(tmp_path, "scripts/non-ascii.ps1", "Write-Host 'caf\u00e9'\n")
@@ -120,6 +137,18 @@ def test_powershell_gate_rejects_non_ascii_and_parses_ast(tmp_path: Path) -> Non
         assert result.commands and result.commands[0].exit_code == 0
     else:
         assert result.status == FAIL
+
+
+def test_powershell_gate_rejects_malformed_ascii_syntax(tmp_path: Path) -> None:
+    if not powershell_executable():
+        pytest.skip("PowerShell is unavailable on this platform")
+
+    put(tmp_path, "scripts/malformed.ps1", "$value = (\n")
+    result = check_powershell(tmp_path)
+
+    assert result.status == FAIL
+    assert result.commands and result.commands[0].exit_code != 0
+    assert any("malformed.ps1" in detail for detail in result.details)
 
 
 def test_bash_gate_rejects_syntax_errors(tmp_path: Path) -> None:
@@ -482,12 +511,74 @@ def test_package_allowlist_rejects_unexpected_roots(tmp_path: Path) -> None:
     assert check_package_allowlist(tmp_path, policy).status == PASS
 
 
+@pytest.mark.parametrize(
+    ("relative", "content"),
+    [
+        ("bin/tool.exe", b"MZ\x00fixture"),
+        ("models/tiny.gguf", b"GGUF\x00fixture"),
+        ("toolchains/compiler", b"\x7fELF\x00fixture"),
+        ("bin/toolchain.zip", b"PK\x03\x04fixture"),
+    ],
+)
+def test_package_allowlist_rejects_prohibited_artifacts_below_size_limit(
+    tmp_path: Path, relative: str, content: bytes
+) -> None:
+    put(tmp_path, "assets/logo.png", b"\x89PNG\r\n\x1a\n\x00source asset")
+    artifact = put(tmp_path, relative, content)
+    policy = {
+        "package_allowlist": {
+            "roots": ["assets", "bin", "models", "toolchains"],
+            "files": [],
+            "source_assets": ["assets/logo.png", relative],
+        }
+    }
+
+    result = check_package_allowlist(tmp_path, policy)
+
+    assert artifact.stat().st_size < verify.MAX_SOURCE_BYTES
+    assert result.status == FAIL
+    assert any(relative in detail for detail in result.details)
+
+    artifact.unlink()
+    assert check_package_allowlist(tmp_path, policy).status == PASS
+
+
 def test_secret_gate_rejects_known_token_shapes(tmp_path: Path) -> None:
-    source = put(tmp_path, "src/settings.txt", "token=ghp_" + ("A" * 36) + "\n")
+    source = put(
+        tmp_path,
+        "src/settings.txt",
+        "token=ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8\n",
+    )
     assert check_secrets(tmp_path).status == FAIL
 
-    source.write_bytes(b"token=${GITHUB_TOKEN}\n")
-    assert check_secrets(tmp_path).status == PASS
+    for placeholder in (
+        "${GITHUB_TOKEN}",
+        "ghp_" + ("A" * 36),
+        "ghp_abcdefghijklmnopqrstuvwxyz1234567890",
+    ):
+        source.write_text(f"token={placeholder}\n", encoding="utf-8")
+        assert check_secrets(tmp_path).status == PASS
+
+
+def test_secret_gate_rejects_hugging_face_tokens_without_placeholder_false_positives(
+    tmp_path: Path,
+) -> None:
+    source = put(
+        tmp_path,
+        "docs/auth.md",
+        "token=hf_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8\n",
+    )
+    result = check_secrets(tmp_path)
+    assert result.status == FAIL
+    assert any("Hugging Face" in detail for detail in result.details)
+
+    for placeholder in (
+        "hf_your_token_here",
+        "hf_" + ("x" * 34),
+        "hf_abcdefghijklmnopqrstuvwxyz12345678",
+    ):
+        source.write_text(f"token={placeholder}\n", encoding="utf-8")
+        assert check_secrets(tmp_path).status == PASS
 
 
 def test_host_generated_gate_rejects_generated_files(tmp_path: Path) -> None:
@@ -525,6 +616,42 @@ def test_documentation_gate_resolves_repository_commands(tmp_path: Path) -> None
         b"Run `powershell -File bootstrap\\missing.ps1` to verify the install.\n"
     )
     assert check_docs_commands(tmp_path).status == FAIL
+
+
+@pytest.mark.parametrize(
+    ("reference", "candidate"),
+    [
+        ("bin/missing-tool", "bin/missing-tool"),
+        ("bin/missing-tool.rb", "bin/missing-tool.rb"),
+        ("./bin/missing-tool", "bin/missing-tool"),
+    ],
+)
+def test_documentation_gate_resolves_general_local_entrypoints(
+    tmp_path: Path, reference: str, candidate: str
+) -> None:
+    put(tmp_path, "README.md", f"Run `{reference}` to inspect the service.\n")
+
+    result = check_docs_commands(tmp_path)
+
+    assert result.status == FAIL
+    assert any(candidate in detail for detail in result.details)
+
+    put(tmp_path, candidate, "#!/usr/bin/env bash\ntrue\n")
+    assert check_docs_commands(tmp_path).status == PASS
+
+
+def test_documentation_gate_ignores_noncommand_local_path_references(
+    tmp_path: Path,
+) -> None:
+    put(
+        tmp_path,
+        "README.md",
+        "`serving/tiers.env` is generated on the target machine.\n"
+        "Queued follow-up: `bin/future-tool`.\n"
+        "Sources are installed under `harness/tool/vendor/`.\n",
+    )
+
+    assert check_docs_commands(tmp_path).status == PASS
 
 
 def test_run_ids_are_unique_and_portable() -> None:
@@ -575,6 +702,43 @@ def test_reports_are_machine_readable_human_readable_and_non_overwriting(
     with pytest.raises(FileExistsError):
         write_reports(report_base, report_dir.name, results)
     assert report_json.read_bytes() == original
+
+
+def test_checksum_manifest_covers_all_retained_evidence_artifacts(
+    tmp_path: Path,
+) -> None:
+    report_dir = tmp_path / "verification-run"
+    report_dir.mkdir()
+    put(
+        report_dir,
+        "artifacts/path with spaces/generated config.json",
+        '{"path": "model with spaces.gguf"}\n',
+    )
+    put(
+        report_dir,
+        "artifacts/path with spaces/command helper.py",
+        "print('ok')\n",
+    )
+
+    verify._write_report_files(
+        report_dir,
+        "20260712T120000Z-a11ce123",
+        [CheckResult("fixture", PASS, "passed")],
+        {"mode": "static"},
+    )
+
+    entries = []
+    for line in (report_dir / "SHA256SUMS").read_text(encoding="ascii").splitlines():
+        digest, relative = line.split("  ", 1)
+        entries.append((relative, digest))
+    expected = sorted(
+        path.relative_to(report_dir).as_posix()
+        for path in report_dir.rglob("*")
+        if path.is_file() and path.name != "SHA256SUMS"
+    )
+    assert [relative for relative, _digest in entries] == expected
+    for relative, digest in entries:
+        assert digest == hashlib.sha256((report_dir / relative).read_bytes()).hexdigest()
 
 
 def test_cli_rejects_report_root_override(
@@ -630,18 +794,26 @@ def test_repository_policy_entrypoints_and_ci_are_present() -> None:
     assert workflow.count("python -m pytest verification/tests -q") == 2
 
 
-def test_checkpoint_twin_commits_from_a_path_with_spaces(tmp_path: Path) -> None:
+def test_checkpoint_twin_commits_from_a_path_with_spaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     checkpoint = REPO_ROOT / "bin/checkpoint.ps1"
     assert checkpoint.is_file()
     powershell = powershell_executable()
     if not powershell:
         pytest.skip("PowerShell is unavailable on this platform")
 
+    other_checkout = tmp_path / "other checkout"
+    other_checkout.mkdir()
+    monkeypatch.setenv("ORACLE_ROOT", str(other_checkout))
+
     repo = tmp_path / "checkpoint repository with spaces"
     repo.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    env = isolated_checkpoint_env(repo)
+    subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True)
     subprocess.run(
         ["git", "-C", str(repo), "config", "user.name", "Verifier Fixture"],
+        env=env,
         check=True,
     )
     subprocess.run(
@@ -653,6 +825,7 @@ def test_checkpoint_twin_commits_from_a_path_with_spaces(tmp_path: Path) -> None
             "user.email",
             "verifier@example.invalid",
         ],
+        env=env,
         check=True,
     )
     copied = repo / "bin/checkpoint.ps1"
@@ -671,6 +844,7 @@ def test_checkpoint_twin_commits_from_a_path_with_spaces(tmp_path: Path) -> None
             "fixture checkpoint",
         ],
         cwd=repo,
+        env=env,
         text=True,
         capture_output=True,
         check=False,
@@ -678,6 +852,7 @@ def test_checkpoint_twin_commits_from_a_path_with_spaces(tmp_path: Path) -> None
     assert completed.returncode == 0, completed.stderr + completed.stdout
     subject = subprocess.run(
         ["git", "-C", str(repo), "log", "-1", "--pretty=%s"],
+        env=env,
         text=True,
         capture_output=True,
         check=True,
@@ -685,6 +860,7 @@ def test_checkpoint_twin_commits_from_a_path_with_spaces(tmp_path: Path) -> None
     assert subject == "fixture checkpoint"
     ledger = (repo / "memory/LEDGER.md").read_text(encoding="utf-8")
     assert "fixture checkpoint" in ledger
+    assert not (other_checkout / "memory/LEDGER.md").exists()
 
 
 @pytest.mark.parametrize("entrypoint", ["powershell", "bash"])

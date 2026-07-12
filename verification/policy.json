@@ -32,6 +32,9 @@
       "Uninstall.cmd",
       "VERSIONS.lock",
       "install"
+    ],
+    "source_assets": [
+      "connectors/ide/oracle-agents/media/*.svg"
     ]
   },
   "platform_twins": [
