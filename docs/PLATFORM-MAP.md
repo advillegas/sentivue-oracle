@@ -43,8 +43,9 @@ hash scans remain untrusted; `promote-dependency.ps1|.sh` validates a separately
 supplied expected identity/digest and updates the generated tracked dependency
 authority manifest without reading artifact bytes; `import-dependency.ps1|.sh`
 and `import-model.ps1|.sh` admit independently policy-bound offline inputs;
-`render-config.sh` +
-`serving/serve-windows.ps1` render llama-swap configs; `sync-skills.ps1|.sh`
+`render-config.sh` is a compatibility entry point for the shared serving renderer;
+`serving/serve-windows.ps1` and `serving/service.sh` own only native lifecycle;
+`sync-skills.ps1|.sh`
 link `skills/` into both engines; `vault.sh|.ps1` manage the offline git vault;
 `build-installers.ps1` produces the double-clickable installers; `envoy.sh`
 opens controlled network windows.
@@ -96,7 +97,8 @@ ENVOY.md.
 ## harness/
 
 Vendored, pinned third-party layers (all in `VERSIONS.lock`): `ecc/` (curated
-skill subset), `skill-packs/` (superpowers `sp-*` + gstack `gs-*`, 67 skills),
+skill subset), `skill-packs/` (superpowers `sp-*` + gstack `gs-*` admitted by
+`offline-policy.json`; network-capable instructions are flagged and quarantined),
 `agent-mcp/` (optional orchestration viewer, loopback-only),
 `loop-engineering/` (patterns + the loop-audit/init/cost/sync CLIs). Vendor
 checkouts are gitignored; installers re-materialize them only from validated
@@ -107,13 +109,15 @@ replacement with rollback for verified owned upgrades.
 
 ## serving/
 
-Local inference. `models.manifest` (ensemble + slots + sampling + immutable
-upstream revision), `model-authorities.json` (independently promoted include
-patterns and expected shard digests),
-`profiles.conf` (hardware-adaptive profiles), `serve-windows.ps1` and
-`service.sh` + `render-config.sh` (llama-swap on 127.0.0.1:9099 with KV
-prefix-cache reuse, OpenAI-compat aliases, hardware-adaptive placement),
-`tiers.env` (opus/sonnet/haiku → actual models; auto-written).
+Local inference declarations and platform twins. `models.manifest` defines slots,
+nominal contexts, and immutable revisions; `model-authorities.json` holds
+independently promoted include patterns and shard digests; `profiles.conf` defines
+resource thresholds. `verification/serving.py` is the shared parser, backend/resource
+selector, context/concurrency admission gateway, atomic renderer, lifecycle support,
+and production-shaped verifier. Generated config and evidence live under
+`state/generated/serving`; `serve-windows.ps1` uses a per-user Scheduled Task and
+`service.sh` uses launchd. Runtime certification stays provisional until target-host
+probes pass.
 
 ## skills/
 
@@ -135,8 +139,8 @@ NET-REQUESTS.md (envoy queue), `sessions/` (per-session journals). Layer 0 is
 
 `reports/` (hourly + final mission reports), `logs/` (engine session
 transcripts — the trace store), `docs/` (decision records 0001-0004,
-meta-analyses, this map), `state/` (pids + locks), `models/` (GGUF weights),
-`env/` (uv-managed quant Python), `desk/` (Rust desktop app, optional),
+meta-analyses, this map), `state/` (generated configs, pids, and locks),
+`models/` (GGUF weights), `env/` (uv-managed quant Python),
 `LOOP.md` (loop inventory + budgets + kill switches), `AGENTS.md` (working
 rules for any agent in this repo), `VERSIONS.lock` (named request/pin keys), and
 `verification/dependency-authorities.json` (generated tracked promotions for

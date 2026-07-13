@@ -1,10 +1,4 @@
-# oracle.ps1 - Windows entry point for the self-contained development ecosystem.
-# The Mac appliance uses bin/oracle (bash); this exposes the node-appropriate
-# subset on Windows: vault, model pre-downloading, and commit/package/push.
-#
-#   powershell -File bin\oracle.ps1 vault <init|sync|new|clone|list|backup> [...]
-#   powershell -File bin\oracle.ps1 models [-Dest E:\oracle-models] [-Only name]
-#   powershell -File bin\oracle.ps1 finish [-SkipPush]     commit + package + push (GitHub) + vault sync
+# oracle.ps1 - Windows operator CLI, intentionally aligned with bin/oracle.
 param(
     [Parameter(Position = 0)][string]$Cmd = "help",
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest = @()
@@ -232,7 +226,29 @@ switch ($Cmd) {
     "audit"  { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\security-audit.ps1") @Rest }
     "serve"  { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") start }
     "stop"   { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") stop }
+    "restart" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") restart }
     "status" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "serving\serve-windows.ps1") status }
+    "service" {
+        $ServiceArgs = if ($Rest.Count -gt 0) { $Rest } else { @("status") }
+        & powershell -ExecutionPolicy Bypass -File `
+            (Join-Path $Root "serving\serve-windows.ps1") @ServiceArgs
+        exit $LASTEXITCODE
+    }
+    "capabilities" {
+        & powershell -ExecutionPolicy Bypass -File `
+            (Join-Path $Root "serving\serve-windows.ps1") capabilities @Rest
+        exit $LASTEXITCODE
+    }
+    "verify" {
+        & powershell -ExecutionPolicy Bypass -File `
+            (Join-Path $Root "serving\serve-windows.ps1") verify @Rest
+        exit $LASTEXITCODE
+    }
+    "doctor" {
+        & powershell -ExecutionPolicy Bypass -File `
+            (Join-Path $Root "bootstrap\doctor.ps1") @Rest
+        exit $LASTEXITCODE
+    }
     "claude"   { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\claude-code\launch.ps1") @Rest }
     "opencode" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\opencode\launch.ps1") @Rest }
     "kilo"     { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\kilo\launch.ps1") @Rest }
@@ -283,14 +299,13 @@ switch ($Cmd) {
             Write-Host "==================== SentiVue Oracle ===================="
             Write-Host "  Windows platform - $Root"
             Write-Host "========================================================="
-            Write-Host "  0) desktop app (chat/missions)     8) IDE (Cursor-like, local models)"
+            Write-Host "  8) IDE (VSCodium, local models)    d) doctor"
             Write-Host "  1) Claude Code session             2) OpenCode session"
             Write-Host "  3) sync repo to local vault        4) vault inventory"
             Write-Host "  5) download models                 6) commit + package + push"
             Write-Host "  7) open repo folder                s) serve models   t) status   q) quit"
             $c = Read-Host "choose"
             switch ($c) {
-                "0" { & powershell -ExecutionPolicy Bypass -File $PSCommandPath desk }
                 "8" {
                     $ide = Join-Path $Root "connectors\ide\setup-ide.ps1"
                     if (Find-CodiumInstalled) { & powershell -ExecutionPolicy Bypass -File $ide launch }
@@ -305,6 +320,7 @@ switch ($Cmd) {
                 "5" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\download-models.ps1") }
                 "6" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\finish-windows.ps1") }
                 "7" { Start-Process explorer.exe $Root }
+                "d" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "bootstrap\doctor.ps1") }
                 "q" { return }
                 default { }
             }
@@ -313,7 +329,9 @@ switch ($Cmd) {
     default {
         Write-Host "oracle (Windows - full platform)"
         Write-Host "  setup                                     engines (pinned) + serving toolchain (one time)"
-        Write-Host "  serve | status | stop                     local model serving (llama-swap on :9099)"
+        Write-Host "  serve | stop | restart | status           admitted local serving on loopback"
+        Write-Host "  service install|uninstall|...             durable per-user Scheduled Task"
+        Write-Host "  capabilities | verify | doctor            truthful evidence and production probes"
         Write-Host "  harden [off] | egress [status|plan]       default-deny egress for all appliance processes"
         Write-Host "  verify-egress | audit [-Deep]             prove no leaks | full security sweep"
         Write-Host "  claude | opencode | kilo                  engine sessions on local models"
@@ -322,9 +340,8 @@ switch ($Cmd) {
         Write-Host "  agents-ui [install|start|stop|status]     orchestration viewer (Agent-MCP, optional)"
         Write-Host "  loops   audit|init|cost|sync              loop-engineering toolkit"
         Write-Host "  notes                                     Obsidian over the repo (memory lens)"
-        Write-Host "  ide  [install|sync]                       Cursor-like IDE (agent tabs, auto-detected models)"
-        Write-Host "  desk                                      native desktop app (chat/missions/models/vault)"
-        Write-Host "  menu                                      interactive menu (the desktop shortcut opens this)"
+        Write-Host "  ide  [install|sync]                       VSCodium with local-only engine extensions"
+        Write-Host "  menu                                      interactive operator menu"
         Write-Host "  vault   init|sync|new|clone|list|backup   local private git remote"
         Write-Host "  models  [-Dest path] [-Only name]         download models (profile-aware)"
         Write-Host "  uninstall [-Apply] [-Purge -ConfirmPurge] ownership-scoped removal"

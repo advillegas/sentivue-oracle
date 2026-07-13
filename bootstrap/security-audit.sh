@@ -16,8 +16,12 @@ has()  { grep -Eq "$2" "$ROOT/$1" 2>/dev/null; }
 echo "=== SentiVue Oracle security sweep =============================="
 echo
 echo "== service bind addresses (must be loopback) =="
-has "serving/service.sh" '127\.0\.0\.1:9099' && ok "llama-swap listens on 127.0.0.1:9099" || badf "llama-swap listen not loopback"
-has "bootstrap/render-config.sh" '127\.0\.0\.1|--host 127' && ok "llama-server host loopback (render-config)" || warnf "llama-server host not asserted in render-config"
+has "verification/serving.py" 'require_loopback\(gateway_host\)' \
+  && ok "shared gateway and llama-swap runtime binds fail closed on non-loopback" \
+  || badf "shared serving runtime does not enforce loopback"
+has "verification/serving.py" 'require_loopback\(host\)' \
+  && ok "generated llama-server host is validated as loopback" \
+  || badf "shared renderer does not validate llama-server loopback"
 if grep -Eq '^\s*-\s*"(?!127\.0\.0\.1)[0-9]' "$ROOT/connectors/supabase/docker-compose.yml" 2>/dev/null; then
   badf "supabase publishes a non-loopback port"; else ok "supabase ports all bound to 127.0.0.1"; fi
 has "conductor/console.py" 'ThreadingHTTPServer\(\("127\.0\.0\.1"' && ok "console bound to 127.0.0.1" || badf "console bind not loopback"

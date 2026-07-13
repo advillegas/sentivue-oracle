@@ -8,6 +8,8 @@ HERE="$ROOT/harness/skill-packs"
 source "$ROOT/VERSIONS.lock"
 DEPENDENCY_CACHE="${ORACLE_DEPENDENCY_CACHE:-$ROOT/incoming/dependency-cache}"
 ARTIFACT_MANIFEST="$DEPENDENCY_CACHE/manifest.json"
+OFFLINE_POLICY="$HERE/offline-policy.json"
+SERVING="$ROOT/verification/serving.py"
 PYTHON_BIN="${ORACLE_PYTHON:-$ROOT/env/.venv/bin/python}"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python || true)"
 [[ -n "$PYTHON_BIN" ]] || { echo "ERROR: Python is required." >&2; exit 1; }
@@ -33,21 +35,38 @@ vendored() {  # vendored <name> <artifact-id> <requested> <resolved>
   echo "$v"
 }
 
-sync_pack() {  # sync_pack <vendor-dir> <prefix> <skills-root>
-  local vendor="$1" prefix="$2" base="$1/$3" count=0
-  [[ -d "$base" ]] || return 0
-  for dir in "$base"/*/; do
-    [[ -f "$dir/SKILL.md" ]] || continue
-    local name; name="$(basename "$dir")"
-    ln -sfn "${dir%/}" "$CC/$prefix-$name"
-    ln -sfn "${dir%/}" "$OC/$prefix-$name"
-    count=$((count+1))
-  done
-  echo "$count"
-}
+vendored superpowers source-superpowers "$SUPERPOWERS_PIN" "$SUPERPOWERS_COMMIT" >/dev/null
+vendored gstack source-gstack "$GSTACK_PIN" "$GSTACK_COMMIT" >/dev/null
 
-SP="$(vendored superpowers source-superpowers "$SUPERPOWERS_PIN" "$SUPERPOWERS_COMMIT")"
-echo "==> superpowers: $(sync_pack "$SP" sp skills) skills synced (prefix 'sp-')"
-GS="$(vendored gstack source-gstack "$GSTACK_PIN" "$GSTACK_COMMIT")"
-echo "==> gstack: $(sync_pack "$GS" gs .) skills synced (prefix 'gs-')"
-echo "Both packs live in harness/skill-packs/vendor; re-run after changing pins."
+set +e
+AUDIT="$("$PYTHON_BIN" "$SERVING" skill-policy --vendor "$HERE/vendor" \
+  --policy "$OFFLINE_POLICY" --format json 2>&1)"
+AUDIT_EXIT=$?
+set -e
+[[ $AUDIT_EXIT -eq 0 || $AUDIT_EXIT -eq 2 ]] || {
+  echo "ERROR: third-party skill policy inspection failed: $AUDIT" >&2
+  exit 1
+}
+printf '%s' "$AUDIT" | jq -r \
+  '.flagged[] | "WARN: excluded \(.name): \(.reason)"' >&2
+
+for destination in "$CC" "$OC"; do
+  for stale in "$destination"/sp-* "$destination"/gs-*; do
+    [[ -e "$stale" || -L "$stale" ]] || continue
+    rm -rf "$stale"
+  done
+done
+
+COUNT=0
+while IFS=$'\t' read -r name source; do
+  [[ -n "$name" && -f "$source/SKILL.md" ]] || {
+    echo "ERROR: allowed skill path is incomplete: $source" >&2
+    exit 1
+  }
+  ln -sfn "$source" "$CC/$name"
+  ln -sfn "$source" "$OC/$name"
+  COUNT=$((COUNT+1))
+done < <(printf '%s' "$AUDIT" | jq -r '.allowed[] | [.name, .path] | @tsv')
+
+echo "==> offline-curated skills synced: $COUNT"
+echo "Flagged network-capable instructions remain in vendor quarantine only."

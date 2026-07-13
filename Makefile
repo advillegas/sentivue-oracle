@@ -42,7 +42,7 @@ models:
 	bash bootstrap/download-models.sh
 
 render:
-	bash bootstrap/render-config.sh
+	bash serving/service.sh render
 
 serve: render
 	bash serving/service.sh start
@@ -54,7 +54,7 @@ status:
 	bash serving/service.sh status
 
 verify:
-	bash bootstrap/verify-offline.sh
+	bash serving/service.sh verify --include-engines
 
 doctor:
 	bash bootstrap/doctor.sh

@@ -1,16 +1,23 @@
-# serve-windows.ps1 - full model serving on the Windows node.
-# Same architecture as the Mac: llama-swap front door (Anthropic + OpenAI wire)
-# hot-swapping llama-server models per serving\models.manifest + models.profile.
+# serve-windows.ps1 - Windows service twin for policy-bound local serving.
 #
-#   powershell -File serving\serve-windows.ps1 setup     fetch pinned llama.cpp (Vulkan) + llama-swap
-#   powershell -File serving\serve-windows.ps1 start     render config + launch (background)
-#   powershell -File serving\serve-windows.ps1 status|stop
-param([Parameter(Position = 0)][string]$Cmd = "status")
+# Resource/profile/admission/render/probe behavior lives in verification/serving.py.
+# This wrapper owns only the Windows cached tool install and Scheduled Task lifecycle.
+# NVIDIA capacity comes only from nvidia-smi exact MiB evidence in the shared core;
+# Win32_VideoController memory is intentionally never consulted.
+param(
+    [Parameter(Position = 0)][string]$Cmd = "status",
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$Rest = @()
+)
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Tools = Join-Path $Root ".tools\win"
-$Rendered = Join-Path $Root "serving\llama-swap.rendered.win.yaml"
-$PidFile = Join-Path $Root "state\llama-swap.pid"
+$Server = Join-Path $Tools "llama\llama-server.exe"
+$Swap = Join-Path $Tools "llama-swap.exe"
+$Generated = Join-Path $Root "state\generated\serving"
+$Config = Join-Path $Generated "llama-swap.yaml"
+$Admission = Join-Path $Generated "admission.json"
+$PidRecord = Join-Path $Generated "service.pid.json"
+$TaskName = "SentiVueOracleServing"
 $DependencyCache = if ($env:ORACLE_DEPENDENCY_CACHE) {
     $env:ORACLE_DEPENDENCY_CACHE
 } else {
@@ -18,269 +25,280 @@ $DependencyCache = if ($env:ORACLE_DEPENDENCY_CACHE) {
 }
 $ArtifactManifest = Join-Path $DependencyCache "manifest.json"
 
-function Get-LockedVersion([string]$Name) {
-    $line = Get-Content (Join-Path $Root "VERSIONS.lock") |
+function Find-Python {
+    $Candidates = @(
+        (Join-Path $Root "env\.venv\Scripts\python.exe"),
+        (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe")
+    )
+    $Command = Get-Command python -ErrorAction SilentlyContinue
+    if ($Command -and $Command.Source -notmatch "WindowsApps") {
+        $Candidates += $Command.Source
+    }
+    foreach ($Candidate in $Candidates) {
+        if (-not $Candidate -or -not (Test-Path -LiteralPath $Candidate -PathType Leaf)) {
+            continue
+        }
+        & $Candidate -c "import sys; raise SystemExit(sys.version_info < (3, 12))" *> $null
+        if ($LASTEXITCODE -eq 0) { return $Candidate }
+    }
+    throw "Python 3.12 or newer is required for shared serving validation"
+}
+
+$Python = Find-Python
+$Serving = Join-Path $Root "verification\serving.py"
+$Lifecycle = Join-Path $Root "verification\lifecycle.py"
+
+function Invoke-Serving {
+    param([string[]]$Arguments)
+    & $Python $Serving @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "shared serving command failed: $($Arguments -join ' ')"
+    }
+}
+
+function Get-LockedVersion {
+    param([string]$Name)
+    $Line = Get-Content (Join-Path $Root "VERSIONS.lock") |
         Where-Object { $_ -match "^$([regex]::Escape($Name))=" } |
         Select-Object -First 1
-    if (-not $line) { throw "missing $Name in VERSIONS.lock" }
-    return ((($line -split "=", 2)[1]) -split "#", 2)[0].Trim()
+    if (-not $Line) { throw "missing $Name in VERSIONS.lock" }
+    return ((($Line -split "=", 2)[1]) -split "#", 2)[0].Trim()
 }
 
-function Get-CachedArtifact([string]$Id, [string]$Version) {
-    $python = Join-Path $Root "env\.venv\Scripts\python.exe"
-    if (-not (Test-Path $python)) {
-        $python = (Get-Command python -ErrorAction Stop).Source
-    }
-    $lifecycleArgs = @(
-        (Join-Path $Root "verification\lifecycle.py"), "artifact-path",
-        "--manifest", $ArtifactManifest, "--cache", $DependencyCache,
-        "--artifact-id", $Id, "--expected-version", $Version,
+function Get-CachedArtifact {
+    param([string]$Id, [string]$Version)
+    $Arguments = @(
+        $Lifecycle, "artifact-path",
+        "--manifest", $ArtifactManifest,
+        "--cache", $DependencyCache,
+        "--artifact-id", $Id,
+        "--expected-version", $Version,
         "--expected-requested-version", $Version,
-        "--root", $Root, "--reproducible"
+        "--root", $Root,
+        "--reproducible"
     )
-    $path = (& $python @lifecycleArgs)
-    if ($LASTEXITCODE -ne 0) { throw "cached artifact validation failed: $Id" }
-    return $path.Trim()
-}
-
-function Write-Utf8NoBomAtomic([string]$Path, [string]$Text) {
-    $parent = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    $temporary = Join-Path $parent (".{0}.{1}.tmp" -f
-        [IO.Path]::GetFileName($Path), [Guid]::NewGuid().ToString("N"))
-    try {
-        [IO.File]::WriteAllText(
-            $temporary, $Text, (New-Object Text.UTF8Encoding($false))
-        )
-        Move-Item -LiteralPath $temporary -Destination $Path -Force
-    } finally {
-        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Quote-CommandArgument([string]$Value) {
-    $python = Join-Path $Root "env\.venv\Scripts\python.exe"
-    if (-not (Test-Path -LiteralPath $python)) {
-        $python = (Get-Command python -ErrorAction Stop).Source
-    }
-    $quoted = & $python (Join-Path $Root "verification\lifecycle.py") quote-argument --platform windows --value $Value
-    if ($LASTEXITCODE -ne 0) { throw "safe command quoting failed" }
-    return $quoted.Trim()
-}
-
-function Get-ValidatedModelPath([string]$ModelName) {
-    $python = Join-Path $Root "env\.venv\Scripts\python.exe"
-    if (-not (Test-Path -LiteralPath $python)) {
-        $python = (Get-Command python -ErrorAction Stop).Source
-    }
-    $modelPath = & $python (Join-Path $Root "verification\lifecycle.py") `
-        model-path --model-name $ModelName --root $Root --cache $DependencyCache
+    $Path = (& $Python @Arguments)
     if ($LASTEXITCODE -ne 0) {
-        throw "policy-bound model snapshot is unavailable: $ModelName"
+        throw "cached artifact validation failed: $Id"
     }
-    return $modelPath.Trim()
+    return $Path.Trim()
 }
 
-$LlamaTag = Get-LockedVersion "LLAMA_CPP_WIN_TAG"
-$SwapVer = Get-LockedVersion "LLAMA_SWAP_VERSION"
+function Install-ServingTools {
+    $SwapVersion = Get-LockedVersion "LLAMA_SWAP_VERSION"
+    $LlamaVersion = Get-LockedVersion "LLAMA_CPP_WIN_TAG"
+    New-Item -ItemType Directory -Force -Path $Tools | Out-Null
 
-function Get-ActiveModels {
-    # No profile means all declared models are selected. Local files never add
-    # themselves to the serving set; model-path validates tracked authority.
-    $profileFile = Join-Path $Root "serving\models.profile"
-    $active = $null
-    if (Test-Path $profileFile) {
-        $active = Get-Content $profileFile | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") } | ForEach-Object { $_.Trim() }
+    $SwapArchive = Get-CachedArtifact "llama-swap-windows-amd64" $SwapVersion
+    $SwapStage = Join-Path $Tools (".swap-stage-" + [Guid]::NewGuid().ToString("N"))
+    try {
+        Expand-Archive -LiteralPath $SwapArchive -DestinationPath $SwapStage -Force
+        $Candidate = Get-ChildItem $SwapStage -Recurse -Filter "llama-swap.exe" |
+            Select-Object -First 1
+        if (-not $Candidate) { throw "llama-swap archive has no executable" }
+        Copy-Item -LiteralPath $Candidate.FullName -Destination ($Swap + ".new") -Force
+        Move-Item -LiteralPath ($Swap + ".new") -Destination $Swap -Force
+    } finally {
+        Remove-Item -LiteralPath $SwapStage -Recurse -Force -ErrorAction SilentlyContinue
     }
-    $rows = Get-Content (Join-Path $Root "serving\models.manifest") |
-        Where-Object { $_.Trim() -and -not $_.Trim().StartsWith("#") } | ForEach-Object {
-            $f = $_ -split "\|"
-            [pscustomobject]@{ Name = $f[0].Trim(); Slot = $f[3].Trim(); Ctx = $f[4].Trim(); Flags = $f[5].Trim()
-                               InProfile = ($null -eq $active) -or ($active -contains $f[0].Trim()) }
-        } | Where-Object { $_.InProfile }
-    return $rows
+
+    $ServerArchive = Get-CachedArtifact "llama-cpp-windows-vulkan" $LlamaVersion
+    $ServerStage = Join-Path $Tools (".server-stage-" + [Guid]::NewGuid().ToString("N"))
+    $NewServer = Join-Path $Tools "llama.new"
+    try {
+        Expand-Archive -LiteralPath $ServerArchive -DestinationPath $ServerStage -Force
+        $Candidate = Get-ChildItem $ServerStage -Recurse -Filter "llama-server.exe" |
+            Select-Object -First 1
+        if (-not $Candidate) { throw "llama.cpp archive has no llama-server.exe" }
+        Remove-Item -LiteralPath $NewServer -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath (Split-Path -Parent $Candidate.FullName) `
+            -Destination $NewServer -Recurse -Force
+        Remove-Item -LiteralPath (Join-Path $Tools "llama") `
+            -Recurse -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $NewServer -Destination (Join-Path $Tools "llama")
+    } finally {
+        Remove-Item -LiteralPath $ServerStage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "serving toolchain ready (Vulkan/CPU scope)"
+}
+
+function Render-Serving {
+    if (-not (Test-Path -LiteralPath $Server -PathType Leaf)) {
+        throw "llama-server is missing; run serving\serve-windows.ps1 setup"
+    }
+    $Backend = if ($env:ORACLE_BACKEND) { $env:ORACLE_BACKEND } else { "vulkan" }
+    if ($Backend -notin @("vulkan", "cpu")) {
+        throw "the policy-bound Windows toolchain supports explicit vulkan or cpu only"
+    }
+    $PreviousVulkan = $env:ORACLE_VULKAN_AVAILABLE
+    $env:ORACLE_VULKAN_AVAILABLE = "1"
+    try {
+        Invoke-Serving @(
+            "render", "--root", $Root, "--server", $Server,
+            "--platform", "windows", "--backend", $Backend
+        )
+    } finally {
+        $env:ORACLE_VULKAN_AVAILABLE = $PreviousVulkan
+    }
+}
+
+function Get-ServiceArguments {
+    $Raw = @(
+        $Serving, "service-run",
+        "--root", $Root,
+        "--llama-swap", $Swap,
+        "--config", $Config,
+        "--admission", $Admission,
+        "--gateway-host", "127.0.0.1",
+        "--gateway-port", "9099",
+        "--upstream-host", "127.0.0.1",
+        "--upstream-port", "9098"
+    )
+    $Quoted = @()
+    foreach ($Value in $Raw) {
+        $Part = (& $Python $Lifecycle quote-argument --platform windows --value $Value)
+        if ($LASTEXITCODE -ne 0) { throw "could not quote Scheduled Task arguments" }
+        $Quoted += $Part.Trim()
+    }
+    return ($Quoted -join " ")
+}
+
+function Install-Service {
+    Render-Serving
+    if (-not (Test-Path -LiteralPath $Swap -PathType Leaf)) {
+        throw "llama-swap is missing; run serving\serve-windows.ps1 setup"
+    }
+    $Action = New-ScheduledTaskAction -Execute $Python `
+        -Argument (Get-ServiceArguments) -WorkingDirectory $Root
+    $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $Principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME `
+        -LogonType Interactive -RunLevel Limited
+    $Settings = New-ScheduledTaskSettingsSet -RestartCount 3 `
+        -RestartInterval (New-TimeSpan -Minutes 1) `
+        -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger `
+        -Principal $Principal -Settings $Settings -Force | Out-Null
+    & $Python $Lifecycle state own-service --root $Root `
+        --home $env:USERPROFILE --service-kind "windows-scheduled-task" `
+        --identifier $TaskName | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false `
+            -ErrorAction SilentlyContinue
+        throw "Scheduled Task ownership registration failed"
+    }
+    Write-Host "installed per-user Scheduled Task: $TaskName"
+}
+
+function Test-OwnedServiceProcess {
+    if (-not (Test-Path -LiteralPath $PidRecord -PathType Leaf)) { return $null }
+    try {
+        $Record = Get-Content -Raw -LiteralPath $PidRecord | ConvertFrom-Json
+        if ($Record.schema_version -ne 1 -or $Record.pid -notmatch "^[0-9]+$") {
+            throw "invalid service PID record"
+        }
+        $Process = Get-Process -Id ([int]$Record.pid) -ErrorAction SilentlyContinue
+        if (-not $Process) { return $null }
+        $ExpectedPython = [IO.Path]::GetFullPath($Python)
+        if (-not $Process.Path -or
+            -not $Process.Path.Equals($ExpectedPython, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "PID $($Record.pid) is not the Oracle serving Python"
+        }
+        $Cim = Get-CimInstance Win32_Process -Filter "ProcessId=$($Record.pid)"
+        if (-not $Cim -or $Cim.CommandLine -notmatch "verification[\\/]serving\.py" -or
+            $Cim.CommandLine -notmatch "service-run") {
+            throw "PID $($Record.pid) command line is not the Oracle service"
+        }
+        $Observed = [DateTimeOffset]($Process.StartTime.ToUniversalTime())
+        if ([Math]::Abs($Observed.ToUnixTimeSeconds() - [double]$Record.started_at) -gt 2) {
+            throw "PID $($Record.pid) start time does not match the service record"
+        }
+        return $Process
+    } catch {
+        throw "refusing service process operation: $($_.Exception.Message)"
+    }
+}
+
+function Stop-ServiceProcess {
+    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($Task) {
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 750
+    $Process = Test-OwnedServiceProcess
+    if ($Process) {
+        & taskkill.exe /F /T /PID $Process.Id | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "failed to stop the owned serving process tree" }
+    }
+    Write-Host "serving stopped"
+}
+
+function Show-Status {
+    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($Task) { Write-Host "service: INSTALLED ($($Task.State))" }
+    else { Write-Host "service: NOT INSTALLED" }
+    $Process = Test-OwnedServiceProcess
+    if ($Process) { Write-Host "process: OWNED pid=$($Process.Id)" }
+    else { Write-Host "process: DOWN" }
+    try {
+        $Response = Invoke-RestMethod -Uri "http://127.0.0.1:9099/health" -TimeoutSec 3
+        $Response | Out-Null
+        Write-Host "gateway: HEALTHY (127.0.0.1:9099)"
+    } catch {
+        Write-Host "gateway: DOWN"
+    }
 }
 
 switch ($Cmd) {
-    "setup" {
-        New-Item -ItemType Directory -Force -Path $Tools | Out-Null
-        $swapExe = Join-Path $Tools "llama-swap.exe"
-        Write-Host "==> llama-swap v$SwapVer (windows_amd64)"
-        $z = Get-CachedArtifact "llama-swap-windows-amd64" $SwapVer
-        $swapStage = Join-Path $Tools (".swap-stage-" + [Guid]::NewGuid().ToString("N"))
-        try {
-            Expand-Archive -LiteralPath $z -DestinationPath $swapStage -Force
-            $stagedSwap = Get-ChildItem $swapStage -Recurse -Filter "llama-swap.exe" |
-                Select-Object -First 1
-            if (-not $stagedSwap) { throw "llama-swap archive has no llama-swap.exe" }
-            Copy-Item -LiteralPath $stagedSwap.FullName -Destination ($swapExe + ".new") -Force
-            Move-Item -LiteralPath ($swapExe + ".new") -Destination $swapExe -Force
-        } finally {
-            Remove-Item -LiteralPath $swapStage -Recurse -Force -ErrorAction SilentlyContinue
+    "setup" { Install-ServingTools }
+    "render" { Render-Serving }
+    "install" { Install-Service }
+    "uninstall" {
+        Stop-ServiceProcess
+        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         }
-        $serverExe = Join-Path $Tools "llama\llama-server.exe"
-        Write-Host "==> llama.cpp $LlamaTag (win-vulkan-x64: AMD/Intel/NVIDIA GPU accel)"
-        $z = Get-CachedArtifact "llama-cpp-windows-vulkan" $LlamaTag
-        $serverStage = Join-Path $Tools (".server-stage-" + [Guid]::NewGuid().ToString("N"))
-        try {
-            Expand-Archive -LiteralPath $z -DestinationPath $serverStage -Force
-            $stagedServer = Get-ChildItem $serverStage -Recurse -Filter "llama-server.exe" |
-                Select-Object -First 1
-            if (-not $stagedServer) { throw "llama.cpp archive has no llama-server.exe" }
-            $stagedRoot = Split-Path -Parent $stagedServer.FullName
-            $newServer = Join-Path $Tools "llama.new"
-            Remove-Item -LiteralPath $newServer -Recurse -Force -ErrorAction SilentlyContinue
-            Copy-Item -LiteralPath $stagedRoot -Destination $newServer -Recurse -Force
-            Remove-Item -LiteralPath (Join-Path $Tools "llama") -Recurse -Force -ErrorAction SilentlyContinue
-            Move-Item -LiteralPath $newServer -Destination (Join-Path $Tools "llama")
-        } finally {
-            Remove-Item -LiteralPath $serverStage -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        Write-Host "serving toolchain ready under .tools\win"
-    }
-    "render" {
-        $server = Join-Path $Tools "llama\llama-server.exe"
-        $serverArg = Quote-CommandArgument $server
-        # Hardware-adaptive placement: models larger than the GPU's dedicated
-        # VRAM run pure-CPU (--n-gpu-layers 0) - on iGPU boxes Vulkan otherwise
-        # dies allocating weights or KV cache (ErrorOutOfDeviceMemory). Smaller
-        # models let llama.cpp auto-fit layers. Low-RAM boxes also cap context.
-        $vramGB = 0
-        try {
-            $vramGB = (Get-CimInstance Win32_VideoController |
-                Where-Object { $_.Name -notmatch "Virtual|Remote|Basic" } |
-                ForEach-Object { $_.AdapterRAM / 1GB } | Measure-Object -Maximum).Maximum
-        } catch {}
-        $ramGB = [Math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
-        # NOTE: the listen address is a CLI flag (--listen), not a config key.
-        $lines = @("healthCheckTimeout: 900", "logLevel: info", "", "models:")
-        $resident = @(); $big = @(); $missing = @()
-        foreach ($r in Get-ActiveModels) {
-            try {
-                $mp = Get-ValidatedModelPath $r.Name
-            } catch {
-                $missing += $r.Name
-                continue
-            }
-            $modelArg = Quote-CommandArgument $mp
-            $sizeGB = (Get-Item -LiteralPath $mp).Length / 1GB
-            $gpu = ""
-            if ($sizeGB -gt [Math]::Max(1.0, $vramGB * 0.8)) { $gpu = " --n-gpu-layers 0" }
-            # Context floor matters more than parallelism: agentic engines need
-            # >25k tokens to OPEN a session and blow past 50k mid-task (observed
-            # 53k, seed brain V14/E19 incident). llama-server SPLITS ctx across
-            # --parallel slots, so low-RAM boxes serve ONE 64k slot with q8 KV
-            # (~3 GB for a 30B GQA model) instead of parallel slots too small
-            # for any engine to use.
-            $ctx = [int]$r.Ctx
-            $par = 2
-            $kv = ""
-            if ($ramGB -lt 48 -and $r.Slot -ne "embed") {
-                $ctx = [Math]::Min($ctx, 65536)
-                $par = 1
-                # q8 KV cache halves context memory; requires flash attention
-                $kv = " -fa on --cache-type-k q8_0 --cache-type-v q8_0"
-            }
-            # --cache-reuse: chunked KV prefix reuse so slightly-divergent prompts
-            # (growing agent conversations) keep their cached prefix (measured
-            # 115s cold vs 2s cached prefill on this box)
-            $common = "--host 127.0.0.1 --port `${PORT} --jinja --cache-reuse 256$gpu$kv"
-            $ttl = 0
-            switch ($r.Slot) {
-                "embed" { $cmdline = "$serverArg $common -m $modelArg --embeddings --pooling last --ctx-size $ctx" }
-                "fast"  { $cmdline = "$serverArg $common -m $modelArg --ctx-size $ctx --parallel $par $($r.Flags)" }
-                default { $cmdline = "$serverArg $common -m $modelArg --ctx-size $ctx --parallel 1 $($r.Flags)" }
-            }
-            if ($r.InProfile -and $r.Slot -ne "big") { $resident += $r.Name }
-            else { $big += $r.Name; $ttl = 600 }   # extras: on-demand, evicted after idle
-            $lines += "  `"$($r.Name)`":"
-            $lines += "    cmd: $cmdline"
-            $lines += "    ttl: $ttl"
-            # OpenAI-compatible aliases so stock tools (Agent-MCP RAG, anything
-            # defaulting to OpenAI model names) transparently ride local models.
-            if ($r.Slot -eq "embed" -and -not $script:embedAliased) {
-                $script:embedAliased = $true
-                $lines += "    aliases:"
-                $lines += "      - text-embedding-3-large"
-                $lines += "      - text-embedding-3-small"
-                $lines += "      - text-embedding-ada-002"
-            } elseif ($r.Slot -eq "fast" -and -not $script:fastAliased) {
-                $script:fastAliased = $true
-                $lines += "    aliases:"
-                $lines += "      - gpt-4o-mini"
-                $lines += "      - gpt-4o"
-            }
-        }
-        Write-Host ("hardware: {0} GB RAM, {1:N1} GB VRAM -> big-model placement {2}" -f `
-            $ramGB, $vramGB, $(if ($vramGB -lt 8) { "CPU" } else { "GPU auto-fit" }))
-        if ($missing) { Write-Host "NOTE: not downloaded yet (skipped): $($missing -join ', ')" }
-        if (-not $resident) { Write-Host "ERROR: no resident (fast/embed) models downloaded - run the downloader first"; exit 1 }
-        $lines += ""
-        $lines += "groups:"
-        if ($big) {
-            $lines += "  big:"; $lines += "    swap: true"; $lines += "    exclusive: false"; $lines += "    members:"
-            foreach ($m in $big) { $lines += "      - `"$m`"" }
-        }
-        $lines += "  resident:"; $lines += "    swap: false"; $lines += "    exclusive: false"; $lines += "    persistent: true"; $lines += "    members:"
-        foreach ($m in $resident) { $lines += "      - `"$m`"" }
-        Write-Utf8NoBomAtomic $Rendered (($lines -join "`n") + "`n")
-        Write-Host "rendered $Rendered ($($big.Count) big, $($resident.Count) resident)"
+        Write-Host "serving Scheduled Task removed"
     }
     "start" {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath render
-        if ($LASTEXITCODE -ne 0) { exit 1 }
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $PSCommandPath stop 2>$null | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "could not safely stop the previous serving process" }
-        New-Item -ItemType Directory -Force -Path (Join-Path $Root "state"), (Join-Path $Root "logs") | Out-Null
-        $python = Join-Path $Root "env\.venv\Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $python)) {
-            $python = (Get-Command python -ErrorAction Stop).Source
+        if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
+            Install-Service
+        } else {
+            Render-Serving
         }
-        $lifecycle = Join-Path $Root "verification\lifecycle.py"
-        & $python $lifecycle state init --root $Root --home $env:USERPROFILE | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "install state initialization failed" }
-        $p = Start-Process -FilePath (Join-Path $Tools "llama-swap.exe") `
-            -ArgumentList "--config", $Rendered, "--listen", "127.0.0.1:9099" -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput (Join-Path $Root "logs\llama-swap.win.out.log") `
-            -RedirectStandardError (Join-Path $Root "logs\llama-swap.win.err.log")
-        try {
-            Write-Utf8NoBomAtomic $PidFile ("{0}`n" -f $p.Id)
-            & $python $lifecycle state own --root $Root --home $env:USERPROFILE `
-                --path $PidFile | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "PID ownership registration failed" }
-            & $python $lifecycle state own-service --root $Root `
-                --home $env:USERPROFILE --service-kind "windows-pid-file" `
-                --identifier "state/llama-swap.pid" | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "process ownership registration failed" }
-        } catch {
-            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
-            throw
-        }
-        Write-Host "llama-swap starting on http://127.0.0.1:9099 (pid $($p.Id))"
+        Start-ScheduledTask -TaskName $TaskName
+        Write-Host "serving starting through $TaskName on 127.0.0.1:9099"
     }
-    "stop" {
-        if (Test-Path $PidFile) {
-            [int]$procId = (Get-Content $PidFile -Raw).Trim()
-            $process = Get-Process -Id $procId -ErrorAction SilentlyContinue
-            if ($process) {
-                $expected = [IO.Path]::GetFullPath((Join-Path $Tools "llama-swap.exe"))
-                if (-not $process.Path -or
-                    -not $process.Path.Equals($expected, [StringComparison]::OrdinalIgnoreCase)) {
-                    throw "refusing to stop PID $procId because it is not Oracle llama-swap"
-                }
-                Stop-Process -Id $procId -Force -ErrorAction Stop
+    "stop" { Stop-ServiceProcess }
+    "restart" {
+        Stop-ServiceProcess
+        Start-ScheduledTask -TaskName $TaskName
+        Write-Host "serving restarted"
+    }
+    "status" { Show-Status }
+    "capabilities" {
+        $CapabilityArgs = @("capabilities", "--root", $Root)
+        $HasBackend = @(
+            $Rest | Where-Object {
+                $_ -eq "--backend" -or $_ -like "--backend=*"
             }
-            Remove-Item -LiteralPath $PidFile -Force -ErrorAction Stop
-            Write-Host "stopped"
-        } else { Write-Host "not running (no pidfile)" }
+        ).Count -gt 0
+        if (-not $HasBackend) {
+            $Backend = if ($env:ORACLE_BACKEND) {
+                $env:ORACLE_BACKEND
+            } else {
+                "vulkan"
+            }
+            $CapabilityArgs += @("--backend", $Backend)
+        }
+        & $Python $Serving @CapabilityArgs @Rest
+        exit $LASTEXITCODE
     }
-    "status" {
-        try {
-            Invoke-RestMethod -Uri "http://127.0.0.1:9099/health" -TimeoutSec 3 | Out-Null
-            Write-Host "llama-swap: HEALTHY (http://127.0.0.1:9099)"
-            try { (Invoke-RestMethod -Uri "http://127.0.0.1:9099/running" -TimeoutSec 3).running | ForEach-Object { Write-Host "  $($_.model) [$($_.state)]" } } catch {}
-        } catch { Write-Host "llama-swap: DOWN (serve-windows.ps1 start)" }
+    "verify" {
+        & $Python $Serving verify --root $Root @Rest
+        exit $LASTEXITCODE
     }
-    default { Write-Host "usage: serve-windows.ps1 {setup|render|start|stop|status}" }
+    default {
+        Write-Host "usage: serve-windows.ps1 {setup|render|install|uninstall|start|stop|restart|status|capabilities|verify}"
+        exit 2
+    }
 }

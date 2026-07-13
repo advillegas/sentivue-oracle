@@ -1,21 +1,21 @@
 # SentiVue Oracle
 
-A **self-contained development ecosystem**: an offline, self-governing, self-improving
-agentic workstation for quantitative research, trading-system development, and machine
-learning. It runs the full platform on **any machine**: the installers detect your
-hardware (RAM/VRAM) and suggest the right model profile — from the 512 GB Mac Studio
-flagship (`full`, ~700 GB ensemble) down to a 16 GB laptop (`micro`, ~10 GB) — and
-remap the model tiers so everything works at every size. Windows and macOS are both
-first-class: local model serving (llama-swap + llama.cpp Vulkan/Metal), both engines,
-the desk app, the vault, and the conductor run on either. Every dependency of the
-development loop — models, inference, engines, skills, data, memory, and version
-control — lives inside the ecosystem. After the one-time bootstrap, no piece of it
-needs the internet.
+A **self-contained development ecosystem** for offline quantitative research,
+trading-system development, and machine learning. Its serving layer selects from
+declared hardware profiles, validates policy-bound model snapshots, and generates a
+loopback-only runtime plan under `state/generated/`.
 
-**Engines: Claude Code, OpenCode, or Kilo Code — your choice, same models, same
-skills.** Cursor is deliberately not part of this stack. All services bind to
-`127.0.0.1`, all telemetry is disabled, and an optional firewall profile blocks
-everything else.
+Runtime certification is provisional until `oracle verify` passes the
+production-shaped compatibility, context-boundary, listener, and model-identity
+probes on the target machine. Windows and macOS expose matching
+`service`/`capabilities`/`verify`/`doctor` surfaces, but inferred CUDA, Vulkan, Metal,
+or CPU capability is never presented as proof that llama.cpp loaded or offloaded a
+model. Unsupported profiles, missing model authorities, and unsafe contexts fail
+closed.
+
+**Engines: Claude Code, OpenCode, or Kilo Code.** Cursor is deliberately not part of
+this stack. Core serving is constrained to loopback; optional components and firewall
+coverage remain platform-scoped and must be inspected on the deployed host.
 
 ---
 
@@ -37,29 +37,30 @@ everything else.
                         │ Anthropic /v1/messages            │ OpenAI /v1
                         └─────────────────┬─────────────────┘
                                           ▼
-                       llama-swap · http://127.0.0.1:9099
+                  Oracle admission gateway · http://127.0.0.1:9099
+                    llama-swap internal · 127.0.0.1:9098
                        ┌──────────────────────────────────┐
-                       │ BIG SLOT (one resident at a time) │
+                       │ BIG SLOT (exclusive admission)    │
                        │  qwen3-coder-480b   (sonnet tier) │
                        │  kimi-k2-thinking   (opus tier)   │
                        │  deepseek-v3.2      (alt reasoner)│
                        ├──────────────────────────────────┤
-                       │ FAST LANE (always resident)       │
+                       │ FAST LANE (configured resident)   │
                        │  qwen3-coder-30b    (haiku tier)  │
-                       │ EMBEDDINGS (always resident)      │
+                       │ EMBEDDINGS (configured resident)  │
                        │  qwen3-embedding-4b               │
                        └──────────────────────────────────┘
                                           ▼
-                        llama-server (llama.cpp · Metal)
-                        Mac Studio · 512 GB unified memory
+                    llama-server (explicit selected backend)
+                     target hardware validated at runtime
 ```
 
-- **llama-swap** is the single front door. It speaks both the Anthropic Messages API
-  (for Claude Code) and the OpenAI API (for OpenCode), and hot-swaps the big model by
-  requested model name. The fast lane and embeddings stay resident permanently.
-- **Tier mapping**: `opus → kimi-k2-thinking`, `sonnet → qwen3-coder-480b`,
-  `haiku → qwen3-coder-30b`. Background/subagent traffic rides the fast lane so the
-  big slot never thrashes.
+- The **Oracle admission gateway** rejects requests that exceed the generated
+  per-slot context or safe concurrency before forwarding to llama-swap. The verifier
+  checks OpenAI, Anthropic, tools, JSON, embeddings, and cold/warm behavior.
+- **Tier mapping** is profile-specific. The full profile maps to the large models
+  shown above; reduced profiles intentionally collapse tiers only to models present
+  in the same policy-bound snapshot.
 - **ECC** (pinned, curated subset) provides harness discipline: continuous learning,
   worktree lifecycle, orchestration commands, language rule packs. Cloud-dependent
   operators are stripped by the installer.
@@ -73,7 +74,8 @@ everything else.
 install         guided installer (checkpointed phases — re-run to resume)
 bin/oracle      single CLI entry point, symlinked onto PATH by the installer
 bootstrap/      setup phases, model downloads, doctor, verify, harden, uninstall, packaging
-serving/        model manifest + profile, rendered llama-swap config, launchd service
+serving/        model declarations + thin Windows Scheduled Task/macOS launchd twins
+verification/   shared resource, profile, admission, render, and probe implementation
 engines/        claude-code/ and opencode/ configs, subagents, conventions
 harness/ecc/    pinned ECC version + curated-subset installer
 skills/         10 domain skill packs (engine-agnostic SKILL.md)
@@ -164,8 +166,8 @@ bash install
 ```
 
 The installer walks through: preflight (hardware/disk checks) → policy-bound offline
-bootstrap → **model profile choice** (`full` ~700 GB · `coder` ~315 GB · `minimal`
-~40 GB smoke test) → promoted model-snapshot validation → serve → offline
+bootstrap → **model profile choice** (`full`, `coder`, `mid`, `lite`, or `micro`) →
+promoted model-snapshot validation → serve → offline
 verification. Every phase is checkpointed; re-running `bash install` resumes after a
 failure. Reduced profiles remap the opus/sonnet tiers only onto authority-validated
 models.
@@ -177,7 +179,9 @@ oracle claude        # interactive session, Claude Code engine
 oracle opencode      # interactive session, OpenCode engine
 oracle kilo          # interactive session, Kilo Code engine (TUI)
 oracle mission conductor/missions/example.toml claude 24   # engine: claude|opencode|kilo
-oracle status        # service + models + ledger tail
+oracle service status
+oracle capabilities  # inferred capability versus loaded/offloaded evidence
+oracle verify        # production-shaped read-only runtime probes
 oracle doctor        # full diagnostic with suggested fixes
 oracle harden        # software air gap (pf egress block); undo: oracle harden off
 ```
@@ -194,7 +198,7 @@ purge requires a second confirmation flag.)
 | Wire protocol | Anthropic `/v1/messages` → llama-swap | OpenAI `/v1` → llama-swap | OpenAI `/v1` → llama-swap |
 | Offline posture | hardened via env (`DISABLE_TELEMETRY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, autoupdater off) | no account, no telemetry; models.dev cache warmed at bootstrap | no account needed for local providers; telemetry off, sharing disabled in generated config |
 | Harness quality | strongest agentic harness; ECC-native | very close; reads the same `AGENTS.md`, skills, MCP config | OpenCode harness + Kilo modes; same config surface as the IDE side panel |
-| Conductor support | `claude -p` headless | `opencode run` headless | `kilo run --auto` headless |
+| Conductor support | `claude -p` headless | `opencode run` headless | platform-scoped; not certified by the shared serving verifier |
 
 All three engines read the same skills, subagents, conventions (`AGENTS.md`), and MCP
 connectors. Kilo's CLI and IDE panel explicitly select the same generated
@@ -266,26 +270,6 @@ construction:
   discovery entirely offline. Fetching the archives is a standing envoy job
   whenever storage planning allows.
 
-## The frontend: oracle-desk (native Rust, no web)
-
-`oracle desk` — the platform's face. A single-binary Rust desktop app (`desk/`,
-egui/eframe: native rendering, **no webview, no Electron, no browser**) that talks
-to the ecosystem through its real interfaces:
-
-- **Chat** — drives Claude Code headlessly over its structured `stream-json`
-  protocol (streamed replies, visible tool calls, multi-turn via session resume)
-  and OpenCode via `run --continue`; engine switcher in the toolbar. Every token
-  is generated by the local models.
-- **Missions** — reads the plain-text state directly from disk (the files are the
-  API): live mission state, one-click APPROVE countersigns, envoy queue, ledger,
-  clickable reports.
-- **Models** — llama-swap health + resident/running models over localhost.
-- **Vault** — repository inventory and this repo's sync currency.
-
-First run builds it with the separately provisioned, pinned Rust toolchain
-(`cargo build --release`, once); after that it is a native binary. The
-desktop-shortcut menu has it as option `0`.
-
 ## Supporting UIs (all localhost)
 
 - **`oracle ide`** — the Cursor-like IDE: **VSCodium** (telemetry-free VS Code — the
@@ -351,19 +335,18 @@ Full detail in [`docs/SECURITY.md`](docs/SECURITY.md). In brief:
 
 - No Cursor, no hosted APIs, no accounts. Models, inference, data, and memory never
   leave the machine.
-- Every service binds `127.0.0.1` only (llama-swap, llama-server, Postgres, PostgREST,
-  Studio, Gitea, the console, the Agent-MCP viewer).
+- The generated serving gateway and llama-swap bind only to `127.0.0.1`; `oracle
+  verify` fails when listener evidence is missing or non-loopback. Optional services
+  retain their own platform-scoped checks.
 - Telemetry, error reporting, and auto-update are disabled for all engines. **Kilo Code
   ships as a hardened in-repo fork** ([`engines/kilo/HARDENING.md`](engines/kilo/HARDENING.md)):
   gateway, login, cloud sharing/ingest, remote relay, feedback, Sentry/PostHog/OpenTelemetry,
   update + marketplace checks, remote model discovery, external autocomplete, and remote
   config schemas are all defanged.
-- **Default-deny egress** — `oracle harden` blocks all non-loopback traffic for every
-  appliance process class (editor, extension hosts, agent engines, inference servers,
-  agent-spawned package managers, MCP servers, agent-launched containers). Loopback stays
-  up, so local models keep working; the internet does not. Windows Firewall per-program
-  rules on Windows, a pf anchor on macOS. Reversible; the envoy window is the one
-  controlled exception.
+- **Default-deny egress** is opt-in and platform-specific. Inspection must show
+  complete target coverage before Windows per-program rules are treated as effective;
+  macOS uses a global pf anchor. Task development and verification do not activate or
+  modify host firewall state.
 - **Verify it:** `oracle audit` (full sweep — binds, kill-switches, secret hygiene,
   hardening presence; fails on any break), `oracle verify-egress` (empirical: internet
   blocked, loopback intact), `oracle doctor` (security-posture section).
@@ -378,16 +361,17 @@ Full detail in [`docs/SECURITY.md`](docs/SECURITY.md). In brief:
 
 | Model | Role | Quant | ~Size | Notes |
 |---|---|---|---|---|
-| Qwen3-Coder-480B-A35B | primary coder (sonnet) | UD-Q4_K_XL | 276 GB | daily driver, 131k ctx |
-| Kimi-K2-Thinking | deep reasoner (opus) | UD-Q2_K_XL | 381 GB | planning/architecture, 98k ctx |
+| Qwen3-Coder-480B-A35B | primary coder (sonnet) | UD-Q4_K_XL | 276 GB | manifest nominal context 131k |
+| Kimi-K2-Thinking | deep reasoner (opus) | UD-Q2_K_XL | 381 GB | manifest nominal context 98k |
 | DeepSeek-V3.2 | alt reasoner | UD-Q3_K_XL | 320 GB | swap-in alternative |
 | Qwen3-Coder-30B-A3B | fast lane (haiku) | Q8_0 | 33 GB | subagents, background, always on |
 | Qwen3-Embedding-4B | embeddings | Q8_0 | 5 GB | RAG/docs, always on |
 
-Big-slot models swap on demand (~1–2 min load from SSD); fast lane + embeddings are
-permanently resident. Default GPU wired limit is raised to 448 GB by the installer
-(`iogpu.wired_limit_mb`), leaving headroom for the OS. `serving/models.profile`
-(written by the installer) controls which rows are active on this machine.
+Big-slot models are configured to swap; fast and embedding models are configured as
+resident. Actual loaded backend, offloaded layers, warm state, and usable context are
+runtime evidence, not conclusions drawn from these nominal declarations.
+`serving/models.profile` (written by an installer when a reduced profile is selected)
+controls which rows are active on a machine.
 
 ## The self-governing loop
 
@@ -454,10 +438,8 @@ permanently resident. Default GPU wired limit is raised to 448 GB by the install
 
 ## Honest expectations
 
-A 512 GB Mac Studio running Kimi K2 / Qwen3-Coder-480B is roughly frontier-minus-one:
-excellent on well-specified engineering tasks, weaker on very long autonomous horizons.
-The harness exists precisely to close that gap: long-horizon failures are mostly
-process failures (goal drift, context rot, repeated dead ends, false completion), so
-the protocol + auditors + failure memory attack them mechanically rather than hoping
-the model stays sharp for 24 hours. Prompt prefill is the bottleneck on Apple Silicon —
-keep contexts tight and let the fast lane absorb background traffic.
+The repository does not certify frontier parity, model quality, or a particular target
+host. Those conclusions require benchmark results plus a target-host runtime report.
+The harness addresses process failures such as goal drift, context loss, repeated dead
+ends, and false completion; it does not turn inferred hardware capability or nominal
+model context into measured serving performance.

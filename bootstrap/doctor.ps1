@@ -120,20 +120,103 @@ if (Test-Path $PolicyPath) {
 }
 
 Write-Host "== serving =="
-$up = $false
-try { Invoke-RestMethod -Uri "http://127.0.0.1:9099/health" -TimeoutSec 3 | Out-Null; $up = $true } catch {}
-if ($up) { OK "llama-swap healthy (http://127.0.0.1:9099)" }
-else { MEH "llama-swap DOWN" "start with: bin\oracle.ps1 serve" }
-if (Test-Path "serving\tiers.env") {
-    foreach ($line in Get-Content "serving\tiers.env") {
-        $kv = $line -split "=", 2
-        if ($kv.Count -ne 2 -or -not $kv[1].Trim()) { continue }
-        $name = $kv[1].Trim()
-        $gguf = Get-ChildItem "models\$name" -Recurse -Filter "*.gguf" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($gguf) { OK "tier $($kv[0].Trim()) -> $name (on disk)" }
-        else { BAD "tier $($kv[0].Trim()) -> $name has no gguf" "bin\oracle.ps1 models; then connectors\ide\sync-models.ps1" }
+Write-Host "read-only shared profile/resource/admission evidence:"
+if ($python) {
+    $ServingCore = Join-Path $Root "verification\serving.py"
+    $CapabilityText = (& $python $ServingCore capabilities --root $Root 2>&1 | Out-String).Trim()
+    $CapabilityExit = $LASTEXITCODE
+    if ($CapabilityExit -eq 0) {
+        try {
+            $Capability = $CapabilityText | ConvertFrom-Json
+            MEH ("selected backend: {0} (inferred from {1})" -f `
+                $Capability.selected_backend, $Capability.capability_source) `
+                "loaded_backend and offloaded_layers require runtime evidence"
+            if ($Capability.loaded_backend) {
+                OK ("loaded backend: {0}; offloaded layers: {1}" -f `
+                    $Capability.loaded_backend, $Capability.offloaded_layers)
+            } else {
+                MEH "loaded backend evidence unavailable" `
+                    "capability is not proof that llama.cpp loaded or offloaded"
+            }
+            if ($Capability.admission -and $Capability.admission.models) {
+                foreach ($Property in $Capability.admission.models.PSObject.Properties) {
+                    $Model = $Property.Value
+                    OK ("{0}: advertised_context={1}, slot_context={2}, parallel={3}" -f `
+                        $Property.Name, $Model.advertised_context, `
+                        $Model.slot_context, $Model.parallel_slots)
+                }
+            } else {
+                MEH "no generated admission plan" "bin\oracle.ps1 service install"
+            }
+            if ($Capability.admission -and $Capability.admission.tiers) {
+                $TierValues = @(
+                    $Capability.admission.tiers.OPUS_MODEL,
+                    $Capability.admission.tiers.SONNET_MODEL,
+                    $Capability.admission.tiers.HAIKU_MODEL
+                )
+                $DistinctTiers = @($TierValues | Sort-Object -Unique)
+                $TierSummary = "opus={0}, sonnet={1}, haiku={2}" -f `
+                    $TierValues[0], $TierValues[1], $TierValues[2]
+                if ($DistinctTiers.Count -lt 3) {
+                    MEH "tier collapse: $TierSummary" `
+                        "reduced profiles may collapse tiers intentionally"
+                } else {
+                    OK "tier mapping is distinct: $TierSummary"
+                }
+            } else {
+                MEH "tier collapse evidence unavailable" `
+                    "generate an admission plan before certifying tiers"
+            }
+        } catch {
+            BAD "shared capabilities output is invalid" `
+                "python verification\serving.py capabilities --root `"$Root`""
+        }
+    } else {
+        BAD "shared capability inspection failed: $CapabilityText" `
+            "fix profile/resource declarations before serving"
     }
-} else { MEH "serving\tiers.env missing" "run connectors\ide\sync-models.ps1" }
+
+    $VerifyText = (& $python $ServingCore verify --root $Root 2>&1 | Out-String).Trim()
+    $VerifyExit = $LASTEXITCODE
+    $VerifyPayload = $null
+    try {
+        $VerifyPayload = $VerifyText | ConvertFrom-Json
+    } catch {
+        MEH "runtime probe evidence is unreadable" `
+            "run bin\oracle.ps1 verify for details"
+    }
+    if ($VerifyPayload) {
+        $LoadedProbe = @(
+            $VerifyPayload.results |
+                Where-Object { $_.name -eq "loaded_backend" } |
+                Select-Object -First 1
+        )
+        if ($LoadedProbe.Count -eq 1 -and
+            $LoadedProbe[0].status -eq "PASS") {
+            OK ("loaded backend {0}; offloaded layers {1}" -f `
+                $LoadedProbe[0].evidence.loaded_backend,
+                $LoadedProbe[0].evidence.offloaded_layers)
+        } elseif ($LoadedProbe.Count -eq 1) {
+            MEH "loaded backend evidence is provisional" `
+                $LoadedProbe[0].reason
+        } else {
+            MEH "loaded backend evidence is unavailable" `
+                "the runtime did not return the loaded_backend probe"
+        }
+    }
+    if ($VerifyExit -eq 0) {
+        OK "production-shaped serving verify probes PASS"
+    } elseif ($VerifyExit -eq 2) {
+        MEH "production-shaped serving verify is PROVISIONAL" `
+            "headless engine flows or runtime evidence were skipped"
+    } else {
+        MEH "production-shaped serving verify is not green" `
+            "service may be down/unprovisioned; inspect: $VerifyText"
+    }
+} else {
+    BAD "shared serving checks need pinned Python" `
+        "provision the VERSIONS.lock Python trust root"
+}
 
 Write-Host "== engines config =="
 $ccSkills = (Get-ChildItem "engines\claude-code\home\skills" -ErrorAction SilentlyContinue | Measure-Object).Count

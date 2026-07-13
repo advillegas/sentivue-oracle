@@ -1,76 +1,177 @@
 #!/usr/bin/env bash
-# llama-swap as a user launchd service (KeepAlive => service-level self-healing).
+# service.sh - macOS launchd twin for policy-bound local serving.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LABEL="com.sentivue.llamaswap"
+LABEL="com.sentivue.oracle-serving"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-CONFIG="$ROOT/serving/llama-swap.rendered.yaml"
-BIN="$ROOT/.tools/bin/llama-swap"
-LOGDIR="$ROOT/logs"
+GENERATED="$ROOT/state/generated/serving"
+GENERATED_PLIST="$GENERATED/$LABEL.plist"
+CONFIG="$GENERATED/llama-swap.yaml"
+ADMISSION="$GENERATED/admission.json"
+PID_RECORD="$GENERATED/service.pid.json"
+SERVER="$ROOT/.tools/bin/llama-server"
+SWAP="$ROOT/.tools/bin/llama-swap"
+SERVING="$ROOT/verification/serving.py"
+LIFECYCLE="$ROOT/verification/lifecycle.py"
 
-write_plist() {
-  local temporary
-  mkdir -p "$LOGDIR" "$(dirname "$PLIST")"
-  temporary="$(mktemp "${PLIST}.tmp.XXXXXX")"
-  if ! cat > "$temporary" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array>
-    <string>$BIN</string>
-    <string>--config</string>
-    <string>$CONFIG</string>
-    <string>--listen</string>
-    <string>127.0.0.1:9099</string>
-  </array>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$LOGDIR/llama-swap.out.log</string>
-  <key>StandardErrorPath</key><string>$LOGDIR/llama-swap.err.log</string>
-</dict></plist>
-EOF
-  then
-    rm -f "$temporary"
-    return 1
-  fi
-  if ! mv -f "$temporary" "$PLIST"; then
-    rm -f "$temporary"
-    return 1
-  fi
+find_python() {
+  local candidate
+  for candidate in "$ROOT/env/.venv/bin/python" python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 &&
+       "$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' \
+         >/dev/null 2>&1; then
+      command -v "$candidate"
+      return 0
+    fi
+  done
+  return 1
 }
 
-case "${1:-}" in
-  start)
-    [[ -f "$CONFIG" ]] || { echo "ERROR: $CONFIG missing — run 'make render' first"; exit 1; }
-    [[ -x "$BIN"    ]] || { echo "ERROR: $BIN missing — run 'make install' first"; exit 1; }
-    write_plist
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
-    echo "llama-swap starting on http://127.0.0.1:9099 (logs: $LOGDIR)"
-    ;;
-  stop)
-    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-    echo "llama-swap stopped"
-    ;;
-  restart)
-    "$0" stop; sleep 1; "$0" start
-    ;;
-  status)
-    if curl -sf -m 5 "http://127.0.0.1:9099/health" >/dev/null 2>&1; then
-      echo "llama-swap: HEALTHY"
-      curl -sf -m 5 "http://127.0.0.1:9099/running" 2>/dev/null || true
-      echo
-    else
-      echo "llama-swap: DOWN"
+PYTHON="$(find_python)" || {
+  echo "ERROR: Python 3.12 or newer is required for shared serving validation." >&2
+  exit 127
+}
+
+render() {
+  [[ -x "$SERVER" ]] || {
+    echo "ERROR: policy-bound llama-server is missing: $SERVER" >&2
+    return 1
+  }
+  local backend="${ORACLE_BACKEND:-metal}"
+  [[ "$backend" == "metal" || "$backend" == "cpu" ]] || {
+    echo "ERROR: the macOS toolchain supports explicit metal or cpu only." >&2
+    return 1
+  }
+  "$PYTHON" "$SERVING" render --root "$ROOT" --server "$SERVER" \
+    --platform posix --backend "$backend"
+}
+
+write_generated_plist() {
+  mkdir -p "$GENERATED" "$ROOT/logs"
+  "$PYTHON" "$SERVING" launchd-plist \
+    --output "$GENERATED_PLIST" --label "$LABEL" --python "$PYTHON" \
+    --root "$ROOT" --llama-swap "$SWAP" --config "$CONFIG" \
+    --admission "$ADMISSION" --stdout "$ROOT/logs/serving.launchd.out.log" \
+    --stderr "$ROOT/logs/serving.launchd.err.log" >/dev/null
+}
+
+install_service() {
+  [[ "$(uname -s)" == "Darwin" ]] || {
+    echo "ERROR: durable service install is macOS launchd scoped." >&2
+    return 1
+  }
+  [[ -x "$SWAP" ]] || {
+    echo "ERROR: policy-bound llama-swap is missing: $SWAP" >&2
+    return 1
+  }
+  render
+  write_generated_plist
+  mkdir -p "$(dirname "$PLIST")"
+  local temporary
+  temporary="$(mktemp "${PLIST}.tmp.XXXXXX")"
+  trap 'rm -f "$temporary"' RETURN
+  cp "$GENERATED_PLIST" "$temporary"
+  mv -f "$temporary" "$PLIST"
+  trap - RETURN
+  "$PYTHON" "$LIFECYCLE" state own --root "$ROOT" --home "$HOME" \
+    --path "$PLIST" >/dev/null
+  "$PYTHON" "$LIFECYCLE" state own-service --root "$ROOT" --home "$HOME" \
+    --service-kind launchd-user --identifier "$LABEL" >/dev/null
+  echo "installed launchd service: $LABEL"
+}
+
+stop_service() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+  fi
+  # The PID record is diagnostic evidence only. launchd owns termination; this
+  # wrapper never kills an unverified or PID-reused process.
+  if [[ -f "$PID_RECORD" ]]; then
+    local pid
+    pid="$("$PYTHON" -c \
+      'import json,sys; print(int(json.load(open(sys.argv[1], encoding="utf-8"))["pid"]))' \
+      "$PID_RECORD" 2>/dev/null || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      sleep 1
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "ERROR: owned launchd job stopped but PID $pid remains; refusing blind kill." >&2
+        return 1
+      fi
     fi
-    echo "--- memory ledger ---"
-    tail -n 5 "$ROOT/memory/LEDGER.md" 2>/dev/null || echo "(no ledger yet)"
+  fi
+  echo "serving stopped"
+}
+
+start_service() {
+  [[ "$(uname -s)" == "Darwin" ]] || {
+    echo "ERROR: durable service start is macOS launchd scoped." >&2
+    return 1
+  }
+  if [[ ! -f "$PLIST" ]]; then
+    install_service
+  else
+    render
+    write_generated_plist
+    if ! cmp -s "$GENERATED_PLIST" "$PLIST"; then
+      install_service
+    fi
+  fi
+  launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  echo "serving starting through launchd on 127.0.0.1:9099"
+}
+
+status_service() {
+  if [[ "$(uname -s)" == "Darwin" ]] &&
+     launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    echo "service: INSTALLED/RUNNING ($LABEL)"
+  elif [[ -f "$PLIST" ]]; then
+    echo "service: INSTALLED/STOPPED ($LABEL)"
+  else
+    echo "service: NOT INSTALLED"
+  fi
+  if curl -sf -m 3 "http://127.0.0.1:9099/health" >/dev/null 2>&1; then
+    echo "gateway: HEALTHY (127.0.0.1:9099)"
+  else
+    echo "gateway: DOWN"
+  fi
+  [[ -f "$PID_RECORD" ]] && echo "pid evidence: $PID_RECORD" || true
+}
+
+case "${1:-status}" in
+  render) render ;;
+  install) install_service ;;
+  uninstall)
+    stop_service
+    rm -f "$PLIST"
+    echo "launchd service removed"
+    ;;
+  start) start_service ;;
+  stop) stop_service ;;
+  restart)
+    stop_service
+    start_service
+    ;;
+  status) status_service ;;
+  capabilities)
+    shift
+    backend_args=()
+    has_backend=0
+    for value in "$@"; do
+      [[ "$value" == "--backend" || "$value" == --backend=* ]] && has_backend=1
+    done
+    if [[ $has_backend -eq 0 ]]; then
+      backend_args=(--backend "${ORACLE_BACKEND:-metal}")
+    fi
+    exec "$PYTHON" "$SERVING" capabilities --root "$ROOT" \
+      "${backend_args[@]}" "$@"
+    ;;
+  verify)
+    shift
+    exec "$PYTHON" "$SERVING" verify --root "$ROOT" "$@"
     ;;
   *)
-    echo "usage: service.sh {start|stop|restart|status}"; exit 1
+    echo "usage: service.sh {render|install|uninstall|start|stop|restart|status|capabilities|verify}" >&2
+    exit 2
     ;;
 esac

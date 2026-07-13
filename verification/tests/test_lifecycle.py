@@ -1295,10 +1295,14 @@ def test_platform_generated_config_writers_use_same_directory_atomic_replacement
     windows = (REPO_ROOT / "serving/serve-windows.ps1").read_text(
         encoding="utf-8"
     )
+    shared = (REPO_ROOT / "verification/serving.py").read_text(encoding="utf-8")
 
-    assert 'mktemp "${OUT}.tmp.' in render
+    assert "serving/service.sh" in render
     assert 'mktemp "${PLIST}.tmp.' in service
-    assert "Write-Utf8NoBomAtomic $Rendered" in windows
+    assert "verification\\serving.py" in windows
+    assert "atomic_write_text(output" in shared
+    assert "atomic_write_text(" in shared
+    assert "metadata_path" in shared
 
 
 def test_model_downloaders_resolve_revision_and_record_local_hashes() -> None:
@@ -1316,10 +1320,11 @@ def test_model_downloaders_resolve_revision_and_record_local_hashes() -> None:
     assert "record-model" in powershell_source
     assert "tree/main" not in powershell_source
     assert "resolve/main" not in powershell_source
-    render_source = (REPO_ROOT / "bootstrap/render-config.sh").read_text(
+    render_source = (REPO_ROOT / "verification/serving.py").read_text(
         encoding="utf-8"
     )
-    assert "read -r name repo include slot ctx flags revision" in render_source
+    assert "def parse_manifest(" in render_source
+    assert "validate_policy_bound_models" in render_source
 
 
 def test_review_trust_rejects_self_asserted_hash_url_and_content(
@@ -1651,7 +1656,7 @@ def test_review_apply_uninstall_stops_owned_service_before_files(
     assert state["owned_services"] == []
 
 
-def test_review_windows_process_ownership_is_narrowly_registered(
+def test_review_windows_service_ownership_is_narrowly_registered(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "install"
@@ -1660,24 +1665,27 @@ def test_review_windows_process_ownership_is_narrowly_registered(
 
     lifecycle.register_owned_service(
         root,
-        kind="windows-pid-file",
-        identifier="state/llama-swap.pid",
+        kind="windows-scheduled-task",
+        identifier="SentiVueOracleServing",
     )
     with pytest.raises(LifecycleError, match="unsafe owned service"):
         lifecycle.register_owned_service(
             root,
-            kind="windows-pid-file",
-            identifier="../victim.pid",
+            kind="windows-scheduled-task",
+            identifier="UnrelatedTask",
         )
 
     state = json.loads((root / ".install-state/state.json").read_text(encoding="utf-8"))
     assert state["owned_services"] == [
-        {"identifier": "state/llama-swap.pid", "kind": "windows-pid-file"}
+        {
+            "identifier": "SentiVueOracleServing",
+            "kind": "windows-scheduled-task",
+        }
     ]
     serving = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
-    assert 'own-service --root $Root' in serving
-    assert '--service-kind "windows-pid-file"' in serving
-    assert "Write-Utf8NoBomAtomic $PidFile" in serving
+    assert "state own-service --root $Root" in serving
+    assert '--service-kind "windows-scheduled-task"' in serving
+    assert '--identifier $TaskName' in serving
 
 
 def test_review_generated_engine_configs_are_selected_by_launchers() -> None:
@@ -1888,11 +1896,14 @@ def test_review_windows_rendered_arguments_round_trip_command_line_to_argv() -> 
 def test_review_renderers_use_platform_argument_quoting() -> None:
     posix = (REPO_ROOT / "bootstrap/render-config.sh").read_text(encoding="utf-8")
     windows = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
+    shared = (REPO_ROOT / "verification/serving.py").read_text(encoding="utf-8")
 
-    assert "quote-argument --platform posix" in posix
+    assert "serving/service.sh" in posix
     assert "-m $ROOT/$path" not in posix
-    assert "quote-argument --platform windows" in windows
+    assert "verification\\serving.py" in windows
     assert "$server $common -m $mp" not in windows
+    assert "shlex.join(argv)" in shared
+    assert "subprocess.list2cmdline(list(argv))" in shared
 
 
 def model_authority_fixture(
@@ -2090,11 +2101,14 @@ def test_second_review_only_policy_bound_model_files_can_be_loaded(
 def test_second_review_renderers_resolve_only_validated_model_paths() -> None:
     posix = (REPO_ROOT / "bootstrap/render-config.sh").read_text(encoding="utf-8")
     windows = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
+    shared = (REPO_ROOT / "verification/serving.py").read_text(encoding="utf-8")
 
-    assert "model-path --model-name" in posix
+    assert "serving/service.sh" in posix
     assert "find \"models/$1\"" not in posix
-    assert "model-path --model-name" in windows
+    assert "verification\\serving.py" in windows
     assert "Get-ChildItem $modelDir -Filter \"*.gguf\"" not in windows
+    assert "validate_policy_bound_models" in shared
+    assert "snapshots[name].paths" in shared
 
 
 @pytest.mark.parametrize(

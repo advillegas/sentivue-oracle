@@ -4484,6 +4484,11 @@ def _validate_owned_service(raw: Mapping[str, Any]) -> dict[str, str]:
         return {"kind": kind, "identifier": identifier}
     if kind == "windows-pid-file" and identifier == "state/llama-swap.pid":
         return {"kind": kind, "identifier": identifier}
+    if (
+        kind == "windows-scheduled-task"
+        and identifier == "SentiVueOracleServing"
+    ):
+        return {"kind": kind, "identifier": identifier}
     raise LifecycleError("unsafe owned service identifier in install state")
 
 
@@ -4553,6 +4558,24 @@ def _stop_owned_service(service: Mapping[str, str], root: Path | None = None) ->
         if root is None:
             raise LifecycleError("Windows process stop requires an installation root")
         _stop_owned_windows_process(root, service["identifier"])
+        return
+    if service["kind"] == "windows-scheduled-task":
+        if os.name != "nt":
+            raise LifecycleError("cannot safely remove an owned Scheduled Task here")
+        executable = shutil.which("schtasks.exe") or shutil.which("schtasks")
+        if not executable:
+            raise LifecycleError("schtasks is required to remove the owned service")
+        identifier = service["identifier"]
+        present = _run([executable, "/Query", "/TN", identifier])
+        if present.returncode != 0:
+            return
+        _run([executable, "/End", "/TN", identifier])
+        deleted = _run([executable, "/Delete", "/TN", identifier, "/F"])
+        if deleted.returncode != 0:
+            detail = deleted.stderr or deleted.stdout or "schtasks delete failed"
+            raise LifecycleError(
+                f"could not remove owned Scheduled Task {identifier}: {detail.strip()}"
+            )
         return
     if service["kind"] != "launchd-user":
         raise LifecycleError("unsafe owned service identifier in install state")

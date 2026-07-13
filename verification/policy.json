@@ -564,12 +564,12 @@
     {
       "path": "bootstrap/render-config.sh",
       "platform": "posix",
-      "reason": "Renders the POSIX llama-swap service configuration."
+      "reason": "Provides a POSIX compatibility entry point for the shared serving renderer."
     },
     {
       "path": "bootstrap/verify-offline.sh",
-      "platform": "macos",
-      "reason": "Runs macOS launchd and pf runtime probes."
+      "platform": "posix",
+      "reason": "Provides a POSIX compatibility entry point for shared read-only serving probes."
     },
     {
       "path": "connectors/gitea/setup-gitea.sh",

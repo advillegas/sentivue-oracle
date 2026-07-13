@@ -113,57 +113,86 @@ else
   bad "platform scope policy unavailable" "restore verification/policy.json and install jq"
 fi
 
-echo "== models (per profile) =="
-while IFS='|' read -r name _ _ slot _; do
-  name="$(echo "$name" | xargs)"; slot="$(echo "$slot" | xargs)"; [[ -z "$name" ]] && continue
-  if [[ -f serving/models.profile ]] && ! grep -qx "$name" serving/models.profile; then continue; fi
-  f=$(find "models/$name" -name "*.gguf" -type f 2>/dev/null | head -1)
-  [[ -n "$f" ]] && ok "$name ($slot): $(du -sh "models/$name" 2>/dev/null | cut -f1)" \
-    || bad "$name ($slot) not downloaded" "oracle models"
-done < <(grep -Ev '^\s*(#|$)' serving/models.manifest)
-
 echo "== serving =="
-[[ -f serving/llama-swap.rendered.yaml ]] && ok "rendered config" || bad "config not rendered" "oracle serve"
-# tier map must point at models that exist on disk (a missing tier model silently
-# degrades every engine to whatever is left — the "acting like 2022" failure)
-if [[ -f serving/tiers.env ]]; then
-  while IFS='=' read -r k v; do
-    [[ "$k" == *_MODEL && -n "$v" ]] || continue
-    if [[ -n "$(find "models/$v" -name '*.gguf' -type f 2>/dev/null | head -1)" ]]; then
-      ok "tier $k -> $v (on disk)"
+echo "read-only shared profile/resource/admission evidence:"
+if [[ -n "$python_bin" ]]; then
+  capability_json="$("$python_bin" verification/serving.py capabilities \
+    --root "$ROOT" 2>&1)"
+  capability_exit=$?
+  if [[ $capability_exit -eq 0 ]]; then
+    selected_backend="$(printf '%s' "$capability_json" | jq -r '.selected_backend')"
+    capability_source="$(printf '%s' "$capability_json" | jq -r '.capability_source')"
+    loaded_backend="$(printf '%s' "$capability_json" | jq -r '.loaded_backend // empty')"
+    meh "selected backend: $selected_backend (inferred from $capability_source)" \
+      "loaded/offloaded evidence is reported separately"
+    if [[ -n "$loaded_backend" ]]; then
+      offloaded="$(printf '%s' "$capability_json" | jq -r '.offloaded_layers')"
+      ok "loaded backend: $loaded_backend; offloaded layers: $offloaded"
     else
-      bad "tier $k -> $v has no gguf on disk" "oracle models; then bash connectors/ide/sync-models.sh"
+      meh "loaded backend evidence unavailable" \
+        "capability is not proof that llama.cpp loaded or offloaded"
     fi
-  done < serving/tiers.env
-else
-  meh "serving/tiers.env missing" "run ./install or connectors/ide/sync-models.sh"
-fi
-HAIKU="$(sed -n 's/^HAIKU_MODEL=//p' serving/tiers.env 2>/dev/null | head -1)"
-HAIKU="${HAIKU:-qwen3-coder-30b}"
-if curl -sf -m 5 http://127.0.0.1:9099/health >/dev/null 2>&1; then
-  ok "llama-swap healthy"
-  # loopback-only binding is a privacy invariant, not an assumption — verify it
-  if lsof -nP -iTCP:9099 -sTCP:LISTEN 2>/dev/null | grep -qE '(\*|0\.0\.0\.0|\[::\]):9099'; then
-    bad "llama-swap listening on ALL interfaces" "service must use --listen 127.0.0.1:9099 (serving/service.sh)"
+    while IFS=$'\t' read -r model advertised slot parallel; do
+      [[ -n "$model" ]] || continue
+      ok "$model: advertised_context=$advertised, slot_context=$slot, parallel=$parallel"
+    done < <(printf '%s' "$capability_json" | jq -r \
+      '.admission.models // {} | to_entries[] |
+       [.key, .value.advertised_context, .value.slot_context,
+        .value.parallel_slots] | @tsv')
+    if ! printf '%s' "$capability_json" | jq -e '.admission.models' >/dev/null; then
+      meh "no generated admission plan" "oracle service install"
+    fi
+    tier_count="$(printf '%s' "$capability_json" | jq -r \
+      '[.admission.tiers // {} | to_entries[].value] | unique | length')"
+    tier_summary="$(printf '%s' "$capability_json" | jq -c \
+      '.admission.tiers // {}')"
+    if [[ "$tier_count" -eq 0 ]]; then
+      meh "tier collapse evidence unavailable" \
+        "generate an admission plan before certifying tiers"
+    elif [[ "$tier_count" -lt 3 ]]; then
+      meh "tier collapse: $tier_summary" \
+        "reduced profiles may collapse tiers intentionally"
+    else
+      ok "tier mapping is distinct: $tier_summary"
+    fi
   else
-    ok "llama-swap bound to loopback only"
+    bad "shared capability inspection failed: $capability_json" \
+      "fix profile/resource declarations before serving"
   fi
-  r=$(curl -sf -m 60 http://127.0.0.1:9099/v1/chat/completions -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$HAIKU\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"say OK\"}]}" \
-    | jq -r '.choices[0].message.content' 2>/dev/null)
-  [[ -n "$r" && "$r" != "null" ]] && ok "fast lane inference ($HAIKU): $r" || bad "fast lane not answering" "oracle restart; tail logs/llama-swap.err.log"
-  # production-shaped probe: agent sessions open with >25k tokens; a serving stack
-  # that only answers hello-sized prompts is unusable no matter how healthy it looks
-  bigprompt=$(printf 'lorem ipsum dolor sit amet %.0s' $(seq 1 5200))
-  code=$(curl -s -o /tmp/oracle-ctx-probe.json -w '%{http_code}' -m 300 \
-    http://127.0.0.1:9099/v1/chat/completions -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$HAIKU\",\"max_tokens\":4,\"messages\":[{\"role\":\"user\",\"content\":\"$bigprompt\"}]}")
-  if [[ "$code" == "200" ]]; then ok "agent-scale context probe (~26k tokens) accepted"
-  else bad "agent-scale context probe rejected (HTTP $code): $(head -c 120 /tmp/oracle-ctx-probe.json 2>/dev/null)" \
-           "context split across --parallel slots? one 32k slot beats two 8k slots"
+
+  verify_json="$("$python_bin" verification/serving.py verify \
+    --root "$ROOT" 2>&1)"
+  verify_exit=$?
+  if printf '%s' "$verify_json" | jq -e '.results' >/dev/null 2>&1; then
+    loaded_status="$(printf '%s' "$verify_json" | jq -r \
+      '[.results[] | select(.name == "loaded_backend")][0].status // "MISSING"')"
+    loaded_reason="$(printf '%s' "$verify_json" | jq -r \
+      '[.results[] | select(.name == "loaded_backend")][0].reason // "probe absent"')"
+    if [[ "$loaded_status" == "PASS" ]]; then
+      loaded_backend="$(printf '%s' "$verify_json" | jq -r \
+        '[.results[] | select(.name == "loaded_backend")][0].evidence.loaded_backend')"
+      offloaded="$(printf '%s' "$verify_json" | jq -r \
+        '[.results[] | select(.name == "loaded_backend")][0].evidence.offloaded_layers')"
+      ok "loaded backend $loaded_backend; offloaded layers $offloaded"
+    elif [[ "$loaded_status" == "MISSING" ]]; then
+      meh "loaded backend evidence is unavailable" \
+        "the runtime did not return the loaded_backend probe"
+    else
+      meh "loaded backend evidence is provisional" "$loaded_reason"
+    fi
+  fi
+  if [[ $verify_exit -eq 0 ]]; then
+    ok "production-shaped serving verify probes PASS"
+  elif [[ $verify_exit -eq 2 ]]; then
+    meh "production-shaped serving verify is PROVISIONAL" \
+      "headless engine flows or runtime evidence were skipped"
+  else
+    meh "production-shaped serving verify is not green" \
+      "service may be down/unprovisioned; inspect shared verify output"
   fi
 else
-  bad "llama-swap not responding" "oracle serve; then tail logs/llama-swap.err.log"
+  bad "shared serving checks need pinned Python" \
+    "provision the VERSIONS.lock Python trust root"
 fi
 
 echo "== engines =="

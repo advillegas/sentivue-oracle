@@ -14,6 +14,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ALLOWLIST="$ROOT/connectors/net-allowlist.txt"
 INBOX="$ROOT/incoming/$(date +%F)"
 PROV="$ROOT/incoming/PROVENANCE.md"
+SERVING="$ROOT/verification/serving.py"
+PYTHON_BIN="${ORACLE_PYTHON:-$ROOT/env/.venv/bin/python}"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3 || command -v python || true)"
+[[ -n "$PYTHON_BIN" ]] || { echo "REFUSED: Python is required for output confinement"; exit 1; }
 mkdir -p "$INBOX"
 [[ -f "$PROV" ]] || echo "# Download provenance — every artifact the envoy ever fetched." > "$PROV"
 
@@ -31,16 +35,21 @@ record() { # record <what> <source> <path>
 case "${1:-}" in
   --pip)
     pkg="${2:?usage: envoy-fetch --pip <package==version>}"
-    [[ "$pkg" == *"=="* ]] || { echo "REFUSED: pin an exact version (pkg==x.y.z)"; exit 1; }
+    [[ "$pkg" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] ||
+      { echo "REFUSED: use one portable exact pin (pkg==x.y.z)"; exit 1; }
     mkdir -p "$INBOX/pip"
-    pip download --no-deps --dest "$INBOX/pip" "$pkg"
+    PIP_INDEX_URL="https://pypi.org/simple" PIP_EXTRA_INDEX_URL="" \
+      pip download --no-deps --index-url "https://pypi.org/simple" \
+        --dest "$INBOX/pip" -- "$pkg"
     for f in "$INBOX/pip"/*; do record "pip:$pkg" "pypi.org" "$f"; done
     ;;
   --npm)
     pkg="${2:?usage: envoy-fetch --npm <package@version>}"
-    [[ "$pkg" == *"@"* ]] || { echo "REFUSED: pin an exact version (pkg@x.y.z)"; exit 1; }
+    [[ "$pkg" =~ ^(@[A-Za-z0-9._-]+/)?[A-Za-z0-9][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] ||
+      { echo "REFUSED: use one portable exact pin (pkg@x.y.z)"; exit 1; }
     mkdir -p "$INBOX/npm"
-    ( cd "$INBOX/npm" && npm pack "$pkg" --silent )
+    ( cd "$INBOX/npm" && npm pack --ignore-scripts \
+        --registry="https://registry.npmjs.org" --silent -- "$pkg" )
     for f in "$INBOX/npm"/*.tgz; do record "npm:$pkg" "registry.npmjs.org" "$f"; done
     ;;
   --*)
@@ -49,6 +58,8 @@ case "${1:-}" in
   *)
     url="${1:?usage: envoy-fetch <https-url> [outname]}"
     out="${2:-$(basename "${url%%\?*}")}"
+    out="$("$PYTHON_BIN" "$SERVING" safe-output --value "$out")" ||
+      { echo "REFUSED: unsafe output name"; exit 1; }
     # --- structural fetch-only guarantees ---
     [[ "$url" == https://* ]]      || { echo "REFUSED: https only"; exit 1; }
     [[ "$url" != *"?"* ]]          || { echo "REFUSED: query strings are an exfiltration channel"; exit 1; }
@@ -61,8 +72,14 @@ case "${1:-}" in
     done < "$ALLOWLIST"
     [[ $ok -eq 1 ]] || { echo "REFUSED: $host is not in connectors/net-allowlist.txt"; exit 1; }
     dest="$INBOX/$out"
-    curl -fL --proto '=https' --request GET --max-filesize 4294967296 \
-         --max-time 1800 --retry 3 -o "$dest" "$url"
+    [[ ! -e "$dest" ]] || { echo "REFUSED: output already exists: $dest"; exit 1; }
+    temporary="$(mktemp "$INBOX/.envoy-download.XXXXXX")"
+    trap 'rm -f "$temporary"' EXIT
+    curl -f --proto '=https' --request GET --max-redirs 0 \
+         --max-filesize 4294967296 --max-time 1800 --retry 3 \
+         -o "$temporary" "$url"
+    mv -f "$temporary" "$dest"
+    trap - EXIT
     record "url" "$host" "$dest"
     ;;
 esac

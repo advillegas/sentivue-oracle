@@ -17,8 +17,12 @@ function Has($path, $pat) { return [bool](Select-String -Path (Join-Path $Root $
 Write-Host "=== SentiVue Oracle security sweep ==============================`n"
 
 Write-Host "== service bind addresses (must be loopback) =="
-if (Has "serving\serve-windows.ps1" '--listen", "127\.0\.0\.1:9099|--listen 127\.0\.0\.1') { OK "llama-swap listens on 127.0.0.1:9099" } else { BAD "llama-swap listen address not pinned to loopback" }
-if (Has "serving\serve-windows.ps1" '--host 127\.0\.0\.1') { OK "llama-server bound to 127.0.0.1" } else { BAD "llama-server host not loopback" }
+if (Has "verification\serving.py" 'require_loopback\(gateway_host\)') {
+    OK "shared gateway and llama-swap runtime binds fail closed on non-loopback"
+} else { BAD "shared serving runtime does not enforce loopback" }
+if (Has "verification\serving.py" 'require_loopback\(host\)') {
+    OK "generated llama-server host is validated as loopback"
+} else { BAD "shared renderer does not validate llama-server loopback" }
 $nonLoop = Select-String -Path (Join-Path $Root "connectors\supabase\docker-compose.yml") -Pattern '^\s*-\s*"(?!127\.0\.0\.1)[0-9]' -ErrorAction SilentlyContinue
 if ($nonLoop) { BAD "supabase publishes a non-loopback port: $($nonLoop.Line.Trim())" } else { OK "supabase ports all bound to 127.0.0.1" }
 if (Has "conductor\console.py" 'ThreadingHTTPServer\(\("127\.0\.0\.1"') { OK "console bound to 127.0.0.1" } else { BAD "console bind not loopback" }
