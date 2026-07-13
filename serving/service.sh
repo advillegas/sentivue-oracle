@@ -37,13 +37,18 @@ render() {
     echo "ERROR: policy-bound llama-server is missing: $SERVER" >&2
     return 1
   }
-  local backend="${ORACLE_BACKEND:-metal}"
+  local backend="${ORACLE_BACKEND:-cpu}"
   [[ "$backend" == "metal" || "$backend" == "cpu" ]] || {
     echo "ERROR: the macOS toolchain supports explicit metal or cpu only." >&2
     return 1
   }
   "$PYTHON" "$SERVING" render --root "$ROOT" --server "$SERVER" \
-    --platform posix --backend "$backend"
+    --llama-swap "$SWAP" --platform posix --backend "$backend"
+}
+
+sync_engine_configs() {
+  ORACLE_ROOT="$ROOT" ORACLE_HOME="$HOME" \
+    bash "$ROOT/connectors/ide/sync-models.sh"
 }
 
 write_generated_plist() {
@@ -55,6 +60,28 @@ write_generated_plist() {
     --stderr "$ROOT/logs/serving.launchd.err.log" >/dev/null
 }
 
+verify_owned_launchd() {
+  [[ -f "$PLIST" ]] || return 1
+  [[ -f "$GENERATED_PLIST" ]] || {
+    echo "ERROR: refusing launchd operation: Oracle ownership descriptor is missing." >&2
+    return 1
+  }
+  cmp -s "$GENERATED_PLIST" "$PLIST" || {
+    echo "ERROR: refusing launchd operation: $PLIST is not the Oracle descriptor." >&2
+    return 1
+  }
+}
+
+publish_plist() {
+  mkdir -p "$(dirname "$PLIST")"
+  local temporary
+  temporary="$(mktemp "${PLIST}.tmp.XXXXXX")"
+  trap 'rm -f "$temporary"' RETURN
+  cp "$GENERATED_PLIST" "$temporary"
+  mv -f "$temporary" "$PLIST"
+  trap - RETURN
+}
+
 install_service() {
   [[ "$(uname -s)" == "Darwin" ]] || {
     echo "ERROR: durable service install is macOS launchd scoped." >&2
@@ -64,15 +91,13 @@ install_service() {
     echo "ERROR: policy-bound llama-swap is missing: $SWAP" >&2
     return 1
   }
+  if [[ -f "$PLIST" ]]; then
+    verify_owned_launchd
+  fi
   render
+  sync_engine_configs
   write_generated_plist
-  mkdir -p "$(dirname "$PLIST")"
-  local temporary
-  temporary="$(mktemp "${PLIST}.tmp.XXXXXX")"
-  trap 'rm -f "$temporary"' RETURN
-  cp "$GENERATED_PLIST" "$temporary"
-  mv -f "$temporary" "$PLIST"
-  trap - RETURN
+  publish_plist
   "$PYTHON" "$LIFECYCLE" state own --root "$ROOT" --home "$HOME" \
     --path "$PLIST" >/dev/null
   "$PYTHON" "$LIFECYCLE" state own-service --root "$ROOT" --home "$HOME" \
@@ -82,7 +107,11 @@ install_service() {
 
 stop_service() {
   if [[ "$(uname -s)" == "Darwin" ]]; then
-    launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    if [[ -f "$PLIST" ]] ||
+       launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+      verify_owned_launchd
+      launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
+    fi
   fi
   # The PID record is diagnostic evidence only. launchd owns termination; this
   # wrapper never kills an unverified or PID-reused process.
@@ -110,10 +139,12 @@ start_service() {
   if [[ ! -f "$PLIST" ]]; then
     install_service
   else
+    verify_owned_launchd
     render
+    sync_engine_configs
     write_generated_plist
     if ! cmp -s "$GENERATED_PLIST" "$PLIST"; then
-      install_service
+      publish_plist
     fi
   fi
   launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
@@ -122,8 +153,15 @@ start_service() {
 }
 
 status_service() {
+  local running=0
   if [[ "$(uname -s)" == "Darwin" ]] &&
      launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
+    running=1
+  fi
+  if [[ -f "$PLIST" || $running -eq 1 ]]; then
+    verify_owned_launchd || return 1
+  fi
+  if [[ $running -eq 1 ]]; then
     echo "service: INSTALLED/RUNNING ($LABEL)"
   elif [[ -f "$PLIST" ]]; then
     echo "service: INSTALLED/STOPPED ($LABEL)"
@@ -161,7 +199,7 @@ case "${1:-status}" in
       [[ "$value" == "--backend" || "$value" == --backend=* ]] && has_backend=1
     done
     if [[ $has_backend -eq 0 ]]; then
-      backend_args=(--backend "${ORACLE_BACKEND:-metal}")
+      backend_args=(--backend "${ORACLE_BACKEND:-cpu}")
     fi
     exec "$PYTHON" "$SERVING" capabilities --root "$ROOT" \
       "${backend_args[@]}" "$@"

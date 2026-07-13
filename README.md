@@ -90,10 +90,11 @@ memory/         plain-text ledger + state (runtime, gitignored)
 **Double-click installers** live on the repo's [Releases page]
 (https://github.com/advillegas/sentivue-oracle/releases) — no commands needed:
 
-- **Mac:** `SentiVue-Oracle-Installer-<ver>.command` — double-click; a Terminal
-  wizard prompts through install location → tools → model profile (full/coder/
-  minimal) → downloads → verification. Downloaded `.command` files need one
-  right-click → Open (Gatekeeper) the first time.
+- **Mac:** `SentiVue-Oracle-Installer-<ver>.command` — double-click; the Terminal
+  installer validates the selected declared profile (`full`, `coder`, `mid`,
+  `lite`, or `micro`) before tools, model acquisition, and verification.
+  Downloaded `.command` files need one right-click → Open (Gatekeeper) the first
+  time.
 - **Windows:** `SentiVue-Oracle-Setup-<ver>.cmd` — double-click; a console wizard
   prompts through location → git vault setup → optional model pre-download.
 

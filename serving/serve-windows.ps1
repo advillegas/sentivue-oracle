@@ -126,19 +126,42 @@ function Render-Serving {
     if (-not (Test-Path -LiteralPath $Server -PathType Leaf)) {
         throw "llama-server is missing; run serving\serve-windows.ps1 setup"
     }
-    $Backend = if ($env:ORACLE_BACKEND) { $env:ORACLE_BACKEND } else { "vulkan" }
+    if (-not (Test-Path -LiteralPath $Swap -PathType Leaf)) {
+        throw "llama-swap is missing; run serving\serve-windows.ps1 setup"
+    }
+    $SwapArchive = Get-CachedArtifact "llama-swap-windows-amd64" `
+        (Get-LockedVersion "LLAMA_SWAP_VERSION")
+    $ServerArchive = Get-CachedArtifact "llama-cpp-windows-vulkan" `
+        (Get-LockedVersion "LLAMA_CPP_WIN_TAG")
+    Invoke-Serving @(
+        "verify-binary", "--installed", $Swap,
+        "--archive", $SwapArchive, "--member", "llama-swap.exe"
+    )
+    Invoke-Serving @(
+        "verify-binary-tree", "--installed-directory", $NativeDir,
+        "--archive", $ServerArchive, "--anchor-member", "llama-server.exe"
+    )
+    $Backend = if ($env:ORACLE_BACKEND) { $env:ORACLE_BACKEND } else { "cpu" }
     if ($Backend -notin @("vulkan", "cpu")) {
         throw "the policy-bound Windows toolchain supports explicit vulkan or cpu only"
     }
     $PreviousVulkan = $env:ORACLE_VULKAN_AVAILABLE
-    $env:ORACLE_VULKAN_AVAILABLE = "1"
+    $env:ORACLE_VULKAN_AVAILABLE = if ($Backend -eq "vulkan") { "1" } else { "0" }
     try {
         Invoke-Serving @(
             "render", "--root", $Root, "--server", $Server,
+            "--llama-swap", $Swap,
             "--platform", "windows", "--backend", $Backend
         )
     } finally {
         $env:ORACLE_VULKAN_AVAILABLE = $PreviousVulkan
+    }
+}
+
+function Sync-EngineConfigs {
+    & (Join-Path $Root "connectors\ide\sync-models.ps1") -Root $Root
+    if ($LASTEXITCODE -ne 0) {
+        throw "engine model configuration synchronization failed"
     }
 }
 
@@ -163,11 +186,35 @@ function Get-ServiceArguments {
     return ($Quoted -join " ")
 }
 
+function Test-OwnedScheduledTask {
+    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if (-not $Task) { return $null }
+    $Actions = @($Task.Actions)
+    if ($Actions.Count -ne 1) {
+        throw "refusing Scheduled Task operation: unexpected action count"
+    }
+    $Action = $Actions[0]
+    $ExpectedPython = [IO.Path]::GetFullPath($Python)
+    $ObservedPython = [IO.Path]::GetFullPath([string]$Action.Execute)
+    if (-not $ObservedPython.Equals(
+            $ExpectedPython, [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$Action.Arguments -ne (Get-ServiceArguments) -or
+        [IO.Path]::GetFullPath([string]$Action.WorkingDirectory) -ne
+            [IO.Path]::GetFullPath($Root)) {
+        throw "refusing Scheduled Task operation: task identity is not Oracle-owned"
+    }
+    return $Task
+}
+
 function Install-Service {
     Render-Serving
+    Sync-EngineConfigs
     if (-not (Test-Path -LiteralPath $Swap -PathType Leaf)) {
         throw "llama-swap is missing; run serving\serve-windows.ps1 setup"
     }
+    $Existing = Test-OwnedScheduledTask
+    $Existing | Out-Null
     $Action = New-ScheduledTaskAction -Execute $Python `
         -Argument (Get-ServiceArguments) -WorkingDirectory $Root
     $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -219,7 +266,7 @@ function Test-OwnedServiceProcess {
 }
 
 function Stop-ServiceProcess {
-    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $Task = Test-OwnedScheduledTask
     if ($Task) {
         Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     }
@@ -233,7 +280,7 @@ function Stop-ServiceProcess {
 }
 
 function Show-Status {
-    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    $Task = Test-OwnedScheduledTask
     if ($Task) { Write-Host "service: INSTALLED ($($Task.State))" }
     else { Write-Host "service: NOT INSTALLED" }
     $Process = Test-OwnedServiceProcess
@@ -254,7 +301,7 @@ switch ($Cmd) {
     "install" { Install-Service }
     "uninstall" {
         Stop-ServiceProcess
-        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        if (Test-OwnedScheduledTask) {
             Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         }
         Write-Host "serving Scheduled Task removed"
@@ -263,7 +310,9 @@ switch ($Cmd) {
         if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
             Install-Service
         } else {
+            Test-OwnedScheduledTask | Out-Null
             Render-Serving
+            Sync-EngineConfigs
         }
         Start-ScheduledTask -TaskName $TaskName
         Write-Host "serving starting through $TaskName on 127.0.0.1:9099"
@@ -271,6 +320,9 @@ switch ($Cmd) {
     "stop" { Stop-ServiceProcess }
     "restart" {
         Stop-ServiceProcess
+        Test-OwnedScheduledTask | Out-Null
+        Render-Serving
+        Sync-EngineConfigs
         Start-ScheduledTask -TaskName $TaskName
         Write-Host "serving restarted"
     }
@@ -286,7 +338,7 @@ switch ($Cmd) {
             $Backend = if ($env:ORACLE_BACKEND) {
                 $env:ORACLE_BACKEND
             } else {
-                "vulkan"
+                "cpu"
             }
             $CapabilityArgs += @("--backend", $Backend)
         }

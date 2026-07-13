@@ -117,7 +117,7 @@ echo "== serving =="
 echo "read-only shared profile/resource/admission evidence:"
 if [[ -n "$python_bin" ]]; then
   capability_json="$("$python_bin" verification/serving.py capabilities \
-    --root "$ROOT" 2>&1)"
+    --root "$ROOT" --backend "${ORACLE_BACKEND:-cpu}" 2>&1)"
   capability_exit=$?
   if [[ $capability_exit -eq 0 ]]; then
     selected_backend="$(printf '%s' "$capability_json" | jq -r '.selected_backend')"
@@ -174,6 +174,8 @@ if [[ -n "$python_bin" ]]; then
       offloaded="$(printf '%s' "$verify_json" | jq -r \
         '[.results[] | select(.name == "loaded_backend")][0].evidence.offloaded_layers')"
       ok "loaded backend $loaded_backend; offloaded layers $offloaded"
+    elif [[ "$loaded_status" == "FAIL" ]]; then
+      bad "loaded backend evidence contradicts the serving plan" "$loaded_reason"
     elif [[ "$loaded_status" == "MISSING" ]]; then
       meh "loaded backend evidence is unavailable" \
         "the runtime did not return the loaded_backend probe"
@@ -187,7 +189,7 @@ if [[ -n "$python_bin" ]]; then
     meh "production-shaped serving verify is PROVISIONAL" \
       "headless engine flows or runtime evidence were skipped"
   else
-    meh "production-shaped serving verify is not green" \
+    bad "production-shaped serving verify failed" \
       "service may be down/unprovisioned; inspect shared verify output"
   fi
 else
@@ -206,10 +208,13 @@ grep -q DISABLE_TELEMETRY engines/claude-code/home/settings.json 2>/dev/null \
 echo "== git vault (offline private remote) =="
 if git remote get-url vault >/dev/null 2>&1; then
   ok "vault remote -> $(git remote get-url vault)"
-  git fetch --quiet vault 2>/dev/null || true
-  behind=$(git rev-list --count vault/main..main 2>/dev/null || echo "?")
-  if [[ "$behind" == "0" ]]; then ok "vault main is current"
-  else meh "vault main behind by $behind commit(s)" "oracle vault sync"; fi
+  if git show-ref --verify --quiet refs/remotes/vault/main; then
+    behind=$(git rev-list --count vault/main..main 2>/dev/null || echo "?")
+    if [[ "$behind" == "0" ]]; then ok "cached vault/main is current"
+    else meh "cached vault/main behind by $behind commit(s)" "oracle vault sync"; fi
+  else
+    meh "cached vault/main is unavailable" "oracle vault sync"
+  fi
 else
   meh "no vault remote configured" "oracle vault init"
 fi

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
+import inspect
 import json
 import os
 import plistlib
@@ -9,8 +11,10 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -949,16 +953,21 @@ def admission_fields(
 
 def test_offline_verifier_uses_production_shaped_api_payloads_and_all_protocols() -> None:
     requests: list[tuple[str, str, dict[str, object] | None]] = []
+    running_calls = 0
 
     def transport(
         method: str, path: str, payload: dict[str, object] | None
     ) -> HttpResponse:
+        nonlocal running_calls
         requests.append((method, path, payload))
         if path == "/health":
             return HttpResponse(200, {"status": "ok"}, {}, 5)
         if path == "/v1/models":
             return HttpResponse(200, {"data": [{"id": "chat"}, {"id": "embed"}]}, {}, 5)
         if path == "/running":
+            running_calls += 1
+            if running_calls == 1:
+                return HttpResponse(200, {"running": []}, {}, 5)
             return HttpResponse(
                 200,
                 {
@@ -975,6 +984,15 @@ def test_offline_verifier_uses_production_shaped_api_payloads_and_all_protocols(
                 5,
             )
         if path == "/v1/embeddings":
+            if payload and str(payload.get("input", "")).startswith(
+                "oversize-embedding "
+            ):
+                return HttpResponse(
+                    413,
+                    {"error": "rejected before upstream"},
+                    {"X-Oracle-Admission": "rejected"},
+                    1,
+                )
             return HttpResponse(200, {"data": [{"embedding": [0.0] * 128}]}, {}, 8)
         if path == "/v1/messages":
             return HttpResponse(200, {"content": [{"type": "text", "text": "ORACLE-OK"}]}, {}, 9)
@@ -1021,7 +1039,10 @@ def test_offline_verifier_uses_production_shaped_api_payloads_and_all_protocols(
                 )
             return HttpResponse(
                 200,
-                {"choices": [{"message": {"content": "ORACLE-OK"}}]},
+                {
+                    "choices": [{"message": {"content": "ORACLE-OK"}}],
+                    "usage": {"prompt_tokens": 25000},
+                },
                 {},
                 9,
             )
@@ -1757,3 +1778,1051 @@ def test_docs_mark_runtime_certification_provisional_and_remove_dead_claims() ->
     assert "both first-class" not in readme.lower()
     assert "native desktop app" not in readme.lower()
     assert "hardware-adaptive placement" not in platform_map.lower()
+
+
+def test_review_token_admission_is_a_recursive_utf8_upper_bound() -> None:
+    payload: dict[str, object] = {
+        "model": "chat",
+        "max_tokens": 257,
+        "system": "policy:\n" + ("![]{}();λ🙂" * 400),
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "x:=[]{}();\n" * 700,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "run",
+                            "arguments": json.dumps(
+                                {"unicode": "🙂" * 500, "code": "a+=1;" * 900}
+                            ),
+                        },
+                    }
+                ],
+            }
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "run",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "opaque": {
+                                "type": "string",
+                                "description": "~!@#$%^&*()" * 500,
+                            }
+                        },
+                    },
+                },
+            }
+        ],
+        "unknown_protocol_extension": {
+            "nested": [{"punctuation": "::::;;;;" * 600}]
+        },
+    }
+
+    estimate = serving.estimate_request_tokens(payload)
+    serialized_bytes = len(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+
+    assert estimate.prompt_tokens + estimate.tool_schema_tokens >= serialized_bytes
+    assert estimate.output_tokens == 257
+
+
+def test_review_token_admission_keeps_ordinary_25k_request_usable() -> None:
+    estimate = serving.estimate_request_tokens(
+        {
+            "model": "chat",
+            "messages": [{"role": "user", "content": "a" * 25000}],
+            "max_tokens": 128,
+        }
+    )
+
+    assert 25000 <= estimate.prompt_tokens < 30000
+    with pytest.raises(ServingError, match="JSON|binary|unsupported"):
+        serving.estimate_request_tokens(
+            {"messages": [{"role": "user", "content": b"\x00\xff"}]}
+        )
+
+
+def test_review_context_reduces_parallelism_to_preserve_25k_envelope() -> None:
+    plan = serving.plan_context(
+        model_name="chat",
+        nominal_context_tokens=65536,
+        requested_parallel=2,
+        model_memory_mib=8 * GIB,
+        usable_memory_mib=48 * GIB,
+        prompt_tool_overhead_tokens=4096,
+        output_reserve_tokens=4096,
+        kv_mib_per_token=0.0625,
+        minimum_advertised_context=25000,
+    )
+
+    assert plan.parallel_slots == 1
+    assert plan.advertised_context_tokens >= 25000
+
+
+def test_review_backend_placement_fits_ram_vram_and_renders_finite_offload() -> None:
+    assert hasattr(serving, "plan_model_placement")
+    assert hasattr(serving, "PlacementPlan")
+    resources = ResourceSnapshot(
+        system_total_mib=32 * GIB,
+        system_available_mib=30 * GIB,
+        backend=Backend.CUDA,
+        accelerator_total_mib=12 * GIB,
+        accelerator_available_mib=11 * GIB,
+        accelerator_shared=False,
+        capability_source="fixture exact VRAM",
+    )
+    placement = serving.plan_model_placement(
+        model_name="chat",
+        model_memory_mib=16 * GIB,
+        layer_mib=(512,) * 32,
+        kv_runtime_mib=1024,
+        resources=resources,
+        requested_backend="cuda",
+    )
+
+    assert placement.backend == Backend.CUDA
+    assert 0 < placement.offloaded_layers < 999
+    assert placement.ram_required_mib <= (
+        resources.system_available_mib
+        - resources.os_reserve_mib
+        - resources.runtime_reserve_mib
+    )
+    assert placement.vram_required_mib <= (
+        resources.accelerator_available_mib - resources.accelerator_reserve_mib
+    )
+    assert placement.split_mode == "layer"
+
+
+def test_review_unknown_vulkan_vram_cannot_justify_gpu_placement() -> None:
+    assert hasattr(serving, "plan_model_placement")
+    resources = ResourceSnapshot(
+        system_total_mib=32 * GIB,
+        system_available_mib=30 * GIB,
+        backend=Backend.VULKAN,
+        capability_source="Vulkan memory unknown",
+    )
+
+    fallback = serving.plan_model_placement(
+        model_name="chat",
+        model_memory_mib=8 * GIB,
+        layer_mib=None,
+        kv_runtime_mib=1024,
+        resources=resources,
+        requested_backend="auto",
+    )
+    assert fallback.backend == Backend.CPU
+    assert fallback.offloaded_layers == 0
+    with pytest.raises(ServingError, match="VRAM|placement"):
+        serving.plan_model_placement(
+            model_name="chat",
+            model_memory_mib=8 * GIB,
+            layer_mib=None,
+            kv_runtime_mib=1024,
+            resources=resources,
+            requested_backend="vulkan",
+        )
+
+
+def test_review_service_freshness_rechecks_models_config_resources_and_binaries(
+    tmp_path: Path,
+) -> None:
+    assert hasattr(serving, "validate_runtime_freshness")
+    root = tmp_path / "runtime trust"
+    root.mkdir()
+    revision = "a" * 40
+    put(
+        root,
+        "serving/profiles.conf",
+        "micro | 8 | chat,embed | chat | chat | chat | ~1 GB\n",
+    )
+    put(
+        root,
+        "serving/models.manifest",
+        f"chat | example/chat | *.gguf | fast | 65536 | | {revision}\n"
+        f"embed | example/embed | *.gguf | embed | 8192 | | {revision}\n",
+    )
+    put(root, "serving/models.profile", "chat\nembed\n")
+    put(
+        root,
+        "serving/tiers.env",
+        "OPUS_MODEL=chat\nSONNET_MODEL=chat\nHAIKU_MODEL=chat\n",
+    )
+    policy_bound_fixture(root)
+    server = put(root, ".tools/bin/llama-server", b"trusted server")
+    llama_swap = put(root, ".tools/bin/llama-swap", b"trusted swap")
+    resources = ResourceSnapshot(
+        system_total_mib=48 * GIB,
+        system_available_mib=44 * GIB,
+        backend=Backend.CPU,
+        capability_source="fixture",
+    )
+    runtime = serving.prepare_runtime(
+        root=root,
+        server_path=server,
+        llama_swap_path=llama_swap,
+        platform="posix",
+        resources=resources,
+        requested_backend="cpu",
+    )
+
+    serving.validate_runtime_freshness(
+        root=root,
+        config=runtime.rendered.path,
+        admission_path=runtime.rendered.metadata_path,
+        llama_swap=llama_swap,
+        resources=resources,
+    )
+
+    model_path = root / "models/chat/chat.gguf"
+    model_path.write_bytes(b"changed GGUF")
+    with pytest.raises(ServingError, match="model|digest|size"):
+        serving.validate_runtime_freshness(
+            root=root,
+            config=runtime.rendered.path,
+            admission_path=runtime.rendered.metadata_path,
+            llama_swap=llama_swap,
+            resources=resources,
+        )
+    model_path.write_bytes(b"GGUF chat fixture")
+
+    original_config = runtime.rendered.path.read_bytes()
+    runtime.rendered.path.write_bytes(original_config + b"# changed\n")
+    with pytest.raises(ServingError, match="config"):
+        serving.validate_runtime_freshness(
+            root=root,
+            config=runtime.rendered.path,
+            admission_path=runtime.rendered.metadata_path,
+            llama_swap=llama_swap,
+            resources=resources,
+        )
+    runtime.rendered.path.write_bytes(original_config)
+
+    low_resources = replace(resources, system_available_mib=4 * GIB)
+    with pytest.raises(ServingError, match="resource|memory|RAM"):
+        serving.validate_runtime_freshness(
+            root=root,
+            config=runtime.rendered.path,
+            admission_path=runtime.rendered.metadata_path,
+            llama_swap=llama_swap,
+            resources=low_resources,
+        )
+
+    llama_swap.write_bytes(b"changed swap")
+    with pytest.raises(ServingError, match="binary|llama-swap"):
+        serving.validate_runtime_freshness(
+            root=root,
+            config=runtime.rendered.path,
+            admission_path=runtime.rendered.metadata_path,
+            llama_swap=llama_swap,
+            resources=resources,
+        )
+
+
+def test_review_installed_runtime_binary_must_match_policy_archive(
+    tmp_path: Path,
+) -> None:
+    assert hasattr(serving, "validate_binary_against_archive")
+    archive = tmp_path / "runtime.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("runtime/bin/llama-server.exe", b"trusted executable")
+    installed = put(tmp_path, "tools/llama-server.exe", b"trusted executable")
+
+    serving.validate_binary_against_archive(
+        installed=installed,
+        archive=archive,
+        member_name="llama-server.exe",
+    )
+    installed.write_bytes(b"changed executable")
+    with pytest.raises(ServingError, match="provenance|archive|binary"):
+        serving.validate_binary_against_archive(
+            installed=installed,
+            archive=archive,
+            member_name="llama-server.exe",
+        )
+
+
+def test_review_runtime_evidence_checks_cold_warm_backend_offload_and_all_listeners() -> None:
+    parameters = inspect.signature(serving.run_offline_probes).parameters
+    assert "planned_placements" in parameters
+    assert "listener_inspector" in parameters
+    running_calls = 0
+
+    def transport(
+        method: str, path: str, payload: dict[str, object] | None
+    ) -> HttpResponse:
+        nonlocal running_calls
+        del method, payload
+        if path == "/health":
+            return HttpResponse(200, {"status": "ok"}, {}, 1)
+        if path == "/v1/models":
+            return HttpResponse(
+                200, {"data": [{"id": "chat"}, {"id": "embed"}]}, {}, 1
+            )
+        if path == "/running":
+            running_calls += 1
+            if running_calls == 1:
+                return HttpResponse(200, {"running": []}, {}, 1)
+            return HttpResponse(
+                200,
+                {
+                    "running": [
+                        {
+                            "model": "chat",
+                            "state": "ready",
+                            "backend": "cpu",
+                            "offloaded_layers": 0,
+                            "port": 19001,
+                        }
+                    ]
+                },
+                {},
+                1,
+            )
+        return HttpResponse(503, {"error": "fixture unavailable"}, {}, 1)
+
+    results = serving.run_offline_probes(
+        transport=transport,
+        contexts={"chat": production_plan()},
+        chat_model="chat",
+        embedding_model="embed",
+        listeners=(),
+        listener_inspector=lambda port: {
+            9099: ("127.0.0.1:9099",),
+            9098: ("0.0.0.0:9098",),
+            19001: ("127.0.0.1:19001",),
+        }.get(port, ()),
+        expected_listener_ports={"public": 9099, "internal": 9098},
+        planned_placements={
+            "chat": {"backend": "cuda", "offloaded_layers": 8}
+        },
+        engine_runner=None,
+    )
+
+    by_name = {result.name: result for result in results}
+    assert by_name["cold_warm_state"].status == PASS
+    assert by_name["loaded_backend"].status == FAIL
+    assert by_name["loopback_binding"].status == FAIL
+    assert running_calls >= 2
+
+
+def test_review_gateway_rejects_redirect_without_credential_forwarding() -> None:
+    leak_calls: list[str] = []
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/health":
+                self.send_response(302)
+                self.send_header("Location", "/leak")
+                self.end_headers()
+                return
+            leak_calls.append(self.headers.get("Authorization", ""))
+            body = b'{"leaked":true}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    gateway = serving.create_admission_server(
+        host="127.0.0.1",
+        port=0,
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        contexts={"chat": production_plan()},
+        evidence={},
+    )
+    gateway_thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+    gateway_thread.start()
+    try:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", gateway.server_port, timeout=5
+        )
+        connection.request(
+            "GET", "/health", headers={"Authorization": "Bearer must-not-follow"}
+        )
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        assert response.status == 503
+        assert leak_calls == []
+    finally:
+        gateway.shutdown()
+        upstream.shutdown()
+        gateway.server_close()
+        upstream.server_close()
+
+
+def test_review_envoy_fetch_rejects_local_redirect_behaviorally(
+    tmp_path: Path,
+) -> None:
+    assert hasattr(serving, "fetch_url_no_redirect")
+    redirect_hits: list[str] = []
+
+    class RedirectHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            if self.path == "/artifact":
+                self.send_response(302)
+                self.send_header("Location", "/redirected")
+                self.end_headers()
+                return
+            redirect_hits.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"unexpected")
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    output = tmp_path / "artifact.bin"
+    try:
+        with pytest.raises(ServingError, match="redirect|HTTP 302"):
+            serving.fetch_url_no_redirect(
+                url=f"http://127.0.0.1:{server.server_port}/artifact",
+                output=output,
+                allowed_hosts={"127.0.0.1"},
+                allowed_schemes={"http"},
+                timeout=5,
+                maximum_bytes=1024,
+            )
+        assert not output.exists()
+        assert redirect_hits == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_review_gateway_streams_first_chunk_before_upstream_completion() -> None:
+    first_upstream_chunk = threading.Event()
+    release_upstream = threading.Event()
+    first_gateway_chunk = threading.Event()
+    received: list[bytes] = []
+
+    class StreamHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("X-Request-Id", "stream-fixture")
+            self.send_header("Set-Cookie", "secret=must-not-forward")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b"data: first\n\n")
+            self.wfile.flush()
+            first_upstream_chunk.set()
+            release_upstream.wait(5)
+            self.wfile.write(b"data: second\n\n")
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), StreamHandler)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    gateway = serving.create_admission_server(
+        host="127.0.0.1",
+        port=0,
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        contexts={"chat": production_plan()},
+        evidence={},
+    )
+    threading.Thread(target=gateway.serve_forever, daemon=True).start()
+
+    def client() -> None:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", gateway.server_port, timeout=10
+        )
+        body = json.dumps(
+            {
+                "model": "chat",
+                "stream": True,
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "stream"}],
+            }
+        )
+        connection.request(
+            "POST",
+            "/v1/chat/completions",
+            body=body,
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        assert response.getheader("Set-Cookie") is None
+        assert response.getheader("Connection", "").lower() != "close"
+        received.append(response.read(13))
+        first_gateway_chunk.set()
+        received.append(response.read())
+        connection.close()
+
+    client_thread = threading.Thread(target=client, daemon=True)
+    client_thread.start()
+    delivered_before_completion = False
+    try:
+        assert first_upstream_chunk.wait(3)
+        delivered_before_completion = first_gateway_chunk.wait(0.5)
+    finally:
+        release_upstream.set()
+        client_thread.join(5)
+        gateway.shutdown()
+        upstream.shutdown()
+        gateway.server_close()
+        upstream.server_close()
+    assert delivered_before_completion
+    assert b"data: first" in b"".join(received)
+
+
+def test_review_aliases_admit_canonical_plan_and_preserve_requested_identity() -> None:
+    assert "aliases" in inspect.signature(
+        serving.create_admission_server
+    ).parameters
+    received_models: list[str] = []
+
+    class AliasHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length))
+            received_models.append(payload["model"])
+            if self.path == "/v1/embeddings":
+                body = b'{"data":[{"embedding":[0,1,2,3,4,5,6,7]}]}'
+            else:
+                body = b'{"choices":[{"message":{"content":"ok"}}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), AliasHandler)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    embed_plan = replace(production_plan(), model_name="embed")
+    gateway = serving.create_admission_server(
+        host="127.0.0.1",
+        port=0,
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        contexts={"chat": production_plan(), "embed": embed_plan},
+        aliases={"gpt-4o": "chat", "text-embedding-3-large": "embed"},
+        evidence={},
+    )
+    threading.Thread(target=gateway.serve_forever, daemon=True).start()
+    try:
+        for path, model, payload in (
+            (
+                "/v1/chat/completions",
+                "gpt-4o",
+                {"messages": [{"role": "user", "content": "alias"}]},
+            ),
+            (
+                "/v1/embeddings",
+                "text-embedding-3-large",
+                {"input": "alias embedding"},
+            ),
+        ):
+            request_body = json.dumps({"model": model, **payload})
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", gateway.server_port, timeout=5
+            )
+            connection.request(
+                "POST",
+                path,
+                body=request_body,
+                headers={"Content-Type": "application/json"},
+            )
+            response = connection.getresponse()
+            response.read()
+            connection.close()
+            assert response.status == 200
+        assert received_models == ["gpt-4o", "text-embedding-3-large"]
+        with pytest.raises(ServingError, match="alias|collision"):
+            serving.create_admission_server(
+                host="127.0.0.1",
+                port=0,
+                upstream=f"http://127.0.0.1:{upstream.server_port}",
+                contexts={"chat": production_plan(), "embed": embed_plan},
+                aliases={"chat": "embed"},
+                evidence={},
+            )
+    finally:
+        gateway.shutdown()
+        upstream.shutdown()
+        gateway.server_close()
+        upstream.server_close()
+
+
+def test_review_service_singleton_lock_is_atomic_and_owner_conditional(
+    tmp_path: Path,
+) -> None:
+    assert hasattr(serving, "acquire_service_lock")
+    assert hasattr(serving, "release_service_lock")
+    state = tmp_path / "state"
+    record = PidRecord(4242, "/trusted/python", 100.0, "a" * 64)
+    inspector = lambda _pid: ("/trusted/python", 100.0, "a" * 64)
+
+    owner = serving.acquire_service_lock(state, record, inspect=inspector)
+    with pytest.raises(ServingError, match="already|active|owner"):
+        serving.acquire_service_lock(state, record, inspect=inspector)
+    assert serving.release_service_lock(state, "wrong-owner") is False
+    assert (state / "service.lock").exists()
+    assert serving.release_service_lock(state, owner) is True
+    assert (state / "service.lock").exists()
+
+    stale = serving.acquire_service_lock(state, record, inspect=lambda _pid: None)
+    with pytest.raises(ServingError, match="held|owner|race"):
+        serving.acquire_service_lock(
+            state,
+            replace(record, pid=4343),
+            inspect=lambda _pid: None,
+        )
+    assert serving.release_service_lock(state, stale) is True
+    replacement = serving.acquire_service_lock(
+        state,
+        replace(record, pid=4343),
+        inspect=lambda _pid: None,
+    )
+    assert replacement != stale
+    assert serving.release_service_lock(state, stale) is False
+    assert serving.release_service_lock(state, replacement) is True
+
+
+def test_review_redaction_covers_token_variants_and_preserves_url_shape() -> None:
+    raw = {
+        "token": "token-value",
+        "access_token": "access-value",
+        "refresh-token": "refresh-value",
+        "bearer": "bearer-value",
+        "Cookie": "session=private",
+        "client_secret": "secret-value",
+        "password": "password-value",
+        "api-key": "api-value",
+        "auth_key": "auth-value",
+        "nested": [
+            "Authorization: Bearer opaque-value",
+            "access_token=inline-value",
+            "https://user:password@example.invalid/private/path",
+        ],
+        "safe": "kept",
+    }
+
+    redacted = serving.redact_sensitive(raw)
+    encoded = json.dumps(redacted)
+
+    for secret in (
+        "token-value",
+        "access-value",
+        "refresh-value",
+        "bearer-value",
+            "session=private",
+        "secret-value",
+        "password-value",
+        "api-value",
+        "auth-value",
+        "opaque-value",
+        "inline-value",
+        "user:password",
+    ):
+        assert secret not in encoded
+    assert redacted["safe"] == "kept"
+    assert "https://[REDACTED]@example.invalid/private/path" in encoded
+
+
+def test_review_doctors_are_offline_and_wrappers_verify_owned_service_identity() -> None:
+    doctor = (REPO_ROOT / "bootstrap/doctor.sh").read_text(encoding="utf-8")
+    windows = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
+    macos = (REPO_ROOT / "serving/service.sh").read_text(encoding="utf-8")
+
+    assert "git fetch" not in doctor
+    assert "Test-OwnedScheduledTask" in windows
+    assert "Get-ServiceArguments" in windows
+    assert "cmp -s" in macos
+    assert "refusing" in macos.lower()
+
+
+def test_review_readme_uses_real_profiles_and_no_unsupported_installer_wizard() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    installer_section = readme.split("## Getting it onto the Mac", 1)[1].split(
+        "## Quickstart", 1
+    )[0]
+
+    for profile in ("full", "coder", "mid", "lite", "micro"):
+        assert profile in readme
+    assert "minimal" not in installer_section
+    assert "wizard prompts" not in installer_section
+
+
+def test_final_review_admission_bounds_implicit_output_and_rejects_bypass_fields() -> None:
+    estimate = serving.estimate_request_tokens(
+        {"model": "chat", "messages": [{"role": "user", "content": "hello"}]}
+    )
+    assert estimate.output_tokens == serving.DEFAULT_REQUEST_OUTPUT_TOKENS
+
+    controller = serving.AdmissionController({"chat": production_plan()})
+    for bypass in (
+        {"n": 2},
+        {"n_predict": 1},
+        {"max_output_tokens": 1},
+        {"max_tokens": 0},
+    ):
+        with pytest.raises(
+            ServingError,
+            match="unsupported|completion|output|max_tokens",
+        ):
+            controller.try_begin(
+                    "chat",
+                {
+                    "model": "chat",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    **bypass,
+                }
+            )
+
+
+def test_final_review_gateway_injects_bounded_default_output() -> None:
+    received: list[dict[str, object]] = []
+
+    class CaptureHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            received.append(json.loads(self.rfile.read(length)))
+            body = b'{"choices":[{"message":{"content":"ok"}}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), CaptureHandler)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    gateway = serving.create_admission_server(
+        host="127.0.0.1",
+        port=0,
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        contexts={"chat": production_plan()},
+        evidence={},
+    )
+    threading.Thread(target=gateway.serve_forever, daemon=True).start()
+    try:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", gateway.server_port, timeout=5
+        )
+        connection.request(
+            "POST",
+            "/v1/chat/completions",
+            body=json.dumps(
+                {
+                    "model": "chat",
+                    "messages": [{"role": "user", "content": "hello"}],
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        assert response.status == 200
+        assert received[0]["max_tokens"] == serving.DEFAULT_REQUEST_OUTPUT_TOKENS
+    finally:
+        gateway.shutdown()
+        upstream.shutdown()
+        gateway.server_close()
+        upstream.server_close()
+
+
+def test_final_review_sampling_flags_are_an_allowlist() -> None:
+    revision = "a" * 40
+    for flags in (
+        "-c 1",
+        "-np 8",
+        "-ngl 999",
+        "-ctk f16",
+        "--split-mode row",
+        "--no-kv-offload",
+        "--batch-size 999999",
+    ):
+        with pytest.raises(ServingError, match="sampling|managed runtime"):
+            serving.parse_manifest(
+                f"chat | example/chat | *.gguf | fast | 8192 | {flags} | {revision}\n"
+            )
+
+
+def test_final_review_opener_disables_environment_proxies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handlers: list[object] = []
+    real_build_opener = urllib.request.build_opener
+
+    def capture_handlers(*values: object) -> urllib.request.OpenerDirector:
+        handlers.extend(values)
+        return real_build_opener(*values)
+
+    monkeypatch.setattr(urllib.request, "build_opener", capture_handlers)
+    opener = serving._no_redirect_opener()
+    proxy_handlers = [
+        handler
+        for handler in opener.handlers
+        if isinstance(handler, urllib.request.ProxyHandler)
+    ]
+    assert proxy_handlers == []
+    assert isinstance(handlers[0], urllib.request.ProxyHandler)
+    assert handlers[0].proxies == {}
+
+
+def test_final_review_shared_placements_reject_aggregate_ram_or_vram_oom() -> None:
+    resources = ResourceSnapshot(
+        system_total_mib=24 * GIB,
+        system_available_mib=22 * GIB,
+        backend=Backend.CUDA,
+        accelerator_total_mib=12 * GIB,
+        accelerator_available_mib=11 * GIB,
+        accelerator_shared=False,
+        capability_source="fixture",
+    )
+    with pytest.raises(ServingError, match="aggregate|resident|RAM|VRAM"):
+        serving.plan_shared_model_placements(
+            model_names=("fast", "embed", "big"),
+            resident_names=("fast", "embed"),
+            model_memory_mib={
+                "fast": 10 * GIB,
+                "embed": 8 * GIB,
+                "big": 12 * GIB,
+            },
+            layer_mib={
+                "fast": (512,) * 20,
+                "embed": (512,) * 16,
+                "big": (512,) * 24,
+            },
+            kv_runtime_mib={"fast": GIB, "embed": GIB, "big": GIB},
+            resources=resources,
+            requested_backend="cuda",
+        )
+
+
+def test_final_review_binary_tree_provenance_includes_runtime_dlls(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "runtime.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("runtime/bin/llama-server.exe", b"server")
+        bundle.writestr("runtime/bin/ggml-vulkan.dll", b"trusted dll")
+    installed = tmp_path / "native"
+    put(installed, "llama-server.exe", b"server")
+    sidecar = put(installed, "ggml-vulkan.dll", b"trusted dll")
+
+    serving.validate_binary_tree_against_archive(
+        installed_directory=installed,
+        archive=archive,
+        anchor_member="llama-server.exe",
+    )
+    sidecar.write_bytes(b"changed dll")
+    with pytest.raises(ServingError, match="tree|provenance|archive"):
+        serving.validate_binary_tree_against_archive(
+            installed_directory=installed,
+            archive=archive,
+            anchor_member="llama-server.exe",
+        )
+
+
+def test_final_review_headless_engine_probe_does_not_call_syncing_launchers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    put(tmp_path, "state/generated/claude-code/settings.json", "{}\n")
+    put(tmp_path, "state/generated/opencode/opencode.json", "{}\n")
+    put(tmp_path, ".tools/npm/claude.cmd", "@exit /b 0\n")
+    put(tmp_path, ".tools/npm/opencode.cmd", "@exit /b 0\n")
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "ENGINE-OK")
+
+    monkeypatch.setattr(serving.subprocess, "run", fake_run)
+    runner = serving._headless_engine_runner(tmp_path, "chat")
+    assert runner("claude")[0] == 0
+    assert runner("opencode")[0] == 0
+    assert all("launch.ps1" not in " ".join(call) for call in calls)
+    assert all("launch.sh" not in " ".join(call) for call in calls)
+
+
+def test_final_review_doctors_fail_concrete_runtime_probe_failures() -> None:
+    windows = (REPO_ROOT / "bootstrap/doctor.ps1").read_text(encoding="utf-8")
+    macos = (REPO_ROOT / "bootstrap/doctor.sh").read_text(encoding="utf-8")
+    assert re.search(r'LoadedProbe.*status -eq "FAIL".*BAD', windows, re.DOTALL)
+    assert re.search(r'loaded_status.*FAIL.*bad', macos, re.DOTALL)
+    assert re.search(r'VerifyExit.*else.*BAD', windows, re.DOTALL)
+    assert re.search(r'verify_exit.*else.*bad', macos, re.DOTALL)
+
+
+def test_final_review_verifier_exercises_every_admitted_chat_context() -> None:
+    requested_models: list[str] = []
+    running_calls = 0
+    last_model = "chat"
+
+    def transport(
+        _method: str, path: str, payload: dict[str, object] | None
+    ) -> HttpResponse:
+        nonlocal running_calls, last_model
+        if path == "/health":
+            return HttpResponse(200, {"status": "ok"}, {}, 1)
+        if path == "/v1/models":
+            return HttpResponse(
+                200,
+                {"data": [{"id": "chat"}, {"id": "coder"}, {"id": "embed"}]},
+                {},
+                1,
+            )
+        if path == "/running":
+            running_calls += 1
+            if running_calls == 1:
+                return HttpResponse(200, {"running": []}, {}, 1)
+            return HttpResponse(
+                200,
+                {
+                    "running": [
+                        {
+                            "model": last_model,
+                            "state": "ready",
+                            "backend": "cpu",
+                            "offloaded_layers": 0,
+                        }
+                    ]
+                },
+                {},
+                1,
+            )
+        if path == "/v1/embeddings":
+            return HttpResponse(
+                200, {"data": [{"embedding": [0.0] * 8}]}, {}, 1
+            )
+        if path == "/v1/messages":
+            return HttpResponse(
+                200, {"content": [{"type": "text", "text": "ORACLE-OK"}]}, {}, 1
+            )
+        if path == "/v1/chat/completions" and payload is not None:
+            last_model = str(payload["model"])
+            requested_models.append(last_model)
+            messages = payload.get("messages")
+            content = (
+                str(messages[0].get("content", ""))
+                if isinstance(messages, list)
+                and messages
+                and isinstance(messages[0], dict)
+                else ""
+            )
+            if content.startswith("oversize-boundary "):
+                return HttpResponse(
+                    413,
+                    {"error": "rejected"},
+                    {"X-Oracle-Admission": "rejected"},
+                    1,
+                )
+            if payload.get("tools"):
+                return HttpResponse(
+                    200,
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "tool_calls": [
+                                        {"function": {"name": "oracle_probe"}}
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    {},
+                    1,
+                )
+            if payload.get("response_format"):
+                return HttpResponse(
+                    200,
+                    {"choices": [{"message": {"content": '{"ok":true}'}}]},
+                    {},
+                    1,
+                )
+            return HttpResponse(
+                200,
+                {
+                    "choices": [{"message": {"content": "ORACLE-OK"}}],
+                    "usage": {"prompt_tokens": 25000},
+                },
+                {},
+                1,
+            )
+        raise AssertionError(path)
+
+    results = serving.run_offline_probes(
+        transport=transport,
+        contexts={
+            "chat": production_plan(),
+            "coder": replace(production_plan(), model_name="coder"),
+        },
+        chat_model="chat",
+        embedding_model="embed",
+        listeners=("127.0.0.1:9099",),
+        planned_placements={
+            "chat": {"backend": "cpu", "offloaded_layers": 0},
+            "coder": {"backend": "cpu", "offloaded_layers": 0},
+        },
+        engine_runner=None,
+    )
+
+    coverage = next(
+        result for result in results if result.name == "model_context_coverage"
+    )
+    assert coverage.status == PASS
+    assert {"chat", "coder"}.issubset(requested_models)
+    assert next(
+        result for result in results if result.name == "loaded_backend:coder"
+    ).status == PASS
+
+
+def test_final_review_metal_placement_respects_wired_memory_limit() -> None:
+    resources = ResourceSnapshot(
+        system_total_mib=128 * GIB,
+        system_available_mib=120 * GIB,
+        backend=Backend.METAL,
+        accelerator_total_mib=32 * GIB,
+        accelerator_available_mib=32 * GIB,
+        accelerator_shared=True,
+        capability_source="fixture wired limit",
+    )
+    with pytest.raises(ServingError, match="wired|accelerator"):
+        serving.plan_model_placement(
+            model_name="chat",
+            model_memory_mib=40 * GIB,
+            layer_mib=(GIB,) * 40,
+            kv_runtime_mib=2 * GIB,
+            resources=resources,
+            requested_backend="metal",
+        )
+    fallback = serving.plan_model_placement(
+        model_name="chat",
+        model_memory_mib=40 * GIB,
+        layer_mib=(GIB,) * 40,
+        kv_runtime_mib=2 * GIB,
+        resources=resources,
+        requested_backend="auto",
+    )
+    assert fallback.backend == Backend.CPU

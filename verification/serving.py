@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import hmac
 import ipaddress
 import json
 import math
@@ -22,15 +23,18 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+import zipfile
 from dataclasses import dataclass, replace
 from enum import Enum
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 if __package__ in (None, ""):
@@ -113,6 +117,8 @@ class ModelSnapshot:
     paths: tuple[Path, ...]
     size_bytes: int
     authority_digest: str
+    layer_mib: tuple[int, ...] = ()
+    kv_mib_per_token: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -128,6 +134,18 @@ class ContextPlan:
     kv_mib_per_token: float
     peak_memory_mib: int
     usable_memory_mib: int
+
+
+@dataclass(frozen=True)
+class PlacementPlan:
+    model_name: str
+    backend: Backend
+    offloaded_layers: int
+    total_layers: int
+    ram_required_mib: int
+    vram_required_mib: int
+    kv_runtime_mib: int
+    split_mode: str
 
 
 @dataclass(frozen=True)
@@ -155,6 +173,7 @@ class RuntimePlan:
     models: Mapping[str, ModelSpec]
     snapshots: Mapping[str, ModelSnapshot]
     contexts: Mapping[str, ContextPlan]
+    placements: Mapping[str, PlacementPlan]
     tiers: Mapping[str, str]
     rendered: RenderedConfig
 
@@ -209,16 +228,26 @@ COMMIT = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 TIER_KEYS = ("OPUS_MODEL", "SONNET_MODEL", "HAIKU_MODEL")
 MINIMUM_ADVERTISED_CONTEXT = 8192
+PRODUCTION_ADVERTISED_CONTEXT = 52000
+DEFAULT_REQUEST_OUTPUT_TOKENS = 1024
+CONSERVATIVE_KV_MIB_PER_TOKEN = 0.25
 MODEL_RUNTIME_OVERHEAD_MIB = 512
 SENSITIVE_KEY = re.compile(
-    r"(?:authorization|api[_-]?key|auth[_-]?token|cookie|credential|password|secret)",
+    r"(?:authorization|bearer|cookie|credential|password|secret|"
+    r"(?:access[_-]?|refresh[_-]?|auth[_-]?)?token|"
+    r"(?:api|auth|client)[_-]?key)",
     re.IGNORECASE,
 )
 SENSITIVE_VALUE = re.compile(
     r"(?:Bearer\s+\S+|sk-[A-Za-z0-9_-]{16,}|"
     r"(?:AGENT_MCP_[A-Z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD)|"
     r"ANTHROPIC_AUTH_TOKEN|(?:OPENAI|ANTHROPIC)_API_KEY)\s*=\s*[^\s,;]+|"
-    r"https?://[^/\s:@]+:[^@/\s]+@)",
+    r"(?:access[_-]?token|refresh[_-]?token|auth[_-]?key|api[_-]?key)"
+    r"\s*[:=]\s*[^\s,;&]+)",
+    re.IGNORECASE,
+)
+SENSITIVE_URL_CREDENTIALS = re.compile(
+    r"(https?://)([^/\s:@]+:[^@/\s]+)@",
     re.IGNORECASE,
 )
 
@@ -341,18 +370,33 @@ def parse_manifest(text: str) -> dict[str, ModelSpec]:
             raise ServingError(
                 f"serving/models.manifest:{line_number}: invalid sampling flags"
             ) from exc
-        forbidden = {
-            "--host",
-            "--port",
-            "--ctx-size",
-            "--parallel",
-            "--n-gpu-layers",
-            "-m",
-            "--model",
+        allowed_sampling_flags = {
+            "--temp",
+            "--temperature",
+            "--top-p",
+            "--top-k",
+            "--min-p",
+            "--repeat-penalty",
+            "--presence-penalty",
+            "--frequency-penalty",
+            "--dry-multiplier",
+            "--dry-base",
+            "--dry-allowed-length",
+            "--dry-penalty-last-n",
         }
-        if any(flag.split("=", 1)[0] in forbidden for flag in parsed_flags):
+        unsupported_flags = sorted(
+            {
+                token.split("=", 1)[0]
+                for token in parsed_flags
+                if token.startswith("-")
+                and token.split("=", 1)[0] not in allowed_sampling_flags
+            }
+        )
+        if unsupported_flags:
             raise ServingError(
-                f"serving/models.manifest:{line_number}: flags override managed runtime options"
+                f"serving/models.manifest:{line_number}: only sampling flags are "
+                "allowed; managed runtime option(s) refused: "
+                + ", ".join(unsupported_flags)
             )
         models[name] = ModelSpec(
             name=name,
@@ -580,6 +624,260 @@ def with_loaded_backend(
     return updated
 
 
+def plan_model_placement(
+    *,
+    model_name: str,
+    model_memory_mib: int,
+    layer_mib: Sequence[int] | None,
+    kv_runtime_mib: int,
+    resources: ResourceSnapshot,
+    requested_backend: str,
+) -> PlacementPlan:
+    """Plan model placement without treating RAM and VRAM as fungible."""
+
+    if model_memory_mib <= 0 or kv_runtime_mib <= 0:
+        raise ServingError(f"{model_name}: placement memory inputs must be positive")
+    ram_available = max(
+        0,
+        resources.system_available_mib
+        - resources.os_reserve_mib
+        - resources.runtime_reserve_mib,
+    )
+    requested = requested_backend.lower()
+    if requested not in {"auto", *(backend.value for backend in Backend)}:
+        raise ServingError(f"{model_name}: unsupported placement backend {requested!r}")
+    desired = resources.backend if requested == "auto" else Backend(requested)
+
+    def cpu_plan() -> PlacementPlan:
+        required = model_memory_mib + kv_runtime_mib
+        if required > ram_available:
+            raise ServingError(
+                f"{model_name}: CPU placement needs {required} MiB RAM but "
+                f"only {ram_available} MiB is available"
+            )
+        return PlacementPlan(
+            model_name=model_name,
+            backend=Backend.CPU,
+            offloaded_layers=0,
+            total_layers=len(layer_mib or ()),
+            ram_required_mib=required,
+            vram_required_mib=0,
+            kv_runtime_mib=kv_runtime_mib,
+            split_mode="none",
+        )
+
+    if desired == Backend.CPU:
+        return cpu_plan()
+    if resources.accelerator_shared:
+        # Unified memory is already accounted for in system RAM. A finite layer
+        # count and wired-memory ceiling are still required for Metal offload.
+        if not layer_mib:
+            if requested == "auto":
+                return cpu_plan()
+            raise ServingError(
+                f"{model_name}: {desired.value} placement lacks trusted layer metadata"
+            )
+        required = model_memory_mib + kv_runtime_mib
+        wired_available = max(
+            0,
+            resources.accelerator_available_mib
+            - resources.accelerator_reserve_mib,
+        )
+        if required > ram_available or model_memory_mib > wired_available:
+            if requested == "auto":
+                return cpu_plan()
+            raise ServingError(
+                f"{model_name}: unified placement needs {required} MiB RAM "
+                f"and {model_memory_mib} MiB wired accelerator memory; "
+                f"available RAM/wired memory is {ram_available}/{wired_available} MiB"
+            )
+        return PlacementPlan(
+            model_name=model_name,
+            backend=desired,
+            offloaded_layers=len(layer_mib),
+            total_layers=len(layer_mib),
+            ram_required_mib=required,
+            vram_required_mib=model_memory_mib,
+            kv_runtime_mib=kv_runtime_mib,
+            split_mode="unified",
+        )
+    vram_available = max(
+        0,
+        resources.accelerator_available_mib - resources.accelerator_reserve_mib,
+    )
+    if vram_available <= 0 or not layer_mib:
+        if requested == "auto":
+            return cpu_plan()
+        raise ServingError(
+            f"{model_name}: {desired.value} placement has no trusted VRAM/layer evidence"
+        )
+    normalized_layers = tuple(int(value) for value in layer_mib)
+    if any(value <= 0 for value in normalized_layers):
+        raise ServingError(f"{model_name}: placement layer memory is invalid")
+    offloaded = 0
+    vram_required = 0
+    for layer in normalized_layers:
+        if vram_required + layer > vram_available:
+            break
+        vram_required += layer
+        offloaded += 1
+    if offloaded <= 0:
+        if requested == "auto":
+            return cpu_plan()
+        raise ServingError(f"{model_name}: no model layer fits trusted VRAM")
+    offloaded_memory = sum(normalized_layers[:offloaded])
+    ram_required = max(0, model_memory_mib - offloaded_memory) + kv_runtime_mib
+    if ram_required > ram_available:
+        if requested == "auto":
+            return cpu_plan()
+        raise ServingError(
+            f"{model_name}: placement needs {ram_required} MiB RAM and "
+            f"{vram_required} MiB VRAM; available RAM is {ram_available} MiB"
+        )
+    return PlacementPlan(
+        model_name=model_name,
+        backend=desired,
+        offloaded_layers=offloaded,
+        total_layers=len(normalized_layers),
+        ram_required_mib=ram_required,
+        vram_required_mib=vram_required,
+        kv_runtime_mib=kv_runtime_mib,
+        split_mode="layer",
+    )
+
+
+def plan_shared_model_placements(
+    *,
+    model_names: Sequence[str],
+    resident_names: Sequence[str],
+    model_memory_mib: Mapping[str, int],
+    layer_mib: Mapping[str, Sequence[int] | None],
+    kv_runtime_mib: Mapping[str, int],
+    resources: ResourceSnapshot,
+    requested_backend: str,
+) -> dict[str, PlacementPlan]:
+    """Place resident models plus any one swappable model in physical pools."""
+
+    names = tuple(model_names)
+    residents = tuple(resident_names)
+    resident_set = set(residents)
+    if (
+        not names
+        or len(names) != len(set(names))
+        or not resident_set.issubset(names)
+        or any(
+            set(mapping) != set(names)
+            for mapping in (model_memory_mib, layer_mib, kv_runtime_mib)
+        )
+    ):
+        raise ServingError("shared placement model inputs are inconsistent")
+    swappable = tuple(name for name in names if name not in resident_set)
+    requested = requested_backend.lower()
+    if requested not in {"auto", *(item.value for item in Backend)}:
+        raise ServingError(
+            f"unsupported shared placement backend {requested_backend!r}"
+        )
+
+    def aggregate(plans: Mapping[str, PlacementPlan]) -> None:
+        resident_ram = sum(plans[name].ram_required_mib for name in residents)
+        resident_vram = sum(plans[name].vram_required_mib for name in residents)
+        swap_ram = max(
+            (plans[name].ram_required_mib for name in swappable),
+            default=0,
+        )
+        swap_vram = max(
+            (plans[name].vram_required_mib for name in swappable),
+            default=0,
+        )
+        ram_available = max(
+            0,
+            resources.system_available_mib
+            - resources.os_reserve_mib
+            - resources.runtime_reserve_mib,
+        )
+        vram_available = max(
+            0,
+            resources.accelerator_available_mib
+            - resources.accelerator_reserve_mib,
+        )
+        if resident_ram + swap_ram > ram_available:
+            raise ServingError(
+                "aggregate resident and swappable placement needs "
+                f"{resident_ram + swap_ram} MiB RAM but only "
+                f"{ram_available} MiB is available"
+            )
+        if resident_vram + swap_vram > vram_available:
+            raise ServingError(
+                "aggregate resident and swappable placement needs "
+                f"{resident_vram + swap_vram} MiB VRAM but only "
+                f"{vram_available} MiB is available"
+            )
+
+    def place(backend: Backend) -> dict[str, PlacementPlan]:
+        plans: dict[str, PlacementPlan] = {}
+        backend_request = backend.value
+        if backend == Backend.CPU or resources.accelerator_shared:
+            for name in names:
+                plans[name] = plan_model_placement(
+                    model_name=name,
+                    model_memory_mib=model_memory_mib[name],
+                    layer_mib=layer_mib[name],
+                    kv_runtime_mib=kv_runtime_mib[name],
+                    resources=replace(resources, backend=backend),
+                    requested_backend=backend_request,
+                )
+        else:
+            total_budget = max(
+                0,
+                resources.accelerator_available_mib
+                - resources.accelerator_reserve_mib,
+            )
+            remaining = total_budget
+            for name in residents:
+                candidate_resources = replace(
+                    resources,
+                    backend=backend,
+                    accelerator_available_mib=(
+                        remaining + resources.accelerator_reserve_mib
+                    ),
+                )
+                plans[name] = plan_model_placement(
+                    model_name=name,
+                    model_memory_mib=model_memory_mib[name],
+                    layer_mib=layer_mib[name],
+                    kv_runtime_mib=kv_runtime_mib[name],
+                    resources=candidate_resources,
+                    requested_backend=backend_request,
+                )
+                remaining -= plans[name].vram_required_mib
+            for name in swappable:
+                candidate_resources = replace(
+                    resources,
+                    backend=backend,
+                    accelerator_available_mib=(
+                        remaining + resources.accelerator_reserve_mib
+                    ),
+                )
+                plans[name] = plan_model_placement(
+                    model_name=name,
+                    model_memory_mib=model_memory_mib[name],
+                    layer_mib=layer_mib[name],
+                    kv_runtime_mib=kv_runtime_mib[name],
+                    resources=candidate_resources,
+                    requested_backend=backend_request,
+                )
+        aggregate(plans)
+        return plans
+
+    backend = resources.backend if requested == "auto" else Backend(requested)
+    try:
+        return place(backend)
+    except ServingError:
+        if requested != "auto" or backend == Backend.CPU:
+            raise
+    return place(Backend.CPU)
+
+
 def _safe_relative_model_path(value: str) -> Path:
     if (
         not value
@@ -691,11 +989,57 @@ def validate_policy_bound_models(
                 json.dumps(authority, sort_keys=True, separators=(",", ":")) + "\n"
             ).encode("utf-8")
         ).hexdigest()
+        raw_layers = authority.get("layer_mib", [])
+        if not isinstance(raw_layers, list) or any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+            for value in raw_layers
+        ):
+            raise ServingError(f"{name}: authority layer memory is invalid")
+        declared_layers = tuple(raw_layers)
+        model_size_mib = max(1, math.ceil(total_size / (1024 * 1024)))
+        if declared_layers and not (
+            math.floor(model_size_mib * 0.75)
+            <= sum(declared_layers)
+            <= math.ceil(model_size_mib * 1.25)
+        ):
+            raise ServingError(
+                f"{name}: authority layer memory does not conservatively "
+                "represent model size"
+            )
+        if declared_layers:
+            conservative_model_mib = math.ceil(model_size_mib * 1.08) + 256
+            scale = max(
+                1.0,
+                conservative_model_mib / sum(declared_layers),
+            )
+            layer_mib = tuple(
+                max(1, math.ceil(value * scale))
+                for value in declared_layers
+            )
+        else:
+            layer_mib = ()
+        raw_kv_mib = authority.get(
+            "kv_mib_per_token",
+            CONSERVATIVE_KV_MIB_PER_TOKEN,
+        )
+        if (
+            not isinstance(raw_kv_mib, (int, float))
+            or isinstance(raw_kv_mib, bool)
+            or not math.isfinite(float(raw_kv_mib))
+            or not 0.001 <= float(raw_kv_mib) <= 8.0
+        ):
+            raise ServingError(
+                f"{name}: authority KV memory metadata is invalid"
+            )
         snapshots[name] = ModelSnapshot(
             name=name,
             paths=tuple(paths),
             size_bytes=total_size,
             authority_digest=authority_digest,
+            layer_mib=layer_mib,
+            kv_mib_per_token=float(raw_kv_mib),
         )
     return snapshots
 
@@ -766,41 +1110,87 @@ def plan_context(
 def _estimate_text_tokens(value: Any) -> int:
     if value is None:
         return 0
-    if not isinstance(value, str):
-        value = json.dumps(value, sort_keys=True, separators=(",", ":"))
-    words = len(re.findall(r"\S+", value))
-    byte_estimate = math.ceil(len(value.encode("utf-8")) / 4)
-    return max(words, byte_estimate)
+    try:
+        serialized = (
+            value
+            if isinstance(value, str)
+            else json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ServingError(
+            "request contains binary or unsupported non-JSON content"
+        ) from exc
+    # Byte-level tokenizers cannot emit more ordinary tokens than input bytes.
+    # Counting every UTF-8 byte is intentionally conservative for code,
+    # punctuation, emoji, and tokenizer variants.
+    return len(serialized.encode("utf-8"))
 
 
 def estimate_request_tokens(payload: Mapping[str, Any]) -> RequestEstimate:
-    prompt = 0
-    messages = payload.get("messages", [])
-    if isinstance(messages, list):
-        for message in messages:
-            if isinstance(message, dict):
-                prompt += 6
-                prompt += _estimate_text_tokens(message.get("role"))
-                prompt += _estimate_text_tokens(message.get("content"))
-                extras = {
-                    key: value
-                    for key, value in message.items()
-                    if key not in {"role", "content"}
-                }
-                if extras:
-                    prompt += _estimate_text_tokens(extras)
-            else:
-                prompt += _estimate_text_tokens(message)
-    elif messages:
-        prompt += _estimate_text_tokens(messages)
-    if "prompt" in payload:
-        prompt += _estimate_text_tokens(payload["prompt"])
-    if "input" in payload:
-        prompt += _estimate_text_tokens(payload["input"])
-    if "system" in payload:
-        prompt += _estimate_text_tokens(payload["system"])
-    tool_tokens = sum(
-        _estimate_text_tokens(payload[field])
+    if not isinstance(payload, Mapping):
+        raise ServingError("request payload must be a JSON object")
+    unsupported_limits = sorted(
+        field for field in ("n_predict", "max_output_tokens") if field in payload
+    )
+    if unsupported_limits:
+        raise ServingError(
+            "request uses unsupported output limit field(s): "
+            + ", ".join(unsupported_limits)
+        )
+    choices = payload.get("n", 1)
+    if (
+        not isinstance(choices, int)
+        or isinstance(choices, bool)
+        or choices != 1
+    ):
+        raise ServingError("request completion count must be exactly one")
+    output_fields = [
+        field
+        for field in ("max_tokens", "max_completion_tokens")
+        if field in payload
+    ]
+    if len(output_fields) > 1:
+        raise ServingError("request has conflicting output limit fields")
+    output_value = (
+        payload[output_fields[0]]
+        if output_fields
+        else (
+            0
+            if "input" in payload and "messages" not in payload
+            else DEFAULT_REQUEST_OUTPUT_TOKENS
+        )
+    )
+    if not isinstance(output_value, int) or isinstance(output_value, bool):
+        raise ServingError("request max_tokens is invalid")
+    output = output_value
+    embedding_request = (
+        "input" in payload
+        and "messages" not in payload
+        and not output_fields
+    )
+    if output < 0 or (output == 0 and not embedding_request):
+        raise ServingError("request max_tokens is invalid")
+    try:
+        canonical = json.dumps(
+            dict(payload),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ServingError(
+            "request contains binary or unsupported non-JSON content"
+        ) from exc
+    prompt = len(canonical.encode("utf-8"))
+    tool_fields = {
+        field: payload[field]
         for field in (
             "tools",
             "tool_choice",
@@ -808,17 +1198,9 @@ def estimate_request_tokens(payload: Mapping[str, Any]) -> RequestEstimate:
             "grammar",
             "json_schema",
         )
-        if field in payload and payload[field]
-    )
-    output_value = payload.get(
-        "max_tokens",
-        payload.get("max_completion_tokens", 0),
-    )
-    if not isinstance(output_value, int) or isinstance(output_value, bool):
-        raise ServingError("request max_tokens is invalid")
-    output = output_value
-    if output < 0:
-        raise ServingError("request max_tokens is invalid")
+        if field in payload
+    }
+    tool_tokens = _estimate_text_tokens(tool_fields) if tool_fields else 0
     return RequestEstimate(prompt, tool_tokens, output)
 
 
@@ -943,6 +1325,7 @@ def render_runtime_config(
     contexts: Mapping[str, ContextPlan],
     backend: Backend,
     platform: str,
+    placements: Mapping[str, PlacementPlan] | None = None,
     host: str = "127.0.0.1",
 ) -> RenderedConfig:
     require_loopback(host)
@@ -959,6 +1342,8 @@ def render_runtime_config(
     ]
     fast_alias_used = False
     embed_alias_used = False
+    alias_map: dict[str, str] = {}
+    resolved_placements: dict[str, PlacementPlan] = {}
     for name in sorted(models):
         model = models[name]
         paths = tuple(model_paths[name])
@@ -968,6 +1353,25 @@ def render_runtime_config(
         context = contexts[name]
         if context.model_name != name:
             raise ServingError(f"{name}: context plan names another model")
+        placement = (placements or {}).get(name)
+        if placement is None:
+            if backend != Backend.CPU:
+                raise ServingError(f"{name}: accelerator placement plan is missing")
+            placement = PlacementPlan(
+                model_name=name,
+                backend=Backend.CPU,
+                offloaded_layers=0,
+                total_layers=0,
+                ram_required_mib=context.peak_memory_mib,
+                vram_required_mib=0,
+                kv_runtime_mib=max(
+                    1, context.peak_memory_mib - context.model_memory_mib
+                ),
+                split_mode="none",
+            )
+        if placement.model_name != name:
+            raise ServingError(f"{name}: placement plan names another model")
+        resolved_placements[name] = placement
         argv = [
             str(server_path),
             "--host",
@@ -981,7 +1385,8 @@ def render_runtime_config(
             "--parallel",
             str(context.parallel_slots),
             "--n-gpu-layers",
-            "0" if backend == Backend.CPU else "999",
+            str(placement.offloaded_layers),
+            "--no-kv-offload",
             "--jinja",
             "--cache-reuse",
             "256",
@@ -990,6 +1395,8 @@ def render_runtime_config(
             "--cache-type-v",
             "q8_0",
         ]
+        if placement.split_mode == "layer":
+            argv.extend(["--split-mode", "layer"])
         if model.slot == "embed":
             argv.extend(["--embeddings", "--pooling", "last"])
         argv.extend(model.flags)
@@ -1005,6 +1412,7 @@ def render_runtime_config(
         )
         if model.slot == "fast" and not fast_alias_used:
             fast_alias_used = True
+            alias_map.update({"gpt-4o-mini": name, "gpt-4o": name})
             lines.extend(
                 [
                     "    aliases:",
@@ -1014,6 +1422,13 @@ def render_runtime_config(
             )
         elif model.slot == "embed" and not embed_alias_used:
             embed_alias_used = True
+            alias_map.update(
+                {
+                    "text-embedding-3-large": name,
+                    "text-embedding-3-small": name,
+                    "text-embedding-ada-002": name,
+                }
+            )
             lines.extend(
                 [
                     "    aliases:",
@@ -1047,6 +1462,7 @@ def render_runtime_config(
             "llama_swap_internal": "127.0.0.1:9098",
         },
         "backend": backend_evidence(backend, "configured capability"),
+        "aliases": alias_map,
         "models": {
             name: {
                 "slot": models[name].slot,
@@ -1066,6 +1482,14 @@ def render_runtime_config(
                 "kv_mib_per_token": contexts[name].kv_mib_per_token,
                 "peak_memory_mib": contexts[name].peak_memory_mib,
                 "usable_memory_mib": contexts[name].usable_memory_mib,
+                "placement": {
+                    "backend": resolved_placements[name].backend.value,
+                    "offloaded_layers": resolved_placements[name].offloaded_layers,
+                    "total_layers": resolved_placements[name].total_layers,
+                    "ram_required_mib": resolved_placements[name].ram_required_mib,
+                    "vram_required_mib": resolved_placements[name].vram_required_mib,
+                    "split_mode": resolved_placements[name].split_mode,
+                },
             }
             for name in sorted(models)
         },
@@ -1099,6 +1523,7 @@ def prepare_runtime(
     *,
     root: Path,
     server_path: Path,
+    llama_swap_path: Path | None = None,
     platform: str,
     resources: ResourceSnapshot,
     requested_backend: str = "auto",
@@ -1109,6 +1534,10 @@ def prepare_runtime(
     server_path = Path(os.path.abspath(os.fspath(server_path)))
     if not server_path.is_file():
         raise ServingError(f"llama-server binary is missing: {server_path}")
+    if llama_swap_path is not None:
+        llama_swap_path = Path(os.path.abspath(os.fspath(llama_swap_path)))
+        if not llama_swap_path.is_file():
+            raise ServingError(f"llama-swap binary is missing: {llama_swap_path}")
     profiles = parse_profiles(
         _read_utf8(root / "serving" / "profiles.conf", "profile declaration")
     )
@@ -1118,7 +1547,8 @@ def prepare_runtime(
     validate_profile_references(profiles, models)
     active_path = root / "serving" / "models.profile"
     tiers_path = root / "serving" / "tiers.env"
-    if active_path.is_file():
+    profile_explicit = active_path.is_file()
+    if profile_explicit:
         active = parse_active_models(_read_utf8(active_path, "active model profile"))
         if tiers_path.is_file():
             tiers = parse_tiers(_read_utf8(tiers_path, "tier mapping"))
@@ -1136,71 +1566,149 @@ def prepare_runtime(
         profile = select_profile(profiles, resources)
         active = profile.models
         tiers = _profile_tiers(profile)
-        if tiers_path.is_file():
-            observed_tiers = parse_tiers(_read_utf8(tiers_path, "tier mapping"))
-            if observed_tiers != tiers:
-                raise ServingError(
-                    f"tier mapping differs from selected profile {profile.name}"
-                )
     available_backends = {Backend.CPU, resources.backend}
     backend = (
         resources.backend
         if requested_backend.lower() == "auto"
         else select_backend(requested_backend, available=available_backends)
     )
-    selected_resources = replace(resources, backend=backend)
-    usable = usable_capacity_mib(selected_resources)
-    if profile.minimum_mib > usable:
-        raise ServingError(
-            f"profile {profile.name} requires {profile.minimum_mib / 1024:.1f} GiB "
-            f"but only {usable / 1024:.1f} GiB is usable after reserves"
-        )
-    snapshots = validate_policy_bound_models(root, models, active)
-    resident_names = [
-        name for name in active if models[name].slot in {"fast", "embed"}
-    ]
-    if not resident_names:
-        raise ServingError("selected profile has no resident model")
-    big_names = [name for name in active if models[name].slot == "big"]
-
-    def memory_mib(name: str) -> int:
-        raw = max(1, math.ceil(snapshots[name].size_bytes / (1024 * 1024)))
-        return math.ceil(raw * 1.08) + 256
-
-    resident_memory = sum(memory_mib(name) for name in resident_names)
-    largest_big = max((memory_mib(name) for name in big_names), default=0)
-    simultaneous_weights = resident_memory + largest_big
-    if simultaneous_weights + MODEL_RUNTIME_OVERHEAD_MIB >= usable:
-        raise ServingError(
-            f"profile {profile.name} policy-bound weights require "
-            f"{simultaneous_weights} MiB before context, but only {usable} MiB is usable"
-        )
-    desired = {
-        name: models[name].nominal_context
-        * (2 if models[name].slot == "fast" else 1)
-        for name in active
-    }
-    desired_total = sum(desired.values())
-    context_pool = usable - simultaneous_weights
-    contexts: dict[str, ContextPlan] = {}
-    for name in active:
-        model = models[name]
-        share = max(
-            1024,
-            int(context_pool * (desired[name] / desired_total)),
-        )
-        is_embedding = model.slot == "embed"
-        contexts[name] = plan_context(
-            model_name=name,
-            nominal_context_tokens=model.nominal_context,
-            requested_parallel=2 if model.slot == "fast" else 1,
-            model_memory_mib=simultaneous_weights,
-            usable_memory_mib=min(usable, simultaneous_weights + share),
-            prompt_tool_overhead_tokens=512 if is_embedding else 4096,
-            output_reserve_tokens=256 if is_embedding else 4096,
-            kv_mib_per_token=0.0625,
-            minimum_advertised_context=1024 if is_embedding else 8192,
-        )
+    while True:
+        try:
+            snapshots = validate_policy_bound_models(root, models, active)
+            resident_names = [
+                name for name in active if models[name].slot in {"fast", "embed"}
+            ]
+            if not resident_names:
+                raise ServingError("selected profile has no resident model")
+            big_names = [name for name in active if models[name].slot == "big"]
+            model_memory = {}
+            for name in active:
+                raw = max(
+                    1,
+                    math.ceil(snapshots[name].size_bytes / (1024 * 1024)),
+                )
+                model_memory[name] = math.ceil(raw * 1.08) + 256
+            layers = {
+                name: snapshots[name].layer_mib or None for name in active
+            }
+            selected_resources = replace(resources, backend=backend)
+            preliminary_placements = plan_shared_model_placements(
+                model_names=active,
+                resident_names=resident_names,
+                model_memory_mib=model_memory,
+                layer_mib=layers,
+                kv_runtime_mib={
+                    name: (
+                        math.ceil(
+                            models[name].nominal_context
+                            * snapshots[name].kv_mib_per_token
+                        )
+                        + MODEL_RUNTIME_OVERHEAD_MIB
+                    )
+                    for name in active
+                },
+                resources=selected_resources,
+                requested_backend=requested_backend,
+            )
+            placement_backends = {
+                item.backend for item in preliminary_placements.values()
+            }
+            if len(placement_backends) != 1:
+                raise ServingError(
+                    "profile models do not share one safe backend placement"
+                )
+            backend = next(iter(placement_backends))
+            selected_resources = replace(resources, backend=backend)
+            usable = usable_capacity_mib(selected_resources)
+            if profile.minimum_mib > usable:
+                raise ServingError(
+                    f"profile {profile.name} requires "
+                    f"{profile.minimum_mib / 1024:.1f} GiB but only "
+                    f"{usable / 1024:.1f} GiB is usable after reserves"
+                )
+            resident_memory = sum(model_memory[name] for name in resident_names)
+            largest_big = max(
+                (model_memory[name] for name in big_names),
+                default=0,
+            )
+            simultaneous_weights = resident_memory + largest_big
+            if simultaneous_weights + MODEL_RUNTIME_OVERHEAD_MIB >= usable:
+                raise ServingError(
+                    f"profile {profile.name} policy-bound weights require "
+                    f"{simultaneous_weights} MiB before context, but only "
+                    f"{usable} MiB is usable"
+                )
+            desired = {
+                name: models[name].nominal_context
+                * (2 if models[name].slot == "fast" else 1)
+                for name in active
+            }
+            desired_total = sum(desired.values())
+            context_pool = usable - simultaneous_weights
+            contexts = {}
+            for name in active:
+                model = models[name]
+                share = max(
+                    1024,
+                    int(context_pool * (desired[name] / desired_total)),
+                )
+                is_embedding = model.slot == "embed"
+                contexts[name] = plan_context(
+                    model_name=name,
+                    nominal_context_tokens=model.nominal_context,
+                    requested_parallel=2 if model.slot == "fast" else 1,
+                    model_memory_mib=simultaneous_weights,
+                    usable_memory_mib=min(
+                        usable,
+                        simultaneous_weights + share,
+                    ),
+                    prompt_tool_overhead_tokens=(
+                        512 if is_embedding else 4096
+                    ),
+                    output_reserve_tokens=256 if is_embedding else 4096,
+                    kv_mib_per_token=snapshots[name].kv_mib_per_token,
+                    minimum_advertised_context=(
+                        1024
+                        if is_embedding
+                        else PRODUCTION_ADVERTISED_CONTEXT
+                        if model.nominal_context >= 65536
+                        else MINIMUM_ADVERTISED_CONTEXT
+                    ),
+                )
+            placements = plan_shared_model_placements(
+                model_names=active,
+                resident_names=resident_names,
+                model_memory_mib=model_memory,
+                layer_mib=layers,
+                kv_runtime_mib={
+                    name: (
+                        math.ceil(
+                            contexts[name].slot_context_tokens
+                            * contexts[name].parallel_slots
+                            * contexts[name].kv_mib_per_token
+                        )
+                        + MODEL_RUNTIME_OVERHEAD_MIB
+                    )
+                    for name in active
+                },
+                resources=selected_resources,
+                requested_backend=backend.value,
+            )
+            break
+        except ServingError:
+            if profile_explicit or requested_backend.lower() != "auto":
+                raise
+            smaller = [
+                item
+                for item in profiles
+                if item.minimum_mib < profile.minimum_mib
+            ]
+            if not smaller:
+                raise
+            profile = max(smaller, key=lambda item: item.minimum_mib)
+            active = profile.models
+            tiers = _profile_tiers(profile)
+            backend = resources.backend
     rendered = render_runtime_config(
         output=root / "state" / "generated" / "serving" / "llama-swap.yaml",
         server_path=server_path,
@@ -1209,6 +1717,7 @@ def prepare_runtime(
         contexts=contexts,
         backend=backend,
         platform=platform,
+        placements=placements,
     )
     metadata = json.loads(rendered.metadata_path.read_text(encoding="utf-8"))
     metadata.update(
@@ -1230,6 +1739,28 @@ def prepare_runtime(
                 "accelerator_shared": selected_resources.accelerator_shared,
                 "usable_capacity_mib": usable,
                 "capability_source": selected_resources.capability_source,
+            },
+            "binaries": {
+                "llama_server": {
+                    "path": str(server_path),
+                    "sha256": _sha256_file(server_path),
+                },
+                "llama_server_tree": (
+                    {
+                        "path": str(server_path.parent),
+                        "sha256": _directory_tree_digest(server_path.parent),
+                    }
+                    if platform == "windows"
+                    else None
+                ),
+                "llama_swap": (
+                    {
+                        "path": str(llama_swap_path),
+                        "sha256": _sha256_file(llama_swap_path),
+                    }
+                    if llama_swap_path is not None
+                    else None
+                ),
             },
         }
     )
@@ -1267,9 +1798,285 @@ def prepare_runtime(
         models={name: models[name] for name in active},
         snapshots=snapshots,
         contexts=contexts,
+        placements=placements,
         tiers=tiers,
         rendered=rendered,
     )
+
+
+def validate_binary_against_archive(
+    *, installed: Path, archive: Path, member_name: str
+) -> None:
+    """Verify an installed runtime binary against its policy-bound archive."""
+
+    if not installed.is_file() or not archive.is_file():
+        raise ServingError("runtime binary provenance input is missing")
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            matches = [
+                name
+                for name in bundle.namelist()
+                if not name.endswith("/") and Path(name).name == member_name
+            ]
+            if len(matches) != 1:
+                raise ServingError(
+                    f"runtime archive must contain exactly one {member_name}"
+                )
+            expected = bundle.read(matches[0])
+    except (OSError, zipfile.BadZipFile, KeyError) as exc:
+        raise ServingError("runtime archive provenance is unreadable") from exc
+    try:
+        observed = installed.read_bytes()
+    except OSError as exc:
+        raise ServingError("installed runtime binary is unreadable") from exc
+    if not expected or not hmac.compare_digest(
+        hashlib.sha256(observed).hexdigest(),
+        hashlib.sha256(expected).hexdigest(),
+    ):
+        raise ServingError("installed runtime binary differs from policy archive")
+
+
+def _directory_tree_digest(directory: Path) -> str:
+    if not directory.is_dir() or directory.is_symlink():
+        raise ServingError("runtime binary tree is missing or unsafe")
+    digest = hashlib.sha256()
+    files: list[tuple[str, Path]] = []
+    for path in directory.rglob("*"):
+        if path.is_symlink():
+            raise ServingError("runtime binary tree contains a symbolic link")
+        if path.is_file():
+            files.append((path.relative_to(directory).as_posix(), path))
+        elif not path.is_dir():
+            raise ServingError("runtime binary tree contains an unsafe entry")
+    if not files:
+        raise ServingError("runtime binary tree is empty")
+    for relative, path in sorted(files):
+        encoded = relative.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+        digest.update(path.stat().st_size.to_bytes(8, "big"))
+        digest.update(bytes.fromhex(_sha256_file(path)))
+    return digest.hexdigest()
+
+
+def validate_binary_tree_against_archive(
+    *,
+    installed_directory: Path,
+    archive: Path,
+    anchor_member: str,
+) -> None:
+    """Verify every installed native sidecar under an archive-bound directory."""
+
+    if not archive.is_file():
+        raise ServingError("runtime binary tree archive is missing")
+    try:
+        with zipfile.ZipFile(archive) as bundle:
+            infos = [item for item in bundle.infolist() if not item.is_dir()]
+            anchors = [
+                item
+                for item in infos
+                if PurePosixPath(item.filename).name == anchor_member
+            ]
+            if len(anchors) != 1:
+                raise ServingError(
+                    f"runtime archive must contain exactly one {anchor_member}"
+                )
+            prefix = PurePosixPath(anchors[0].filename).parent
+            expected: dict[str, str] = {}
+            for info in infos:
+                member = PurePosixPath(info.filename)
+                if (
+                    member.is_absolute()
+                    or ".." in member.parts
+                    or ((info.external_attr >> 16) & 0o170000) == 0o120000
+                ):
+                    raise ServingError(
+                        "runtime archive binary tree contains an unsafe member"
+                    )
+                try:
+                    relative = member.relative_to(prefix)
+                except ValueError:
+                    continue
+                if not relative.parts:
+                    continue
+                relative_text = relative.as_posix()
+                if relative_text in expected:
+                    raise ServingError(
+                        "runtime archive binary tree contains duplicate members"
+                    )
+                expected[relative_text] = hashlib.sha256(
+                    bundle.read(info)
+                ).hexdigest()
+    except (OSError, zipfile.BadZipFile, KeyError) as exc:
+        raise ServingError("runtime archive tree provenance is unreadable") from exc
+    if not expected:
+        raise ServingError("runtime archive binary tree is empty")
+    installed: dict[str, str] = {}
+    if not installed_directory.is_dir() or installed_directory.is_symlink():
+        raise ServingError("installed runtime binary tree is missing or unsafe")
+    for path in installed_directory.rglob("*"):
+        if path.is_symlink():
+            raise ServingError("installed runtime binary tree contains a link")
+        if path.is_file():
+            installed[path.relative_to(installed_directory).as_posix()] = (
+                _sha256_file(path)
+            )
+        elif not path.is_dir():
+            raise ServingError("installed runtime binary tree contains an unsafe entry")
+    if expected.keys() != installed.keys() or any(
+        not hmac.compare_digest(digest, installed[relative])
+        for relative, digest in expected.items()
+    ):
+        raise ServingError(
+            "installed runtime binary tree differs from policy archive provenance"
+        )
+
+
+def validate_runtime_freshness(
+    *,
+    root: Path,
+    config: Path,
+    admission_path: Path,
+    llama_swap: Path,
+    resources: ResourceSnapshot,
+) -> tuple[dict[str, Any], dict[str, ContextPlan]]:
+    """Revalidate generated state, model authority, binaries, and resources."""
+
+    root = Path(os.path.abspath(os.fspath(root)))
+    evidence, contexts = _load_admission(admission_path)
+    expected_config = evidence.get("config_sha256")
+    if (
+        not isinstance(expected_config, str)
+        or not SHA256.fullmatch(expected_config)
+        or not config.is_file()
+        or _sha256_file(config) != expected_config
+    ):
+        raise ServingError("generated config integrity is stale or invalid")
+    raw_models = evidence.get("models")
+    if not isinstance(raw_models, dict) or not raw_models:
+        raise ServingError("runtime model evidence is missing")
+    models = parse_manifest(
+        _read_utf8(root / "serving" / "models.manifest", "model manifest")
+    )
+    profiles = parse_profiles(
+        _read_utf8(root / "serving" / "profiles.conf", "profile declaration")
+    )
+    validate_profile_references(profiles, models)
+    selected = tuple(raw_models)
+    snapshots = validate_policy_bound_models(root, models, selected)
+    for name, snapshot in snapshots.items():
+        raw = raw_models.get(name)
+        if not isinstance(raw, dict):
+            raise ServingError(f"{name}: runtime model evidence is invalid")
+        if (
+            raw.get("authority_digest") != snapshot.authority_digest
+            or raw.get("model_bytes") != snapshot.size_bytes
+        ):
+            raise ServingError(f"{name}: model authority/digest evidence is stale")
+    tiers = evidence.get("tiers")
+    if not isinstance(tiers, dict):
+        raise ServingError("runtime tier mapping is missing")
+    resolve_active_profile(
+        profiles,
+        models,
+        selected,
+        {key: str(tiers.get(key, "")) for key in TIER_KEYS},
+    )
+    binaries = evidence.get("binaries")
+    if not isinstance(binaries, dict):
+        raise ServingError("runtime binary provenance is missing")
+    raw_swap = binaries.get("llama_swap")
+    if not isinstance(raw_swap, dict):
+        raise ServingError("llama-swap binary provenance is missing")
+    expected_swap_path = Path(str(raw_swap.get("path", "")))
+    expected_swap_digest = str(raw_swap.get("sha256", ""))
+    if (
+        expected_swap_path != llama_swap
+        or not SHA256.fullmatch(expected_swap_digest)
+        or not llama_swap.is_file()
+        or _sha256_file(llama_swap) != expected_swap_digest
+    ):
+        raise ServingError("llama-swap binary provenance does not match")
+    raw_server = binaries.get("llama_server")
+    if not isinstance(raw_server, dict):
+        raise ServingError("llama-server binary provenance is missing")
+    server_path = Path(str(raw_server.get("path", "")))
+    server_digest = str(raw_server.get("sha256", ""))
+    if (
+        not SHA256.fullmatch(server_digest)
+        or not server_path.is_file()
+        or _sha256_file(server_path) != server_digest
+    ):
+        raise ServingError("llama-server binary provenance does not match")
+    raw_server_tree = binaries.get("llama_server_tree")
+    if server_path.suffix.lower() == ".exe" and not isinstance(
+        raw_server_tree, dict
+    ):
+        raise ServingError("llama-server sidecar provenance is missing")
+    if isinstance(raw_server_tree, dict):
+        tree_path = Path(str(raw_server_tree.get("path", "")))
+        tree_digest = str(raw_server_tree.get("sha256", ""))
+        if (
+            tree_path != server_path.parent
+            or not SHA256.fullmatch(tree_digest)
+            or _directory_tree_digest(tree_path) != tree_digest
+        ):
+            raise ServingError("llama-server binary tree provenance does not match")
+
+    ram_available = max(
+        0,
+        resources.system_available_mib
+        - resources.os_reserve_mib
+        - resources.runtime_reserve_mib,
+    )
+    vram_available = max(
+        0,
+        resources.accelerator_available_mib - resources.accelerator_reserve_mib,
+    )
+    resident_ram = 0
+    resident_vram = 0
+    swappable_ram: list[int] = []
+    swappable_vram: list[int] = []
+    for name, raw in raw_models.items():
+        if not isinstance(raw, dict):
+            raise ServingError(f"{name}: runtime model evidence is invalid")
+        placement = raw.get("placement")
+        if not isinstance(placement, dict):
+            raise ServingError(f"{name}: runtime placement evidence is missing")
+        ram_required = placement.get("ram_required_mib")
+        vram_required = placement.get("vram_required_mib")
+        backend = placement.get("backend")
+        if (
+            not isinstance(ram_required, int)
+            or isinstance(ram_required, bool)
+            or not isinstance(vram_required, int)
+            or isinstance(vram_required, bool)
+            or ram_required > ram_available
+            or vram_required < 0
+        ):
+            raise ServingError(f"{name}: current RAM cannot satisfy runtime placement")
+        if backend != Backend.CPU.value:
+            if resources.backend.value != backend or vram_required > vram_available:
+                raise ServingError(
+                    f"{name}: current accelerator resources cannot satisfy placement"
+                )
+        if raw.get("slot") in {"fast", "embed"}:
+            resident_ram += ram_required
+            resident_vram += vram_required
+        else:
+            swappable_ram.append(ram_required)
+            swappable_vram.append(vram_required)
+    aggregate_ram = resident_ram + max(swappable_ram, default=0)
+    aggregate_vram = resident_vram + max(swappable_vram, default=0)
+    if aggregate_ram > ram_available:
+        raise ServingError(
+            "current RAM cannot satisfy aggregate resident/swappable placement"
+        )
+    if aggregate_vram > vram_available:
+        raise ServingError(
+            "current VRAM cannot satisfy aggregate resident/swappable placement"
+        )
+    return evidence, contexts
 
 
 class AdmissionLease:
@@ -1303,10 +2110,20 @@ class AdmissionController:
         contexts: Mapping[str, ContextPlan],
         *,
         exclusive_groups: Sequence[frozenset[str]] = (),
+        aliases: Mapping[str, str] | None = None,
     ):
         if not contexts:
             raise ServingError("admission controller needs at least one model")
         self._contexts = dict(contexts)
+        self._aliases = dict(aliases or {})
+        for alias, target in self._aliases.items():
+            if (
+                not alias
+                or alias in self._contexts
+                or target not in self._contexts
+                or alias in self._aliases.values()
+            ):
+                raise ServingError(f"model alias collision or invalid target: {alias}")
         self._semaphores = {
             name: threading.BoundedSemaphore(plan.parallel_slots)
             for name, plan in contexts.items()
@@ -1324,7 +2141,8 @@ class AdmissionController:
     def try_begin(
         self, model_name: str, payload: Mapping[str, Any]
     ) -> AdmissionLease:
-        plan = self._contexts.get(model_name)
+        canonical_name = self._aliases.get(model_name, model_name)
+        plan = self._contexts.get(canonical_name)
         if plan is None:
             raise ServingError(f"model is outside the admitted serving plan: {model_name}")
         dispatch_admitted(
@@ -1334,8 +2152,8 @@ class AdmissionController:
             invoke=lambda request: request,
         )
         semaphores = [
-            self._semaphores[model_name],
-            *self._group_semaphores[model_name],
+            self._semaphores[canonical_name],
+            *self._group_semaphores[canonical_name],
         ]
         acquired: list[threading.BoundedSemaphore] = []
         for semaphore in semaphores:
@@ -1351,6 +2169,86 @@ class AdmissionController:
         return AdmissionLease(acquired)
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        _request: urllib.request.Request,
+        _file_pointer: Any,
+        _code: int,
+        _message: str,
+        _headers: Mapping[str, str],
+        _new_url: str,
+    ) -> None:
+        return None
+
+
+def _no_redirect_opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoRedirectHandler(),
+    )
+
+
+def fetch_url_no_redirect(
+    *,
+    url: str,
+    output: Path,
+    allowed_hosts: set[str],
+    allowed_schemes: set[str] | frozenset[str] = frozenset({"https"}),
+    timeout: int = 300,
+    maximum_bytes: int = 4 * 1024 * 1024 * 1024,
+) -> None:
+    """Fetch one allowlisted URL atomically while rejecting every redirect."""
+
+    parsed = urllib.parse.urlsplit(url)
+    hostname = (parsed.hostname or "").lower()
+    if (
+        parsed.scheme.lower() not in {item.lower() for item in allowed_schemes}
+        or hostname not in {item.lower() for item in allowed_hosts}
+        or parsed.username
+        or parsed.password
+        or parsed.fragment
+        or not hostname
+        or maximum_bytes <= 0
+    ):
+        raise ServingError("fetch URL is outside the allowlisted origin")
+    output = Path(os.path.abspath(os.fspath(output)))
+    if output.exists():
+        raise ServingError("fetch output already exists")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.name}.", suffix=".download", dir=output.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        request = urllib.request.Request(url, method="GET")
+        try:
+            response = _no_redirect_opener().open(request, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise ServingError(f"redirect/HTTP {exc.code} refused") from exc
+            raise ServingError(f"fetch failed with HTTP {exc.code}") from exc
+        with response, temporary.open("wb") as handle:
+            if not 200 <= response.status < 300:
+                raise ServingError(f"fetch failed with HTTP {response.status}")
+            total = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > maximum_bytes:
+                    raise ServingError("fetch exceeded maximum byte count")
+                handle.write(chunk)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def create_admission_server(
     *,
     host: str,
@@ -1359,6 +2257,7 @@ def create_admission_server(
     contexts: Mapping[str, ContextPlan],
     evidence: Mapping[str, Any],
     exclusive_groups: Sequence[frozenset[str]] = (),
+    aliases: Mapping[str, str] | None = None,
 ) -> ThreadingHTTPServer:
     """Create the loopback gateway that rejects unsafe work before llama-swap."""
 
@@ -1379,6 +2278,7 @@ def create_admission_server(
     controller = AdmissionController(
         contexts,
         exclusive_groups=exclusive_groups,
+        aliases=aliases,
     )
     capability_payload = redact_sensitive(dict(evidence))
     maximum_body = max(
@@ -1425,13 +2325,20 @@ def create_admission_server(
                 admission_rejected=admission_rejected,
             )
 
-        def _forward(
+        def _open_upstream(
             self, method: str, body: bytes | None
-        ) -> tuple[int, bytes, str]:
+        ) -> Any:
             path = self.path
             if not path.startswith("/") or "\r" in path or "\n" in path:
                 raise ServingError("unsafe upstream request path")
             target = base + path
+            parsed_target = urllib.parse.urlsplit(target)
+            if (
+                parsed_target.scheme != parsed_upstream.scheme
+                or parsed_target.hostname != parsed_upstream.hostname
+                or parsed_target.port != parsed_upstream.port
+            ):
+                raise ServingError("upstream request escaped the configured loopback")
             headers = {}
             for header in (
                 "Content-Type",
@@ -1451,30 +2358,72 @@ def create_admission_server(
                 method=method,
             )
             try:
-                with urllib.request.urlopen(request, timeout=1800) as response:
-                    response_body = response.read(maximum_body + 1)
-                    if len(response_body) > maximum_body:
-                        raise ServingError("upstream response exceeded gateway limit")
-                    return (
-                        response.status,
-                        response_body,
-                        response.headers.get("Content-Type", "application/json"),
-                    )
+                return _no_redirect_opener().open(request, timeout=1800)
             except urllib.error.HTTPError as exc:
-                response_body = exc.read(maximum_body + 1)
-                return (
-                    exc.code,
-                    response_body[:maximum_body],
-                    exc.headers.get("Content-Type", "application/json"),
+                if 300 <= exc.code < 400:
+                    exc.close()
+                    raise ServingError(f"upstream redirect HTTP {exc.code} refused") from exc
+                return exc
+
+        def _forward(
+            self, method: str, body: bytes | None, *, stream: bool = False
+        ) -> None:
+            response = self._open_upstream(method, body)
+            with response:
+                status = int(getattr(response, "status", getattr(response, "code", 0)))
+                if not 100 <= status <= 599 or 300 <= status < 400:
+                    raise ServingError(f"unsafe upstream HTTP status {status}")
+                content_type = response.headers.get(
+                    "Content-Type", "application/json"
                 )
+                streaming = stream or content_type.lower().startswith(
+                    "text/event-stream"
+                )
+                if streaming and 200 <= status < 300:
+                    self.send_response(status)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Cache-Control", "no-store")
+                    request_id = response.headers.get("X-Request-Id")
+                    if request_id and "\r" not in request_id and "\n" not in request_id:
+                        self.send_header("X-Request-Id", request_id)
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    total = 0
+                    deadline = time.monotonic() + 1800
+                    read_available = getattr(response, "read1", response.read)
+                    while True:
+                        if time.monotonic() > deadline:
+                            self.close_connection = True
+                            raise ServingError(
+                                "upstream streaming response exceeded time limit"
+                            )
+                        chunk = read_available(4096)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > maximum_body:
+                            self.close_connection = True
+                            raise ServingError(
+                                "upstream streaming response exceeded gateway limit"
+                            )
+                        self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii"))
+                        self.wfile.write(chunk)
+                        self.wfile.write(b"\r\n")
+                        self.wfile.flush()
+                    self.wfile.write(b"0\r\n\r\n")
+                    self.wfile.flush()
+                    return
+                response_body = response.read(maximum_body + 1)
+                if len(response_body) > maximum_body:
+                    raise ServingError("upstream response exceeded gateway limit")
+                self._send(status, response_body, content_type)
 
         def do_GET(self) -> None:
             if self.path == "/oracle/capabilities":
                 self._send_json(200, capability_payload)
                 return
             try:
-                status, body, content_type = self._forward("GET", None)
-                self._send(status, body, content_type)
+                self._forward("GET", None)
             except (OSError, ServingError, urllib.error.URLError) as exc:
                 self._send_json(
                     503,
@@ -1504,6 +2453,27 @@ def create_admission_server(
             if not isinstance(payload, dict):
                 self._send_json(400, {"error": "request JSON must be an object"})
                 return
+            if (
+                self.path in {"/v1/chat/completions", "/v1/messages"}
+                and "max_completion_tokens" in payload
+                and "max_tokens" not in payload
+            ):
+                payload["max_tokens"] = payload.pop(
+                    "max_completion_tokens"
+                )
+            if (
+                self.path in {"/v1/chat/completions", "/v1/messages"}
+                and "max_tokens" not in payload
+                and "max_completion_tokens" not in payload
+            ):
+                payload["max_tokens"] = DEFAULT_REQUEST_OUTPUT_TOKENS
+                body = json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
             model = payload.get("model")
             if not isinstance(model, str) or not model:
                 self._send_json(400, {"error": "request model is required"})
@@ -1521,18 +2491,20 @@ def create_admission_server(
                 return
             with lease:
                 try:
-                    status, response_body, content_type = self._forward(
-                        "POST", body
+                    self._forward(
+                        "POST",
+                        body,
+                        stream=payload.get("stream") is True,
                     )
-                    self._send(status, response_body, content_type)
                 except (OSError, ServingError, urllib.error.URLError) as exc:
-                    self._send_json(
-                        503,
-                        {
-                            "error": "loopback upstream unavailable",
-                            "reason": str(exc),
-                        },
-                    )
+                    if not self.close_connection:
+                        self._send_json(
+                            503,
+                            {
+                                "error": "loopback upstream unavailable",
+                                "reason": str(exc),
+                            },
+                        )
 
     server = ThreadingHTTPServer((host, port), AdmissionHandler)
     server.daemon_threads = True
@@ -1662,6 +2634,144 @@ def stop_recorded_process(
     terminate(record.pid)
 
 
+_SERVICE_LOCK_HANDLES: dict[tuple[str, str], Any] = {}
+_SERVICE_LOCK_GUARD = threading.Lock()
+
+
+def _try_lock_service_file(handle: Any) -> bool:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError):
+        return False
+    return True
+
+
+def _unlock_service_file(handle: Any) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def acquire_service_lock(
+    state: Path,
+    record: PidRecord,
+    *,
+    inspect: Callable[[int], tuple[str, float, str] | None],
+) -> str:
+    """Acquire and retain an OS-backed singleton lock for this process."""
+
+    state.mkdir(parents=True, exist_ok=True)
+    lock_path = state / "service.lock"
+    owner = uuid.uuid4().hex
+    payload = {
+        "schema_version": 1,
+        "owner": owner,
+        "pid": record.pid,
+        "executable": record.executable,
+        "started_at": record.started_at,
+        "command_digest": record.command_digest,
+    }
+    handle = lock_path.open("a+b")
+    if not _try_lock_service_file(handle):
+        handle.close()
+        try:
+            current = json.loads(lock_path.read_text(encoding="utf-8"))
+            existing = PidRecord(
+                int(current["pid"]),
+                str(current["executable"]),
+                float(current["started_at"]),
+                str(current["command_digest"]),
+            )
+            observed = inspect(existing.pid)
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            observed = None
+            existing = None
+        if (
+            existing is not None
+            and observed is not None
+            and process_matches_pid_record(
+                existing,
+                executable=observed[0],
+                started_at=observed[1],
+                command_digest=observed[2],
+            )
+        ):
+            raise ServingError("serving service already has an active owner")
+        raise ServingError(
+            "serving service lock is held by another process; refusing ownership race"
+        )
+    try:
+        encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode(
+            "utf-8"
+        )
+        handle.seek(0)
+        handle.truncate()
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.seek(0)
+        key = (os.path.normcase(os.path.abspath(lock_path)), owner)
+        with _SERVICE_LOCK_GUARD:
+            _SERVICE_LOCK_HANDLES[key] = handle
+        return owner
+    except BaseException:
+        _unlock_service_file(handle)
+        raise
+
+
+def release_service_lock(state: Path, owner: str) -> bool:
+    """Release only the singleton lock created by the supplied owner token."""
+
+    lock_path = state / "service.lock"
+    key = (os.path.normcase(os.path.abspath(lock_path)), owner)
+    with _SERVICE_LOCK_GUARD:
+        handle = _SERVICE_LOCK_HANDLES.pop(key, None)
+    if handle is None:
+        return False
+    try:
+        handle.seek(0)
+        payload = json.loads(handle.read().decode("utf-8"))
+        owned = isinstance(payload, dict) and payload.get("owner") == owner
+        if owned:
+            released = {
+                "schema_version": 1,
+                "released_owner": owner,
+            }
+            handle.seek(0)
+            handle.truncate()
+            handle.write(
+                (json.dumps(released, sort_keys=True) + "\n").encode("utf-8")
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        return owned
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    finally:
+        _unlock_service_file(handle)
+
+
 def _probe(
     name: str,
     status: str,
@@ -1692,10 +2802,19 @@ def run_offline_probes(
     embedding_model: str,
     listeners: Sequence[str],
     engine_runner: Callable[[str], tuple[int, str]] | None,
+    planned_placements: Mapping[str, Mapping[str, Any] | PlacementPlan] | None = None,
+    listener_inspector: Callable[[int], Sequence[str]] | None = None,
+    expected_listener_ports: Mapping[str, int] | None = None,
 ) -> list[ProbeResult]:
     """Run read-only production-shaped compatibility probes."""
 
     results: list[ProbeResult] = []
+    cold_running = transport("GET", "/running", None)
+    cold_entries: list[Any] = []
+    if _response_ok(cold_running) and isinstance(cold_running.body, dict):
+        raw_cold = cold_running.body.get("running", [])
+        if isinstance(raw_cold, list):
+            cold_entries = raw_cold
     health = transport("GET", "/health", None)
     results.append(
         _probe(
@@ -1735,68 +2854,238 @@ def run_offline_probes(
             },
         )
     )
-    unsafe_listeners = [
-        listener
-        for listener in listeners
-        if _listener_host(listener)
-        and not _is_loopback_without_raise(_listener_host(listener))
-    ]
-    results.append(
-        _probe(
-            "loopback_binding",
-            PASS if listeners and not unsafe_listeners else FAIL,
-            "all observed listeners are loopback"
-            if listeners and not unsafe_listeners
-            else "non-loopback or missing runtime listener evidence",
-            {"listeners": list(listeners), "unsafe": unsafe_listeners},
-        )
-    )
     plan = contexts.get(chat_model)
     if plan is None:
         results.append(_probe("openai_chat", FAIL, "chat model has no admission plan"))
         return results
-    production_output = min(512, plan.output_reserve_tokens)
-    production_budget = (
-        plan.slot_context_tokens
-        - plan.prompt_tool_overhead_tokens
-        - plan.output_reserve_tokens
-        - production_output
-        - 64
+    additional_running_entries: list[Any] = []
+    covered_models: set[str] = set()
+    additional_chat_models = sorted(
+        name
+        for name in contexts
+        if name not in {chat_model, embedding_model}
     )
-    if production_budget < 25000:
+    for model_name in additional_chat_models:
+        model_plan = contexts[model_name]
+        production_scale = (
+            model_plan.advertised_context_tokens
+            >= PRODUCTION_ADVERTISED_CONTEXT
+        )
+        model_payload: dict[str, object] = {
+            "model": model_name,
+            "max_tokens": min(512, model_plan.output_reserve_tokens),
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        " x" * 25000
+                        if production_scale
+                        else "Exercise this admitted local model."
+                    ),
+                }
+            ],
+        }
+        model_estimate = estimate_request_tokens(model_payload)
+        model_required = (
+            model_estimate.total_tokens
+            + model_plan.prompt_tool_overhead_tokens
+            + model_plan.output_reserve_tokens
+        )
+        if model_required > model_plan.slot_context_tokens:
+            model_chat = HttpResponse(
+                0,
+                {"error": "production request exceeds admitted context"},
+                {},
+                0,
+            )
+            model_chat_ok = False
+            observed_prompt_tokens = 0
+        else:
+            model_chat = transport(
+                "POST", "/v1/chat/completions", model_payload
+            )
+            observed_prompt_tokens = 0
+            if isinstance(model_chat.body, dict):
+                usage = model_chat.body.get("usage")
+                if isinstance(usage, dict):
+                    raw_prompt_tokens = usage.get("prompt_tokens")
+                    if isinstance(raw_prompt_tokens, int) and not isinstance(
+                        raw_prompt_tokens, bool
+                    ):
+                        observed_prompt_tokens = raw_prompt_tokens
+            model_chat_ok = (
+                _response_ok(model_chat)
+                and isinstance(model_chat.body, dict)
+                and isinstance(model_chat.body.get("choices"), list)
+                and bool(model_chat.body["choices"])
+                and (
+                    not production_scale
+                    or observed_prompt_tokens >= 25000
+                )
+            )
+        results.append(
+            _probe(
+                f"openai_chat:{model_name}",
+                PASS if model_chat_ok else FAIL,
+                "model accepted a production-shaped chat request"
+                if model_chat_ok
+                else "model did not prove its admitted chat capacity",
+                {
+                    "http_status": model_chat.status,
+                    "estimated_prompt_tokens": model_estimate.prompt_tokens,
+                    "observed_prompt_tokens": observed_prompt_tokens,
+                    "production_scale": production_scale,
+                },
+            )
+        )
+        boundary_output = min(128, model_plan.output_reserve_tokens)
+        boundary_available = max(
+            1,
+            model_plan.slot_context_tokens
+            - model_plan.prompt_tool_overhead_tokens
+            - model_plan.output_reserve_tokens,
+        )
+        boundary_base: dict[str, object] = {
+            "model": model_name,
+            "max_tokens": boundary_output,
+            "messages": [{"role": "user", "content": "boundary "}],
+        }
+        boundary_base_tokens = estimate_request_tokens(
+            boundary_base
+        ).total_tokens
+        boundary_payload = dict(boundary_base)
+        boundary_payload["messages"] = [
+            {
+                "role": "user",
+                "content": "boundary "
+                + ("a" * max(1, boundary_available - boundary_base_tokens)),
+            }
+        ]
+        boundary = transport(
+            "POST", "/v1/chat/completions", boundary_payload
+        )
+        boundary_ok = _response_ok(boundary)
+        results.append(
+            _probe(
+                f"context_boundary:{model_name}",
+                PASS if boundary_ok else FAIL,
+                "model accepted its admitted request boundary"
+                if boundary_ok
+                else "model rejected its admitted request boundary",
+                {"http_status": boundary.status},
+            )
+        )
+        oversize = transport(
+            "POST",
+            "/v1/chat/completions",
+            {
+                "model": model_name,
+                "max_tokens": model_plan.output_reserve_tokens,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "oversize-boundary "
+                        + (
+                            "a"
+                            * (
+                                model_plan.slot_context_tokens
+                                + model_plan.prompt_tool_overhead_tokens
+                            )
+                        ),
+                    }
+                ],
+            },
+        )
+        oversize_ok = (
+            oversize.status in {400, 413, 429}
+            and str(
+                oversize.headers.get("X-Oracle-Admission", "")
+            ).lower()
+            == "rejected"
+        )
+        results.append(
+            _probe(
+                f"context_oversize:{model_name}",
+                PASS if oversize_ok else FAIL,
+                "model rejected oversize work before upstream"
+                if oversize_ok
+                else "model did not prove pre-upstream oversize rejection",
+                {"http_status": oversize.status},
+            )
+        )
+        model_running = transport("GET", "/running", None)
+        if _response_ok(model_running) and isinstance(
+            model_running.body, dict
+        ):
+            raw_running = model_running.body.get("running", [])
+            if isinstance(raw_running, list):
+                additional_running_entries.extend(raw_running)
+        if model_chat_ok and boundary_ok and oversize_ok:
+            covered_models.add(model_name)
+    production_output = min(512, plan.output_reserve_tokens)
+    production_scale = (
+        plan.advertised_context_tokens >= PRODUCTION_ADVERTISED_CONTEXT
+    )
+    production_payload: dict[str, object] = {
+        "model": chat_model,
+        "max_tokens": production_output,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are an offline code agent. Respect tool and JSON contracts."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    " x" * 25000
+                    if production_scale
+                    else "Exercise this admitted local model."
+                ),
+            },
+        ],
+    }
+    production_estimate = estimate_request_tokens(production_payload)
+    production_required = (
+        production_estimate.total_tokens
+        + plan.prompt_tool_overhead_tokens
+        + plan.output_reserve_tokens
+    )
+    chat_ok = False
+    if production_required > plan.slot_context_tokens:
         results.append(
             _probe(
                 "openai_chat",
                 FAIL,
-                "admitted context cannot fit a production-shaped 25k-token request",
+                "admitted context cannot fit its production-shaped request",
                 {
-                    "admitted_prompt_budget": max(0, production_budget),
+                    "admitted_prompt_budget": plan.advertised_context_tokens,
                     "slot_context": plan.slot_context_tokens,
+                    "required_context": production_required,
                 },
             )
         )
     else:
-        production_tokens = min(production_budget, 30000)
-        production_payload: dict[str, object] = {
-            "model": chat_model,
-            "max_tokens": production_output,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are an offline code agent. Respect tool and JSON contracts.",
-                },
-                {
-                    "role": "user",
-                    "content": "ctx " * production_tokens,
-                },
-            ],
-        }
         chat = transport("POST", "/v1/chat/completions", production_payload)
+        observed_prompt_tokens = 0
+        if isinstance(chat.body, dict):
+            usage = chat.body.get("usage")
+            if isinstance(usage, dict):
+                raw_prompt_tokens = usage.get("prompt_tokens")
+                if isinstance(raw_prompt_tokens, int) and not isinstance(
+                    raw_prompt_tokens, bool
+                ):
+                    observed_prompt_tokens = raw_prompt_tokens
         chat_ok = (
             _response_ok(chat)
             and isinstance(chat.body, dict)
             and isinstance(chat.body.get("choices"), list)
             and bool(chat.body["choices"])
+            and (
+                not production_scale
+                or observed_prompt_tokens >= 25000
+            )
         )
         results.append(
             _probe(
@@ -1813,6 +3102,8 @@ def run_offline_probes(
                     "estimated_prompt_tokens": estimate_request_tokens(
                         production_payload
                     ).prompt_tokens,
+                    "observed_prompt_tokens": observed_prompt_tokens,
+                    "production_scale": production_scale,
                     "elapsed_ms": chat.elapsed_ms,
                 },
             )
@@ -1919,22 +3210,112 @@ def run_offline_probes(
             {"http_status": embedding.status, "dimensions": embedding_length},
         )
     )
+    embedding_running_entries: list[Any] = []
+    embedding_plan = contexts.get(embedding_model)
+    if embedding_plan is not None:
+        embedding_available = max(
+            1,
+            embedding_plan.slot_context_tokens
+            - embedding_plan.prompt_tool_overhead_tokens
+            - embedding_plan.output_reserve_tokens,
+        )
+        embedding_base: dict[str, object] = {
+            "model": embedding_model,
+            "input": "embedding-boundary ",
+        }
+        embedding_base_tokens = estimate_request_tokens(
+            embedding_base
+        ).total_tokens
+        embedding_boundary_payload = {
+            "model": embedding_model,
+            "input": "embedding-boundary "
+            + (
+                "a"
+                * max(
+                    1,
+                    embedding_available - embedding_base_tokens,
+                )
+            ),
+        }
+        embedding_boundary = transport(
+            "POST",
+            "/v1/embeddings",
+            embedding_boundary_payload,
+        )
+        embedding_boundary_ok = _response_ok(embedding_boundary)
+        results.append(
+            _probe(
+                "embedding_context_boundary",
+                PASS if embedding_boundary_ok else FAIL,
+                "embedding model accepted its admitted request boundary"
+                if embedding_boundary_ok
+                else "embedding model rejected its admitted request boundary",
+                {"http_status": embedding_boundary.status},
+            )
+        )
+        embedding_oversize = transport(
+            "POST",
+            "/v1/embeddings",
+            {
+                "model": embedding_model,
+                "input": "oversize-embedding "
+                + (
+                    "a"
+                    * (
+                        embedding_plan.slot_context_tokens
+                        + embedding_plan.prompt_tool_overhead_tokens
+                    )
+                ),
+            },
+        )
+        embedding_oversize_ok = (
+            embedding_oversize.status in {400, 413, 429}
+            and str(
+                embedding_oversize.headers.get(
+                    "X-Oracle-Admission", ""
+                )
+            ).lower()
+            == "rejected"
+        )
+        results.append(
+            _probe(
+                "embedding_context_oversize",
+                PASS if embedding_oversize_ok else FAIL,
+                "embedding oversize work was rejected before upstream"
+                if embedding_oversize_ok
+                else "embedding oversize rejection was not proven",
+                {"http_status": embedding_oversize.status},
+            )
+        )
+        embedding_running = transport("GET", "/running", None)
+        if _response_ok(embedding_running) and isinstance(
+            embedding_running.body, dict
+        ):
+            raw_embedding_running = embedding_running.body.get(
+                "running", []
+            )
+            if isinstance(raw_embedding_running, list):
+                embedding_running_entries.extend(raw_embedding_running)
     boundary_output = min(128, plan.output_reserve_tokens)
-    boundary_words = max(
+    boundary_available = max(
         1,
         plan.slot_context_tokens
         - plan.prompt_tool_overhead_tokens
         - plan.output_reserve_tokens
-        - boundary_output
-        - 32,
     )
-    boundary_payload: dict[str, object] = {
+    boundary_base: dict[str, object] = {
         "model": chat_model,
         "max_tokens": boundary_output,
         "messages": [
-            {"role": "user", "content": "boundary " + ("ctx " * boundary_words)}
+            {"role": "user", "content": "boundary "}
         ],
     }
+    boundary_base_tokens = estimate_request_tokens(boundary_base).total_tokens
+    boundary_filler = max(1, boundary_available - boundary_base_tokens)
+    boundary_payload = dict(boundary_base)
+    boundary_payload["messages"] = [
+        {"role": "user", "content": "boundary " + ("a" * boundary_filler)}
+    ]
     boundary = transport("POST", "/v1/chat/completions", boundary_payload)
     boundary_ok = _response_ok(boundary)
     results.append(
@@ -1958,7 +3339,7 @@ def run_offline_probes(
             {
                 "role": "user",
                 "content": "oversize-boundary "
-                * (plan.slot_context_tokens + plan.prompt_tool_overhead_tokens),
+                + ("a" * (plan.slot_context_tokens + plan.prompt_tool_overhead_tokens)),
             }
         ],
     }
@@ -1983,12 +3364,40 @@ def run_offline_probes(
             },
         )
     )
+    if chat_ok and boundary_ok and rejected_before_upstream:
+        covered_models.add(chat_model)
+    expected_chat_models = set(contexts) - {embedding_model}
+    uncovered_models = sorted(expected_chat_models - covered_models)
+    results.append(
+        _probe(
+            "model_context_coverage",
+            PASS if not uncovered_models else FAIL,
+            "every admitted chat model passed generation and context boundaries"
+            if not uncovered_models
+            else "one or more admitted chat models were not exercised successfully",
+            {
+                "covered": sorted(covered_models),
+                "missing": uncovered_models,
+            },
+        )
+    )
     running = transport("GET", "/running", None)
     running_entries: list[Any] = []
     if _response_ok(running) and isinstance(running.body, dict):
         raw_running = running.body.get("running", [])
         if isinstance(raw_running, list):
             running_entries = raw_running
+    all_running_entries = [
+        *additional_running_entries,
+        *embedding_running_entries,
+        *running_entries,
+    ]
+    cold_ready = any(
+        isinstance(item, dict)
+        and item.get("model") == chat_model
+        and str(item.get("state", "")).lower() in {"ready", "running", "loaded"}
+        for item in cold_entries
+    )
     ready = any(
         isinstance(item, dict)
         and item.get("model") == chat_model
@@ -1998,11 +3407,16 @@ def run_offline_probes(
     results.append(
         _probe(
             "cold_warm_state",
-            PASS if ready else FAIL,
-            "runtime reports a warm/ready admitted model"
-            if ready
-            else "runtime did not report a warm/ready admitted model",
-            {"http_status": running.status, "running": running_entries},
+            PASS if ready and not cold_ready else FAIL,
+            "runtime transitioned from cold to warm/ready"
+            if ready and not cold_ready
+            else "runtime did not prove a cold-to-warm transition",
+            {
+                "cold_http_status": cold_running.status,
+                "warm_http_status": running.status,
+                "cold": cold_entries,
+                "warm": running_entries,
+            },
         )
     )
     loaded_entry = next(
@@ -2036,18 +3450,225 @@ def run_offline_probes(
             ),
             None,
         )
-    observed = loaded_backend is not None and offloaded_layers is not None
+    normalized_loaded = None
+    if loaded_backend is not None:
+        normalized_loaded = next(
+            (
+                backend.value
+                for backend in Backend
+                if backend.value in loaded_backend.lower()
+            ),
+            loaded_backend.lower(),
+        )
+    planned = (planned_placements or {}).get(chat_model)
+    if isinstance(planned, PlacementPlan):
+        expected_backend = planned.backend.value
+        expected_offload = planned.offloaded_layers
+    elif isinstance(planned, Mapping):
+        expected_backend = str(planned.get("backend", "")).lower()
+        raw_expected_offload = planned.get("offloaded_layers")
+        expected_offload = (
+            int(raw_expected_offload)
+            if isinstance(raw_expected_offload, int)
+            and not isinstance(raw_expected_offload, bool)
+            else None
+        )
+    else:
+        expected_backend = ""
+        expected_offload = None
+    observed = normalized_loaded is not None and offloaded_layers is not None
+    placement_matches = observed
+    if expected_backend:
+        placement_matches = (
+            normalized_loaded == expected_backend
+            and expected_offload is not None
+            and offloaded_layers == expected_offload
+            and (
+                (expected_backend == Backend.CPU.value and offloaded_layers == 0)
+                or (
+                    expected_backend != Backend.CPU.value
+                    and offloaded_layers > 0
+                )
+            )
+        )
     results.append(
         _probe(
             "loaded_backend",
-            PASS if observed else PROVISIONAL,
-            "runtime reported actual loaded backend and offloaded layers"
-            if observed
-            else "runtime endpoint did not report both loaded backend and offloaded layers",
+            PASS if placement_matches else FAIL if expected_backend else PROVISIONAL,
+            "runtime placement matches selected backend and planned offload"
+            if placement_matches
+            else (
+                "runtime loaded backend/offload differs from the serving plan"
+                if expected_backend
+                else "runtime endpoint did not report both loaded backend and offloaded layers"
+            ),
             {
-                "loaded_backend": loaded_backend,
+                "loaded_backend": normalized_loaded,
                 "offloaded_layers": offloaded_layers,
+                "expected_backend": expected_backend or None,
+                "expected_offloaded_layers": expected_offload,
                 "source": "/running",
+            },
+        )
+    )
+    placement_probe_models = [
+        *additional_chat_models,
+        *([embedding_model] if embedding_model in contexts else []),
+    ]
+    for model_name in placement_probe_models:
+        model_entry = next(
+            (
+                entry
+                for entry in all_running_entries
+                if isinstance(entry, Mapping)
+                and entry.get("model") == model_name
+                and str(entry.get("state", "")).lower()
+                in {"ready", "running", "loaded"}
+            ),
+            None,
+        )
+        model_backend = None
+        model_offload = None
+        if isinstance(model_entry, Mapping):
+            model_backend = next(
+                (
+                    str(model_entry[key]).lower()
+                    for key in ("loaded_backend", "backend", "device")
+                    if model_entry.get(key) not in (None, "")
+                ),
+                None,
+            )
+            model_offload = next(
+                (
+                    int(model_entry[key])
+                    for key in (
+                        "offloaded_layers",
+                        "gpu_layers",
+                        "n_gpu_layers",
+                    )
+                    if isinstance(model_entry.get(key), int)
+                    and not isinstance(model_entry.get(key), bool)
+                ),
+                None,
+            )
+        normalized_backend = None
+        if model_backend is not None:
+            normalized_backend = next(
+                (
+                    item.value
+                    for item in Backend
+                    if item.value in model_backend
+                ),
+                model_backend,
+            )
+        model_planned = (planned_placements or {}).get(model_name)
+        if isinstance(model_planned, PlacementPlan):
+            model_expected_backend = model_planned.backend.value
+            model_expected_offload = model_planned.offloaded_layers
+        elif isinstance(model_planned, Mapping):
+            model_expected_backend = str(
+                model_planned.get("backend", "")
+            ).lower()
+            raw_model_expected_offload = model_planned.get(
+                "offloaded_layers"
+            )
+            model_expected_offload = (
+                int(raw_model_expected_offload)
+                if isinstance(raw_model_expected_offload, int)
+                and not isinstance(raw_model_expected_offload, bool)
+                else None
+            )
+        else:
+            model_expected_backend = ""
+            model_expected_offload = None
+        model_placement_matches = (
+            normalized_backend is not None
+            and model_offload is not None
+        )
+        if model_expected_backend:
+            model_placement_matches = (
+                normalized_backend == model_expected_backend
+                and model_expected_offload is not None
+                and model_offload == model_expected_offload
+                and (
+                    (
+                        model_expected_backend == Backend.CPU.value
+                        and model_offload == 0
+                    )
+                    or (
+                        model_expected_backend != Backend.CPU.value
+                        and model_offload > 0
+                    )
+                )
+            )
+        results.append(
+            _probe(
+                f"loaded_backend:{model_name}",
+                (
+                    PASS
+                    if model_placement_matches
+                    else FAIL
+                    if model_expected_backend
+                    else PROVISIONAL
+                ),
+                "runtime placement matches the plan"
+                if model_placement_matches
+                else "runtime placement evidence differs or is absent",
+                {
+                    "loaded_backend": normalized_backend,
+                    "offloaded_layers": model_offload,
+                    "expected_backend": model_expected_backend or None,
+                    "expected_offloaded_layers": model_expected_offload,
+                },
+            )
+        )
+    observed_listeners = set(listeners)
+    ports = dict(expected_listener_ports or {})
+    inspected_ports: dict[int, tuple[str, ...]] = {}
+    missing_model_ports: list[str] = []
+    if listener_inspector is not None:
+        if not ports:
+            ports = {"public": 9099, "internal": 9098}
+        for entry in all_running_entries:
+            if isinstance(entry, Mapping):
+                raw_port = entry.get("port")
+                if isinstance(raw_port, int) and not isinstance(raw_port, bool):
+                    ports[f"model:{entry.get('model', raw_port)}"] = raw_port
+                elif str(entry.get("state", "")).lower() in {
+                    "ready",
+                    "running",
+                    "loaded",
+                }:
+                    missing_model_ports.append(
+                        f"model:{entry.get('model', 'unknown')}:port-evidence"
+                    )
+        for port in sorted(set(ports.values())):
+            inspected_ports[port] = tuple(listener_inspector(port))
+            observed_listeners.update(inspected_ports[port])
+    unsafe_listeners = [
+        listener
+        for listener in sorted(observed_listeners)
+        if _listener_host(listener)
+        and not _is_loopback_without_raise(_listener_host(listener))
+    ]
+    missing_ports = list(missing_model_ports)
+    if listener_inspector is not None:
+        for label, port in ports.items():
+            if not inspected_ports.get(port):
+                missing_ports.append(label)
+    listeners_ok = bool(observed_listeners) and not unsafe_listeners and not missing_ports
+    results.append(
+        _probe(
+            "loopback_binding",
+            PASS if listeners_ok else FAIL,
+            "all public, internal, and model listeners are loopback"
+            if listeners_ok
+            else "non-loopback or missing runtime listener evidence",
+            {
+                "listeners": sorted(observed_listeners),
+                "unsafe": unsafe_listeners,
+                "missing": missing_ports,
+                "expected_ports": ports,
             },
         )
     )
@@ -2106,7 +3727,10 @@ def redact_sensitive(value: Any, key: str = "") -> Any:
     if isinstance(value, tuple):
         return tuple(redact_sensitive(item) for item in value)
     if isinstance(value, str):
-        return SENSITIVE_VALUE.sub("[REDACTED]", value)
+        redacted = SENSITIVE_URL_CREDENTIALS.sub(
+            r"\1[REDACTED]@", value
+        )
+        return SENSITIVE_VALUE.sub("[REDACTED]", redacted)
     return value
 
 
@@ -2362,6 +3986,17 @@ def _nvidia_smi_output() -> str | None:
     return completed.stdout if completed.returncode == 0 else None
 
 
+def _macos_wired_limit_mib() -> int:
+    completed = _run_capture(["sysctl", "-n", "iogpu.wired_limit_mb"])
+    if completed.returncode != 0:
+        return 0
+    try:
+        value = int(completed.stdout.strip())
+    except ValueError:
+        return 0
+    return value if value > 0 else 0
+
+
 def _vulkan_available() -> bool:
     forced = os.environ.get("ORACLE_VULKAN_AVAILABLE")
     if forced in {"0", "1"}:
@@ -2386,14 +4021,19 @@ def detect_resources(requested_backend: str = "auto") -> ResourceSnapshot:
             adapter_ram_bytes=None,
         )
     elif system == "Darwin":
+        wired_limit = _macos_wired_limit_mib()
         snapshot = ResourceSnapshot(
             system_total_mib=total,
             system_available_mib=available,
             backend=Backend.METAL,
-            accelerator_total_mib=total,
-            accelerator_available_mib=available,
+            accelerator_total_mib=wired_limit,
+            accelerator_available_mib=min(available, wired_limit),
             accelerator_shared=True,
-            capability_source="Metal unified memory; system available memory",
+            capability_source=(
+                "Metal unified memory; iogpu.wired_limit_mb"
+                if wired_limit
+                else "Metal unified memory; wired accelerator limit unavailable"
+            ),
         )
     elif nvidia_output:
         devices = parse_nvidia_smi(nvidia_output)
@@ -2566,7 +4206,7 @@ def _http_transport(
             headers={"Content-Type": "application/json"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with _no_redirect_opener().open(request, timeout=timeout) as response:
                 raw = response.read(16 * 1024 * 1024)
                 try:
                     body: Any = json.loads(raw.decode("utf-8"))
@@ -2639,34 +4279,139 @@ def _headless_engine_runner(
     )
 
     def run(engine: str) -> tuple[int, str]:
+        environment = dict(os.environ)
+        environment.update(
+            {
+                "ORACLE_ROOT": str(root),
+                "UV_OFFLINE": "1",
+                "UV_CACHE_DIR": str(root / "incoming" / "dependency-cache" / "uv"),
+            }
+        )
         if os.name == "nt":
-            powershell = shutil.which("powershell")
-            script = root / "engines" / engine / "launch.ps1"
-            if not powershell or not script.is_file():
-                return 127, "engine launcher unavailable"
-            args = [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)]
+            executable = root / ".tools" / "npm" / f"{engine}.cmd"
+            tool_paths = [
+                root / ".tools" / "bin",
+                root / ".tools" / "npm",
+                root / ".tools" / "npm" / "node_modules" / ".bin",
+            ]
         else:
-            bash = shutil.which("bash")
-            script = root / "engines" / engine / "launch.sh"
-            if not bash or not script.is_file():
-                return 127, "engine launcher unavailable"
-            args = [bash, str(script)]
+            executable = root / ".tools" / "npm" / "bin" / engine
+            tool_paths = [
+                root / ".tools" / "bin",
+                root / ".tools" / "npm" / "bin",
+            ]
+        if not executable.is_file():
+            return 127, "engine executable unavailable"
+        environment["PATH"] = os.pathsep.join(
+            [*(str(path) for path in tool_paths), environment.get("PATH", "")]
+        )
+        args = [str(executable)]
         if engine == "claude":
-            args.extend(["-p", prompt, "--model", model])
+            settings = (
+                root / "state" / "generated" / "claude-code" / "settings.json"
+            )
+            if not settings.is_file():
+                return 127, "generated Claude settings unavailable"
+            args.extend(
+                [
+                    "--settings",
+                    str(settings),
+                    "--mcp-config",
+                    str(root / "connectors" / "mcp.claude.json"),
+                    "-p",
+                    prompt,
+                    "--model",
+                    model,
+                ]
+            )
         elif engine == "opencode":
+            config = root / "state" / "generated" / "opencode" / "opencode.json"
+            if not config.is_file():
+                return 127, "generated OpenCode config unavailable"
+            environment["OPENCODE_CONFIG"] = str(config)
             args.extend(["run", "-m", f"oracle/{model}", prompt])
         else:
             return 127, "unsupported engine"
         try:
-            completed = subprocess.run(
-                args,
-                cwd=root,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=900,
-                check=False,
-            )
+            with tempfile.TemporaryDirectory(
+                prefix="oracle-readonly-engine-probe-"
+            ) as temporary:
+                scratch = Path(temporary)
+                environment.update(
+                    {
+                        "CLAUDE_CONFIG_DIR": str(scratch / "claude"),
+                        "XDG_CONFIG_HOME": str(scratch / "xdg-config"),
+                        "XDG_DATA_HOME": str(scratch / "xdg-data"),
+                        "XDG_CACHE_HOME": str(scratch / "xdg-cache"),
+                    }
+                )
+                if engine == "claude":
+                    try:
+                        settings_payload = json.loads(
+                            settings.read_text(encoding="utf-8")
+                        )
+                    except (
+                        OSError,
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        return 127, f"generated Claude settings invalid: {type(exc).__name__}"
+                    if not isinstance(settings_payload, dict):
+                        return 127, "generated Claude settings invalid"
+                    settings_payload.pop("hooks", None)
+                    sanitized_settings = scratch / "claude-settings.json"
+                    sanitized_settings.write_text(
+                        json.dumps(settings_payload, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                    empty_mcp = scratch / "mcp.json"
+                    empty_mcp.write_text(
+                        '{"mcpServers":{}}\n',
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                    args[args.index("--settings") + 1] = str(
+                        sanitized_settings
+                    )
+                    args[args.index("--mcp-config") + 1] = str(empty_mcp)
+                elif engine == "opencode":
+                    try:
+                        opencode_payload = json.loads(
+                            config.read_text(encoding="utf-8")
+                        )
+                    except (
+                        OSError,
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        return 127, f"generated OpenCode config invalid: {type(exc).__name__}"
+                    if not isinstance(opencode_payload, dict):
+                        return 127, "generated OpenCode config invalid"
+                    opencode_payload["permission"] = {
+                        "edit": "deny",
+                        "bash": "deny",
+                        "webfetch": "deny",
+                    }
+                    sanitized_opencode = scratch / "opencode.json"
+                    sanitized_opencode.write_text(
+                        json.dumps(opencode_payload, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                        newline="\n",
+                    )
+                    environment["OPENCODE_CONFIG"] = str(
+                        sanitized_opencode
+                    )
+                completed = subprocess.run(
+                    args,
+                    cwd=scratch,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=900,
+                    check=False,
+                    env=environment,
+                )
             return completed.returncode, completed.stdout[-4096:]
         except (OSError, subprocess.TimeoutExpired) as exc:
             return 124, type(exc).__name__
@@ -2700,12 +4445,6 @@ def capabilities_payload(root: Path, resources: ResourceSnapshot) -> dict[str, A
     if admission_path.is_file():
         admission, _ = _load_admission(admission_path)
         payload["admission"] = admission
-        backend = admission.get("backend")
-        if isinstance(backend, dict) and backend.get("loaded_backend"):
-            payload["loaded_backend"] = backend["loaded_backend"]
-            payload["offloaded_layers"] = backend.get("offloaded_layers")
-            payload["status"] = PASS
-            payload["reason"] = "loaded backend evidence is present"
     return redact_sensitive(payload)
 
 
@@ -2744,6 +4483,21 @@ def _service_run(
         raise ServingError("generated config integrity could not be checked") from exc
     if observed_config_digest != expected_config_digest:
         raise ServingError("generated config integrity digest does not match admission")
+    if (root / "serving" / "models.manifest").is_file():
+        raw_backend = evidence.get("backend")
+        selected_backend = (
+            str(raw_backend.get("selected_backend", "auto"))
+            if isinstance(raw_backend, dict)
+            else "auto"
+        )
+        current_resources = detect_resources(selected_backend)
+        evidence, contexts = validate_runtime_freshness(
+            root=root,
+            config=config,
+            admission_path=admission_path,
+            llama_swap=llama_swap,
+            resources=current_resources,
+        )
     raw_models = evidence.get("models")
     big_models = (
         frozenset(
@@ -2777,26 +4531,64 @@ def _service_run(
         started_at,
         command_digest,
     )
-    pid_path = state / "service.pid.json"
-    atomic_write_text(
-        pid_path,
-        json.dumps(
-            {
-                "schema_version": 1,
-                "pid": pid_record.pid,
-                "executable": pid_record.executable,
-                "started_at": pid_record.started_at,
-                "command_digest": pid_record.command_digest,
-                "gateway": f"{gateway_host}:{gateway_port}",
-                "upstream": f"{upstream_host}:{upstream_port}",
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
+    def inspect_lock_process(pid: int) -> tuple[str, float, str] | None:
+        if pid == pid_record.pid:
+            return (
+                pid_record.executable,
+                pid_record.started_at,
+                pid_record.command_digest,
+            )
+        try:
+            os.kill(pid, 0)
+        except (OSError, ProcessLookupError):
+            return None
+        return ("<live-unverified>", 0.0, "")
+
+    lock_owner = acquire_service_lock(
+        state,
+        pid_record,
+        inspect=inspect_lock_process,
     )
-    output_handle = (logs / "llama-swap.out.log").open("ab")
-    error_handle = (logs / "llama-swap.err.log").open("ab")
+    pid_path = state / "service.pid.json"
+    def remove_owned_pid_record() -> None:
+        try:
+            current = json.loads(pid_path.read_text(encoding="utf-8"))
+            if isinstance(current, dict) and current.get("run_token") == lock_owner:
+                pid_path.unlink()
+        except (FileNotFoundError, OSError, json.JSONDecodeError):
+            pass
+
+    output_handle = None
+    error_handle = None
+    try:
+        atomic_write_text(
+            pid_path,
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "pid": pid_record.pid,
+                    "executable": pid_record.executable,
+                    "started_at": pid_record.started_at,
+                    "command_digest": pid_record.command_digest,
+                    "run_token": lock_owner,
+                    "gateway": f"{gateway_host}:{gateway_port}",
+                    "upstream": f"{upstream_host}:{upstream_port}",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        output_handle = (logs / "llama-swap.out.log").open("ab")
+        error_handle = (logs / "llama-swap.err.log").open("ab")
+    except BaseException:
+        if output_handle is not None:
+            output_handle.close()
+        if error_handle is not None:
+            error_handle.close()
+        remove_owned_pid_record()
+        release_service_lock(state, lock_owner)
+        raise
     try:
         child = subprocess.Popen(
             command,
@@ -2808,10 +4600,8 @@ def _service_run(
     except OSError as exc:
         output_handle.close()
         error_handle.close()
-        try:
-            pid_path.unlink()
-        except FileNotFoundError:
-            pass
+        remove_owned_pid_record()
+        release_service_lock(state, lock_owner)
         raise ServingError(f"could not start llama-swap: {type(exc).__name__}") from exc
 
     def terminate_child() -> None:
@@ -2832,15 +4622,21 @@ def _service_run(
             contexts=contexts,
             evidence=evidence,
             exclusive_groups=(big_models,) if len(big_models) > 1 else (),
+            aliases=(
+                {
+                    str(alias): str(target)
+                    for alias, target in evidence.get("aliases", {}).items()
+                }
+                if isinstance(evidence.get("aliases"), dict)
+                else {}
+            ),
         )
     except (OSError, ServingError) as exc:
         terminate_child()
         output_handle.close()
         error_handle.close()
-        try:
-            pid_path.unlink()
-        except FileNotFoundError:
-            pass
+        remove_owned_pid_record()
+        release_service_lock(state, lock_owner)
         raise ServingError(
             f"could not start admission gateway: {type(exc).__name__}"
         ) from exc
@@ -2875,10 +4671,8 @@ def _service_run(
         terminate_child()
         output_handle.close()
         error_handle.close()
-        try:
-            pid_path.unlink()
-        except FileNotFoundError:
-            pass
+        remove_owned_pid_record()
+        release_service_lock(state, lock_owner)
         signal.signal(signal.SIGTERM, previous_term)
         signal.signal(signal.SIGINT, previous_int)
 
@@ -2898,6 +4692,7 @@ def _parser() -> argparse.ArgumentParser:
     render = subparsers.add_parser("render")
     render.add_argument("--root", type=Path, required=True)
     render.add_argument("--server", type=Path, required=True)
+    render.add_argument("--llama-swap", type=Path)
     render.add_argument("--platform", choices=["posix", "windows"], required=True)
     render.add_argument(
         "--backend", choices=["auto", *(item.value for item in Backend)], default="auto"
@@ -2910,6 +4705,16 @@ def _parser() -> argparse.ArgumentParser:
 
     safe_output = subparsers.add_parser("safe-output")
     safe_output.add_argument("--value", required=True)
+
+    verify_binary = subparsers.add_parser("verify-binary")
+    verify_binary.add_argument("--installed", type=Path, required=True)
+    verify_binary.add_argument("--archive", type=Path, required=True)
+    verify_binary.add_argument("--member", required=True)
+
+    verify_binary_tree = subparsers.add_parser("verify-binary-tree")
+    verify_binary_tree.add_argument("--installed-directory", type=Path, required=True)
+    verify_binary_tree.add_argument("--archive", type=Path, required=True)
+    verify_binary_tree.add_argument("--anchor-member", required=True)
 
     skills = subparsers.add_parser("skill-policy")
     skills.add_argument("--vendor", type=Path, required=True)
@@ -2945,6 +4750,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "safe-output":
             print(safe_output_name(args.value))
             return 0
+        if args.command == "verify-binary":
+            validate_binary_against_archive(
+                installed=args.installed.resolve(),
+                archive=args.archive.resolve(),
+                member_name=args.member,
+            )
+            print(args.installed.resolve())
+            return 0
+        if args.command == "verify-binary-tree":
+            validate_binary_tree_against_archive(
+                installed_directory=args.installed_directory.resolve(),
+                archive=args.archive.resolve(),
+                anchor_member=args.anchor_member,
+            )
+            print(args.installed_directory.resolve())
+            return 0
         if args.command == "capabilities":
             resources = detect_resources(args.backend)
             print(
@@ -2960,6 +4781,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             plan = prepare_runtime(
                 root=args.root.resolve(),
                 server_path=args.server.resolve(),
+                llama_swap_path=(
+                    args.llama_swap.resolve() if args.llama_swap is not None else None
+                ),
                 platform=args.platform,
                 resources=resources,
                 requested_backend=args.backend,
@@ -2976,6 +4800,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                             name: {
                                 "advertised_context": context.advertised_context_tokens,
                                 "parallel_slots": context.parallel_slots,
+                                "placement": {
+                                    "backend": plan.placements[name].backend.value,
+                                    "offloaded_layers": (
+                                        plan.placements[name].offloaded_layers
+                                    ),
+                                },
                             }
                             for name, context in sorted(plan.contexts.items())
                         },
@@ -3084,7 +4914,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 contexts=contexts,
                 chat_model=chat_model,
                 embedding_model=embedding_model,
-                listeners=inspect_loopback_listeners(9099),
+                listeners=(),
+                listener_inspector=inspect_loopback_listeners,
+                expected_listener_ports={"public": 9099, "internal": 9098},
+                planned_placements={
+                    name: raw["placement"]
+                    for name, raw in raw_models.items()
+                    if isinstance(name, str)
+                    and isinstance(raw, dict)
+                    and isinstance(raw.get("placement"), dict)
+                },
                 engine_runner=(
                     _headless_engine_runner(root, chat_model)
                     if args.include_engines

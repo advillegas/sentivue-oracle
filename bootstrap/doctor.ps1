@@ -123,7 +123,9 @@ Write-Host "== serving =="
 Write-Host "read-only shared profile/resource/admission evidence:"
 if ($python) {
     $ServingCore = Join-Path $Root "verification\serving.py"
-    $CapabilityText = (& $python $ServingCore capabilities --root $Root 2>&1 | Out-String).Trim()
+    $ServingBackend = if ($env:ORACLE_BACKEND) { $env:ORACLE_BACKEND } else { "cpu" }
+    $CapabilityText = (& $python $ServingCore capabilities --root $Root `
+        --backend $ServingBackend 2>&1 | Out-String).Trim()
     $CapabilityExit = $LASTEXITCODE
     if ($CapabilityExit -eq 0) {
         try {
@@ -196,6 +198,10 @@ if ($python) {
             OK ("loaded backend {0}; offloaded layers {1}" -f `
                 $LoadedProbe[0].evidence.loaded_backend,
                 $LoadedProbe[0].evidence.offloaded_layers)
+        } elseif ($LoadedProbe.Count -eq 1 -and
+            $LoadedProbe[0].status -eq "FAIL") {
+            BAD "loaded backend evidence contradicts the serving plan" `
+                $LoadedProbe[0].reason
         } elseif ($LoadedProbe.Count -eq 1) {
             MEH "loaded backend evidence is provisional" `
                 $LoadedProbe[0].reason
@@ -210,7 +216,7 @@ if ($python) {
         MEH "production-shaped serving verify is PROVISIONAL" `
             "headless engine flows or runtime evidence were skipped"
     } else {
-        MEH "production-shaped serving verify is not green" `
+        BAD "production-shaped serving verify failed" `
             "service may be down/unprovisioned; inspect: $VerifyText"
     }
 } else {

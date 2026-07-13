@@ -3393,3 +3393,56 @@ def test_third_review_source_callers_preflight_inside_explicit_trusted_root(
     assert "--trusted-root" in source
     assert "preflight-source" in source
     assert source.index("preflight-source") < source.index("install-source")
+
+
+def test_final_review_engine_sync_uses_declared_profile_tiers_and_active_models() -> None:
+    profile = lifecycle.resolve_sync_profile(
+        (
+            "full | 448 | huge,other,fast,embed | other | huge | fast | ~700 GB\n"
+            "mid | 64 | fast,embed | fast | fast | fast | ~40 GB\n"
+        ),
+        active_names={"huge", "other", "fast", "embed"},
+        detected_names={"huge", "other", "fast", "embed", "inactive"},
+    )
+
+    assert profile["active"] == ("huge", "other", "fast", "embed")
+    assert profile["tiers"] == {
+        "OPUS_MODEL": "other",
+        "SONNET_MODEL": "huge",
+        "HAIKU_MODEL": "fast",
+    }
+
+
+def test_final_review_model_authority_binds_layer_metadata(tmp_path: Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "models": {
+            "chat": {
+                "repository": "example/chat",
+                "revision": "a" * 40,
+                "include": "*.gguf",
+                "layer_mib": [5, 6, 7],
+                "kv_mib_per_token": 0.125,
+                "files": [
+                    {
+                        "path": "chat.gguf",
+                        "sha256": "b" * 64,
+                        "size": 1024,
+                    }
+                ],
+            }
+        },
+    }
+    put(
+        tmp_path,
+        "serving/model-authorities.json",
+        json.dumps(payload, sort_keys=True) + "\n",
+    )
+
+    authority = lifecycle._model_authorities(tmp_path)["chat"]
+
+    assert authority["layer_mib"] == [5, 6, 7]
+    assert authority["kv_mib_per_token"] == 0.125
+    assert lifecycle._model_authority_digest(authority) != lifecycle._model_authority_digest(
+        {key: value for key, value in authority.items() if key != "layer_mib"}
+    )

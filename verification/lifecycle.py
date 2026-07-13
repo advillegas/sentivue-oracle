@@ -15,6 +15,7 @@ import fnmatch
 import gzip
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -548,6 +549,8 @@ def _model_authorities(root: Path) -> dict[str, dict[str, Any]]:
         revision = raw.get("revision")
         include = raw.get("include")
         files = raw.get("files")
+        raw_layers = raw.get("layer_mib")
+        raw_kv_mib = raw.get("kv_mib_per_token")
         if (
             not isinstance(repository, str)
             or not re.fullmatch(
@@ -564,6 +567,35 @@ def _model_authorities(root: Path) -> dict[str, dict[str, Any]]:
             raise LifecycleError(f"model authority is incomplete: {name}")
         seen: set[str] = set()
         normalized_files: list[dict[str, Any]] = []
+        normalized_layers: list[int] | None = None
+        normalized_kv_mib: float | None = None
+        if raw_layers is not None:
+            if (
+                not isinstance(raw_layers, list)
+                or not raw_layers
+                or len(raw_layers) > 1000
+                or any(
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value <= 0
+                    for value in raw_layers
+                )
+            ):
+                raise LifecycleError(
+                    f"model authority layer metadata is invalid: {name}"
+                )
+            normalized_layers = list(raw_layers)
+        if raw_kv_mib is not None:
+            if (
+                not isinstance(raw_kv_mib, (int, float))
+                or isinstance(raw_kv_mib, bool)
+                or not math.isfinite(float(raw_kv_mib))
+                or not 0.001 <= float(raw_kv_mib) <= 8.0
+            ):
+                raise LifecycleError(
+                    f"model authority KV memory metadata is invalid: {name}"
+                )
+            normalized_kv_mib = float(raw_kv_mib)
         for index, file_entry in enumerate(files):
             if not isinstance(file_entry, dict):
                 raise LifecycleError(
@@ -588,12 +620,17 @@ def _model_authorities(root: Path) -> dict[str, dict[str, Any]]:
             normalized_files.append(
                 {"path": relative, "sha256": digest, "size": size}
             )
-        authorities[name] = {
+        normalized_authority = {
             "repository": repository,
             "revision": revision,
             "include": include,
             "files": sorted(normalized_files, key=lambda item: item["path"]),
         }
+        if normalized_layers is not None:
+            normalized_authority["layer_mib"] = normalized_layers
+        if normalized_kv_mib is not None:
+            normalized_authority["kv_mib_per_token"] = normalized_kv_mib
+        authorities[name] = normalized_authority
     return authorities
 
 
@@ -3296,6 +3333,12 @@ def import_model_snapshot(
             key=lambda item: str(item.get("path", "")) if isinstance(item, dict) else "",
         ),
     }
+    if "layer_mib" in supplied:
+        normalized_supplied["layer_mib"] = supplied.get("layer_mib")
+    if "kv_mib_per_token" in supplied:
+        normalized_supplied["kv_mib_per_token"] = supplied.get(
+            "kv_mib_per_token"
+        )
     if normalized_supplied != tracked:
         raise LifecycleError(
             f"supplied model authority differs from tracked policy: {model_name}"
@@ -3835,6 +3878,63 @@ def _pick_tier(
     return candidates[0]["name"] if candidates else ""
 
 
+def resolve_sync_profile(
+    profiles_text: str,
+    *,
+    active_names: set[str],
+    detected_names: set[str],
+) -> dict[str, Any]:
+    """Resolve one exact declared profile for generated engine configuration."""
+
+    matches: list[dict[str, Any]] = []
+    for line_number, raw in enumerate(profiles_text.splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = [field.strip() for field in raw.split("|")]
+        if len(fields) != 7:
+            raise LifecycleError(
+                f"serving/profiles.conf:{line_number}: expected 7 fields"
+            )
+        name, _minimum, raw_models, opus, sonnet, haiku, _download = fields
+        models = tuple(
+            item.strip() for item in raw_models.split(",") if item.strip()
+        )
+        if (
+            not name
+            or not models
+            or len(models) != len(set(models))
+            or any(tier not in models for tier in (opus, sonnet, haiku))
+        ):
+            raise LifecycleError(
+                f"serving/profiles.conf:{line_number}: invalid profile routing"
+            )
+        if set(models) == active_names:
+            matches.append(
+                {
+                    "name": name,
+                    "active": models,
+                    "tiers": {
+                        "OPUS_MODEL": opus,
+                        "SONNET_MODEL": sonnet,
+                        "HAIKU_MODEL": haiku,
+                    },
+                }
+            )
+    if len(matches) != 1:
+        raise LifecycleError(
+            "active models do not exactly match one declared serving profile"
+        )
+    selected = matches[0]
+    missing = set(selected["active"]) - detected_names
+    if missing:
+        raise LifecycleError(
+            "active profile has no policy-bound snapshot for: "
+            + ", ".join(sorted(missing))
+        )
+    return selected
+
+
 def sync_model_configs(root: Path, home: Path) -> list[Path]:
     """Generate machine configs without changing tracked source templates."""
 
@@ -3856,35 +3956,61 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
             "configuration is unavailable"
         )
     by_name = {model["name"]: model for model in models}
-    detected = [by_name[name] for name in ids if name in by_name]
-    chat = [model for model in detected if model["slot"] != "embed"]
-    if not chat:
-        raise LifecycleError("detected models contain no chat-capable model")
     profile_path = root / "serving" / "models.profile"
-    profile = set()
+    profile = set(ids)
     if profile_path.is_file():
         profile = {
             line.strip()
             for line in profile_path.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
-    sonnet = _pick_tier(chat, profile, ("fast", "big"))
-    opus = _pick_tier(chat, profile, ("big", "fast"))
-    fast = [
-        model
-        for model in chat
-        if model["slot"] == "fast"
-        and str(model["context"]).isdigit()
-        and int(model["context"]) >= 32768
-    ]
-    fast = sorted(
-        fast,
-        key=lambda model: (
-            _model_file_size(root, model["name"]) or sys.maxsize,
-            model["name"],
-        ),
-    )
-    haiku = fast[0]["name"] if fast else sonnet
+    profiles_path = root / "serving" / "profiles.conf"
+    declared_profile: dict[str, Any] | None = None
+    if profiles_path.is_file():
+        try:
+            declared_profile = resolve_sync_profile(
+                profiles_path.read_text(encoding="utf-8"),
+                active_names=profile,
+                detected_names=set(ids),
+            )
+        except (OSError, UnicodeDecodeError) as exc:
+            raise LifecycleError(f"profile declaration is unreadable: {exc}") from exc
+        active_order = tuple(declared_profile["active"])
+    else:
+        missing = profile - set(ids)
+        if missing:
+            raise LifecycleError(
+                "active profile has no policy-bound snapshot for: "
+                + ", ".join(sorted(missing))
+            )
+        active_order = tuple(name for name in ids if name in profile)
+    detected = [by_name[name] for name in active_order if name in by_name]
+    chat = [model for model in detected if model["slot"] != "embed"]
+    if not chat:
+        raise LifecycleError("detected active models contain no chat-capable model")
+    if declared_profile is not None:
+        tiers = declared_profile["tiers"]
+        opus = str(tiers["OPUS_MODEL"])
+        sonnet = str(tiers["SONNET_MODEL"])
+        haiku = str(tiers["HAIKU_MODEL"])
+    else:
+        sonnet = _pick_tier(chat, profile, ("fast", "big"))
+        opus = _pick_tier(chat, profile, ("big", "fast"))
+        fast = [
+            model
+            for model in chat
+            if model["slot"] == "fast"
+            and str(model["context"]).isdigit()
+            and int(model["context"]) >= 32768
+        ]
+        fast = sorted(
+            fast,
+            key=lambda model: (
+                _model_file_size(root, model["name"]) or sys.maxsize,
+                model["name"],
+            ),
+        )
+        haiku = fast[0]["name"] if fast else sonnet
     anchor = sonnet
     ordered = [by_name[anchor], *[model for model in detected if model["name"] != anchor]]
 
@@ -3894,6 +4020,64 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
         f"HAIKU_MODEL={haiku}\n"
     )
     tiers_path = root / "serving" / "tiers.env"
+    admitted_contexts: dict[str, int] = {}
+    admission_path = root / "state" / "generated" / "serving" / "admission.json"
+    if admission_path.is_file():
+        try:
+            admission_payload = json.loads(
+                admission_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LifecycleError(
+                f"serving admission metadata is invalid: {exc}"
+            ) from exc
+        admission_models = (
+            admission_payload.get("models")
+            if isinstance(admission_payload, dict)
+            else None
+        )
+        admission_tiers = (
+            admission_payload.get("tiers")
+            if isinstance(admission_payload, dict)
+            else None
+        )
+        expected_tiers = {
+            "OPUS_MODEL": opus,
+            "SONNET_MODEL": sonnet,
+            "HAIKU_MODEL": haiku,
+        }
+        if (
+            not isinstance(admission_payload, dict)
+            or admission_payload.get("schema_version") != SCHEMA_VERSION
+            or not isinstance(admission_models, dict)
+            or set(admission_models) != set(active_order)
+            or admission_tiers != expected_tiers
+        ):
+            raise LifecycleError(
+                "serving admission metadata differs from the active profile"
+            )
+        for model_name in active_order:
+            raw_admission = admission_models.get(model_name)
+            advertised = (
+                raw_admission.get("advertised_context")
+                if isinstance(raw_admission, dict)
+                else None
+            )
+            raw_nominal = by_name[model_name]["context"]
+            if not str(raw_nominal).isdigit():
+                raise LifecycleError(
+                    f"model context is invalid: {model_name}"
+                )
+            nominal = int(raw_nominal)
+            if (
+                not isinstance(advertised, int)
+                or isinstance(advertised, bool)
+                or not 0 < advertised <= nominal
+            ):
+                raise LifecycleError(
+                    f"serving admission context is invalid: {model_name}"
+                )
+            admitted_contexts[model_name] = advertised
 
     claude_template = root / "engines" / "claude-code" / "home" / "settings.json"
     claude = _load_json_template(claude_template, {"env": {}})
@@ -3925,12 +4109,22 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
     oracle = providers.setdefault("oracle", {})
     if not isinstance(oracle, dict):
         raise LifecycleError("OpenCode template oracle provider must be an object")
+    engine_contexts = {
+        model["name"]: admitted_contexts.get(
+            model["name"],
+            min(
+                int(model["context"])
+                if str(model["context"]).isdigit()
+                else 8192,
+                8192,
+            ),
+        )
+        for model in detected
+    }
     model_map: dict[str, Any] = {}
     for model in chat:
-        context = (
-            int(model["context"]) if str(model["context"]).isdigit() else 32768
-        )
-        output = min(max(context // 2, 8192), 65536)
+        context = engine_contexts[model["name"]]
+        output = max(256, min(context // 4, 8192))
         model_map[model["name"]] = {
             "name": f"{model['name']} (local)",
             "tool_call": True,
@@ -3975,7 +4169,7 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
                 [
                     "    capabilities: [tool_use]",
                     "    defaultCompletionOptions:",
-                    f"      contextLength: {model['context']}",
+                    f"      contextLength: {engine_contexts[model['name']]}",
                 ]
             )
     continue_text = "\n".join(continue_lines) + "\n"
