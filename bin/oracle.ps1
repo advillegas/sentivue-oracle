@@ -5,8 +5,12 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$env:PATH = (Join-Path $Root ".tools\bin") + ";" +
+$env:PATH = (Join-Path $Root "env\.venv\Scripts") + ";" +
+    (Join-Path $Root ".tools\bin") + ";" +
     (Join-Path $Root ".tools\npm") + ";" + $env:PATH
+$env:ORACLE_ROOT = $Root
+$env:ORACLE_PROJECT_ROOT = $Root
+. (Join-Path $Root "engines\shared\lean-ctx-env.ps1")
 $env:UV_OFFLINE = "1"
 $env:UV_CACHE_DIR = Join-Path $Root "incoming\dependency-cache\uv"
 
@@ -139,6 +143,55 @@ switch ($Cmd) {
         if (-not $npmCommand) { throw "installed cached Node tree has no npm.cmd" }
         $toolsBin = Join-Path $Root ".tools\bin"
         New-Item -ItemType Directory -Force -Path $toolsBin | Out-Null
+        $leanCtxArchive = Get-CachedArtifact "lean-ctx-windows-x64" `
+            $pins["LEAN_CTX_VERSION"] $python
+        $leanCtxStage = Join-Path $Root (".lean-ctx-stage-" + [Guid]::NewGuid().ToString("N"))
+        try {
+            New-Item -ItemType Directory -Path $leanCtxStage | Out-Null
+            & tar -xf $leanCtxArchive -C $leanCtxStage
+            if ($LASTEXITCODE -ne 0) { throw "cached lean-ctx extraction failed" }
+            $leanCtxSources = @(
+                Get-ChildItem $leanCtxStage -Recurse -File -Filter "lean-ctx.exe"
+            )
+            if ($leanCtxSources.Count -ne 1) {
+                throw "cached lean-ctx export must contain exactly one lean-ctx.exe"
+            }
+            $leanCtxBinary = Join-Path $toolsBin "lean-ctx.exe"
+            $leanCtxTemporary = $leanCtxBinary + ".new"
+            Copy-Item -LiteralPath $leanCtxSources[0].FullName `
+                -Destination $leanCtxTemporary -Force
+            Move-Item -LiteralPath $leanCtxTemporary `
+                -Destination $leanCtxBinary -Force
+        } finally {
+            Remove-Item -LiteralPath $leanCtxStage -Recurse -Force `
+                -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath (Join-Path $toolsBin "lean-ctx.exe.new") `
+                -Force -ErrorAction SilentlyContinue
+        }
+        $leanCtxRoot = Join-Path $Root "state\lean-ctx"
+        foreach ($directory in @("config", "data", "state", "cache")) {
+            New-Item -ItemType Directory -Force `
+                -Path (Join-Path $leanCtxRoot $directory) | Out-Null
+        }
+        $leanCtxConfig = Join-Path $leanCtxRoot "config\config.toml"
+        $leanCtxConfigTemporary = $leanCtxConfig + ".new"
+        try {
+            Copy-Item -LiteralPath `
+                (Join-Path $Root "engines\shared\lean-ctx-config.toml") `
+                -Destination $leanCtxConfigTemporary -Force
+            Move-Item -LiteralPath $leanCtxConfigTemporary `
+                -Destination $leanCtxConfig -Force
+        } finally {
+            Remove-Item -LiteralPath $leanCtxConfigTemporary -Force `
+                -ErrorAction SilentlyContinue
+        }
+        $leanCtxVersion = (& $leanCtxBinary --version).Trim()
+        $expectedLeanCtxVersion = $pins["LEAN_CTX_VERSION"].TrimStart("v")
+        if ($LASTEXITCODE -ne 0 -or
+            $leanCtxVersion -notmatch ("^lean-ctx " +
+                [regex]::Escape($expectedLeanCtxVersion) + " ")) {
+            throw "installed lean-ctx does not match $($pins['LEAN_CTX_VERSION'])"
+        }
         $uvArchive = Get-CachedArtifact "uv-windows-x64" $pins["UV_VERSION"] $python
         if ([IO.Path]::GetExtension($uvArchive) -ne ".zip") {
             throw "validated Windows uv export must be a .zip"
@@ -252,6 +305,42 @@ switch ($Cmd) {
     "claude"   { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\claude-code\launch.ps1") @Rest }
     "opencode" { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\opencode\launch.ps1") @Rest }
     "kilo"     { & powershell -ExecutionPolicy Bypass -File (Join-Path $Root "engines\kilo\launch.ps1") @Rest }
+    { $_ -in @("context", "ctx") } {
+        $contextArgs = if ($Rest.Count -gt 0) { $Rest } else { @("status") }
+        $contextTail = if ($contextArgs.Count -gt 1) {
+            @($contextArgs[1..($contextArgs.Count - 1)])
+        } else {
+            @()
+        }
+        $allowedContext = $false
+        switch ($contextArgs[0]) {
+            { $_ -in @("status", "doctor", "version", "help", "--version", "--help") } {
+                $allowedContext = $contextTail.Count -eq 0
+            }
+            "gain" {
+                $allowedContext = $contextTail.Count -eq 0 -or
+                    ($contextTail.Count -eq 1 -and $contextTail[0] -eq "--json")
+            }
+            "benchmark" {
+                $allowedContext = $contextTail.Count -eq 0 -or
+                    ($contextTail.Count -eq 2 -and
+                        $contextTail[0] -eq "run" -and $contextTail[1] -eq ".")
+            }
+        }
+        if (-not $allowedContext) {
+            [Console]::Error.WriteLine(
+                "ERROR: oracle ctx exposes read-only local diagnostics only"
+            )
+            exit 2
+        }
+        $leanCtx = Join-Path $Root ".tools\bin\lean-ctx.exe"
+        if (-not (Test-Path -LiteralPath $leanCtx)) {
+            Write-Error "lean-ctx is missing; run bin\oracle.ps1 setup"
+            exit 1
+        }
+        & $leanCtx @contextArgs
+        exit $LASTEXITCODE
+    }
     "notes" {
         # Obsidian over the repo: the operator's lens on memory/doctrine/reports
         $exe = "$env:LOCALAPPDATA\Programs\Obsidian\Obsidian.exe"
@@ -335,6 +424,7 @@ switch ($Cmd) {
         Write-Host "  harden [off] | egress [status|plan]       default-deny egress for all appliance processes"
         Write-Host "  verify-egress | audit [-Deep]             prove no leaks | full security sweep"
         Write-Host "  claude | opencode | kilo                  engine sessions on local models"
+        Write-Host "  ctx [status|gain|doctor|benchmark ...]    local context runtime"
         Write-Host "  mission <toml> [engine] [hours]           self-governing mission (conductor loop)"
         Write-Host "  retro | state                             process retrospective | mission state"
         Write-Host "  agents-ui [install|start|stop|status]     orchestration viewer (Agent-MCP, optional)"

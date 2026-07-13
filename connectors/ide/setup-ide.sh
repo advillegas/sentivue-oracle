@@ -15,6 +15,11 @@
 # Models are auto-detected from the machine on every launch (sync-models.sh).
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export ORACLE_ROOT="$ROOT"
+export ORACLE_PROJECT_ROOT="$ROOT"
+# shellcheck source=/dev/null
+source "$ROOT/engines/shared/lean-ctx-env.sh"
+export PATH="$ROOT/env/.venv/bin:$ROOT/.tools/bin:$PATH"
 VSCODIUM_ROOT="$ROOT/.tools/vscodium"
 VSCODIUM_APP="$VSCODIUM_ROOT/VSCodium.app"
 CODIUM_BIN="$VSCODIUM_APP/Contents/Resources/app/bin/codium"

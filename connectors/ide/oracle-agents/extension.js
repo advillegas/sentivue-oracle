@@ -168,7 +168,21 @@ class ConversationPanel {
     const env = { ...process.env };
     env.CLAUDE_CONFIG_DIR = path.join(ROOT, "engines", "claude-code", "home");
     env.ORACLE_ROOT = ROOT;
-    env.PATH = [path.join(ROOT, ".tools", "npm"),
+    env.ORACLE_PROJECT_ROOT = ROOT;
+    env.LEAN_CTX_CONFIG_DIR = path.join(ROOT, "state", "lean-ctx", "config");
+    env.LEAN_CTX_DATA_DIR = path.join(ROOT, "state", "lean-ctx", "data");
+    env.LEAN_CTX_STATE_DIR = path.join(ROOT, "state", "lean-ctx", "state");
+    env.LEAN_CTX_CACHE_DIR = path.join(ROOT, "state", "lean-ctx", "cache");
+    env.LEAN_CTX_PROJECT_ROOT = env.ORACLE_PROJECT_ROOT;
+    env.LEAN_CTX_TOOL_PROFILE = "minimal";
+    env.LEAN_CTX_DISABLED_TOOLS = "ctx_call";
+    env.LEAN_CTX_NO_UPDATE_CHECK = "1";
+    env.LEAN_CTX_AUTONOMY = "false";
+    env.LEAN_CTX_NO_HOOK = "1";
+    env.LEAN_CTX_RULES_INJECTION = "off";
+    env.PATH = [path.join(ROOT, "env", ".venv", WIN ? "Scripts" : "bin"),
+                path.join(ROOT, ".tools", "bin"),
+                path.join(ROOT, ".tools", "npm"),
                 path.join(ROOT, ".tools", "npm", "bin"),
                 env.PATH || ""].join(path.delimiter);
     const args = [

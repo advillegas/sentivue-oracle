@@ -2,6 +2,9 @@
 # One verdict line per subsystem; exit 0 unless something is critically broken.
 $ErrorActionPreference = "Continue"
 $Root = Split-Path -Parent $PSScriptRoot
+$env:ORACLE_ROOT = $Root
+$env:ORACLE_PROJECT_ROOT = $Root
+. (Join-Path $Root "engines\shared\lean-ctx-env.ps1")
 Set-Location $Root
 $script:Pass = 0; $script:Fail = 0; $script:Warn = 0
 
@@ -34,6 +37,31 @@ $cachedNode = Get-ChildItem (Join-Path $Root ".tools\node") -Recurse -Filter "no
 if ($cachedNode) { OK "cached node: $($cachedNode.FullName)" } else { BAD "cached node missing" "run bin\oracle.ps1 setup with the policy-bound cache" }
 foreach ($eng in @("claude.cmd", "opencode.cmd", "kilo.cmd")) {
     if (Test-Path ".tools\npm\$eng") { OK "engine: $eng" } else { BAD "engine missing: $eng" "bin\oracle.ps1 setup" }
+}
+$leanCtx = Join-Path $Root ".tools\bin\lean-ctx.exe"
+$lockedLeanCtxLine = Get-Content (Join-Path $Root "VERSIONS.lock") |
+    Where-Object { $_ -match "^LEAN_CTX_VERSION=" } | Select-Object -First 1
+$lockedLeanCtx = ((($lockedLeanCtxLine -split "=", 2)[1] -split "#")[0].Trim()) `
+    -replace "^v", ""
+if (Test-Path -LiteralPath $leanCtx) {
+    $actualLeanCtx = (& $leanCtx --version).Trim()
+    if ($LASTEXITCODE -eq 0 -and
+        $actualLeanCtx -match ("^lean-ctx " + [regex]::Escape($lockedLeanCtx) + " ")) {
+        $leanCtxTemplate = Join-Path $Root "engines\shared\lean-ctx-config.toml"
+        $leanCtxPolicy = Join-Path $Root "state\lean-ctx\config\config.toml"
+        if ((Test-Path -LiteralPath $leanCtxPolicy) -and
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $leanCtxTemplate).Hash -eq
+            (Get-FileHash -Algorithm SHA256 -LiteralPath $leanCtxPolicy).Hash) {
+            OK "lean-ctx: $lockedLeanCtx (offline restricted MCP profile)"
+        } else {
+            BAD "lean-ctx repo-local policy is missing or differs" `
+                "run bin\oracle.ps1 setup with the policy-bound cache"
+        }
+    } else {
+        BAD "lean-ctx version differs from LEAN_CTX_VERSION" "run bin\oracle.ps1 setup"
+    }
+} else {
+    BAD "lean-ctx missing" "run bin\oracle.ps1 setup with the policy-bound cache"
 }
 
 Write-Host "== lifecycle =="

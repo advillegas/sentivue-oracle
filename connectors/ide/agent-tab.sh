@@ -37,6 +37,7 @@ else
 fi
 echo ""
 
+export ORACLE_PROJECT_ROOT="$DIR"
 cd "$DIR"
 bash "$ROOT/$LAUNCH" || true
 

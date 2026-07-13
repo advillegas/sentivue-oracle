@@ -79,6 +79,13 @@ NODE_MAJOR=22                           # compatibility selector, not an artifac
 JQ_VERSION=unresolved                   # acquisition may discover; reproducible mode rejects
 JQ_RESOLVED_VERSION=unresolved
 JQ_DARWIN_ARM64_SHA256=unresolved
+# lean-ctx: local Apache-2.0 MCP context runtime. The release tag and platform
+# assets were verified against upstream SHA256SUMS on 2026-07-13.
+LEAN_CTX_REPO=https://github.com/yvgude/lean-ctx
+LEAN_CTX_VERSION=v3.9.3
+LEAN_CTX_COMMIT=4e728c0e2c8cfc3516d4f38241d0dee37e0cb792
+LEAN_CTX_DARWIN_ARM64_SHA256=2adf67848020a198fd08eeeafc8957b83cf793b42719a196ea4b3a40a2597eb8
+LEAN_CTX_WINDOWS_X64_SHA256=d4f0037df84e60a9761c0717b0441179d09560f8cc89e511340d31b75d89775f
 UV_INSTALL=dependency-cache             # executable comes from the policy-bound export
 HF_CLI_VERSION=unresolved               # acquisition may discover; reproducible mode rejects
 HF_CLI_RESOLVED_VERSION=unresolved

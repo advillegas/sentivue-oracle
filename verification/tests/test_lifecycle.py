@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -1555,6 +1557,28 @@ def test_generated_model_configs_are_atomic_owned_and_preserve_user_files(
         (root / "state/generated/opencode/opencode.json").read_text(encoding="utf-8")
     )
     assert set(generated_opencode["provider"]["oracle"]["models"]) == {"chat-model"}
+    kilo_lines = (
+        (root / "state/generated/kilo/kilo.jsonc")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
+    generated_kilo = json.loads("\n".join(kilo_lines[1:]))
+    assert generated_kilo["mcp"]["lean-ctx"]["command"] == [
+        "python",
+        "{env:ORACLE_ROOT}/connectors/lean_ctx_mcp.py",
+    ]
+    assert (
+        generated_kilo["mcp"]["lean-ctx"]["environment"]["LEAN_CTX_TOOL_PROFILE"]
+        == "minimal"
+    )
+    assert (
+        generated_kilo["mcp"]["lean-ctx"]["environment"]["LEAN_CTX_DISABLED_TOOLS"]
+        == "ctx_call"
+    )
+    assert (
+        generated_kilo["mcp"]["lean-ctx"]["environment"]["LEAN_CTX_PROJECT_ROOT"]
+        == "{env:ORACLE_PROJECT_ROOT}"
+    )
     for path, digest in template_hashes.items():
         assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
     for path in written:
@@ -1674,6 +1698,8 @@ def test_install_consumers_use_export_cache_instead_of_dynamic_network_resolutio
         "uv-darwin-arm64",
         "uv-windows-x64",
         "jq-darwin-arm64",
+        "lean-ctx-darwin-arm64",
+        "lean-ctx-windows-x64",
         "vscodium-darwin-arm64",
         "vscodium-darwin-x64",
         "vscodium-windows-x64",
@@ -1695,12 +1721,340 @@ def test_install_consumers_use_export_cache_instead_of_dynamic_network_resolutio
         assert artifact_id in combined
 
 
+def test_lean_ctx_dependency_is_exact_policy_bound_and_installed_offline() -> None:
+    versions, errors = lifecycle._parse_versions_text(
+        (REPO_ROOT / "VERSIONS.lock").read_text(encoding="utf-8")
+    )
+    assert errors == []
+    assert versions["LEAN_CTX_VERSION"] == "v3.9.3"
+    assert versions["LEAN_CTX_COMMIT"] == "4e728c0e2c8cfc3516d4f38241d0dee37e0cb792"
+    assert (
+        versions["LEAN_CTX_DARWIN_ARM64_SHA256"]
+        == "2adf67848020a198fd08eeeafc8957b83cf793b42719a196ea4b3a40a2597eb8"
+    )
+    assert (
+        versions["LEAN_CTX_WINDOWS_X64_SHA256"]
+        == "d4f0037df84e60a9761c0717b0441179d09560f8cc89e511340d31b75d89775f"
+    )
+
+    policy = json.loads(
+        (REPO_ROOT / "verification/policy.json").read_text(encoding="utf-8")
+    )
+    inputs = {item["id"]: item for item in policy["dependency_inputs"]}
+    expected = {
+        "lean-ctx-darwin-arm64": (
+            "https://github.com/yvgude/lean-ctx/releases/download/"
+            "{version}/lean-ctx-aarch64-apple-darwin.tar.gz",
+            "LEAN_CTX_DARWIN_ARM64_SHA256",
+        ),
+        "lean-ctx-windows-x64": (
+            "https://github.com/yvgude/lean-ctx/releases/download/"
+            "{version}/lean-ctx-x86_64-pc-windows-msvc.zip",
+            "LEAN_CTX_WINDOWS_X64_SHA256",
+        ),
+    }
+    for artifact_id, (identity, digest_key) in expected.items():
+        declaration = inputs[artifact_id]
+        assert declaration["kind"] == "native"
+        assert declaration["version_key"] == "LEAN_CTX_VERSION"
+        assert declaration["allow_dynamic"] is False
+        assert declaration["source"] == {
+            "identity": identity,
+            "digest_key": digest_key,
+        }
+
+    mac = (REPO_ROOT / "bootstrap/install.sh").read_text(encoding="utf-8")
+    windows = (REPO_ROOT / "bin/oracle.ps1").read_text(encoding="utf-8")
+    assert 'install_cached_binary "lean-ctx-darwin-arm64"' in mac
+    assert '"$ROOT/.tools/bin/lean-ctx"' in mac
+    assert 'Get-CachedArtifact "lean-ctx-windows-x64"' in windows
+    assert "engines/shared/lean-ctx-config.toml" in mac
+    assert "engines\\shared\\lean-ctx-config.toml" in windows
+    assert "state/lean-ctx/config/config.toml" in mac
+    assert "state\\lean-ctx" in windows
+    assert "config\\config.toml" in windows
+    assert "lean-ctx/releases" not in mac
+    assert "lean-ctx/releases" not in windows
+    assert "Invoke-WebRequest" not in windows
+
+
+def test_lean_ctx_mcp_only_wiring_is_repo_local_and_air_gapped() -> None:
+    expected_environment = {
+        "LEAN_CTX_CONFIG_DIR": "${ORACLE_ROOT}/state/lean-ctx/config",
+        "LEAN_CTX_DATA_DIR": "${ORACLE_ROOT}/state/lean-ctx/data",
+        "LEAN_CTX_STATE_DIR": "${ORACLE_ROOT}/state/lean-ctx/state",
+        "LEAN_CTX_CACHE_DIR": "${ORACLE_ROOT}/state/lean-ctx/cache",
+        "LEAN_CTX_PROJECT_ROOT": "${ORACLE_PROJECT_ROOT}",
+        "LEAN_CTX_TOOL_PROFILE": "minimal",
+        "LEAN_CTX_DISABLED_TOOLS": "ctx_call",
+        "LEAN_CTX_NO_UPDATE_CHECK": "1",
+        "LEAN_CTX_AUTONOMY": "false",
+        "LEAN_CTX_NO_HOOK": "1",
+        "LEAN_CTX_RULES_INJECTION": "off",
+    }
+    claude = json.loads(
+        (REPO_ROOT / "connectors/mcp.claude.json").read_text(encoding="utf-8")
+    )
+    assert claude["mcpServers"]["lean-ctx"] == {
+        "command": "python",
+        "args": ["${ORACLE_ROOT}/connectors/lean_ctx_mcp.py"],
+        "env": expected_environment,
+    }
+    opencode = json.loads(
+        (
+            REPO_ROOT / "engines/opencode/xdg/opencode/opencode.json"
+        ).read_text(encoding="utf-8")
+    )
+    expected_opencode = {
+        key: value.replace("${ORACLE_ROOT}", "{env:ORACLE_ROOT}").replace(
+            "${ORACLE_PROJECT_ROOT}", "{env:ORACLE_PROJECT_ROOT}"
+        )
+        for key, value in expected_environment.items()
+    }
+    assert opencode["mcp"]["lean-ctx"] == {
+        "type": "local",
+        "command": [
+            "python",
+            "{env:ORACLE_ROOT}/connectors/lean_ctx_mcp.py",
+        ],
+        "environment": expected_opencode,
+        "enabled": True,
+    }
+    cursor = json.loads(
+        (REPO_ROOT / ".cursor/mcp.json").read_text(encoding="utf-8")
+    )
+    assert cursor["mcpServers"]["lean-ctx"]["type"] == "stdio"
+    assert cursor["mcpServers"]["lean-ctx"]["command"] == "python"
+    assert cursor["mcpServers"]["lean-ctx"]["args"] == [
+        "${workspaceFolder}/connectors/lean_ctx_mcp.py"
+    ]
+    assert cursor["mcpServers"]["lean-ctx"]["env"]["LEAN_CTX_TOOL_PROFILE"] == "minimal"
+    runtime_policy = tomllib.loads(
+        (
+            REPO_ROOT / "engines/shared/lean-ctx-config.toml"
+        ).read_text(encoding="utf-8")
+    )
+    assert runtime_policy["tool_profile"] == "minimal"
+    assert runtime_policy["disabled_tools"] == ["ctx_call"]
+    assert runtime_policy["rules_injection"] == "off"
+    assert runtime_policy["shell_hook_disabled"] is True
+    assert runtime_policy["shell_security"] == "enforce"
+    assert runtime_policy["shell_allow_writes"] is False
+    assert runtime_policy["team_auto_push"] is False
+    assert runtime_policy["cloud"] == {
+        "auto_sync": False,
+        "contribute_enabled": False,
+    }
+    assert runtime_policy["setup"] == {
+        "auto_inject_rules": False,
+        "auto_inject_skills": False,
+        "auto_update_mcp": False,
+    }
+    assert set(runtime_policy["shell_allowlist"]) == {"pwd", "ls", "dir"}
+
+    for relative in (
+        "engines/shared/lean-ctx-env.sh",
+        "engines/shared/lean-ctx-env.ps1",
+    ):
+        source = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        assert "LEAN_CTX_NO_UPDATE_CHECK" in source
+        assert "LEAN_CTX_AUTONOMY" in source
+        assert "LEAN_CTX_NO_HOOK" in source
+        assert "LEAN_CTX_RULES_INJECTION" in source
+        assert "LEAN_CTX_TOOL_PROFILE" in source
+        assert "LEAN_CTX_DISABLED_TOOLS" in source
+        assert "ctx_call" in source
+        assert "state" in source and "lean-ctx" in source
+        assert "ORACLE_PROJECT_ROOT" in source
+    for relative in (
+        "engines/claude-code/launch.sh",
+        "engines/claude-code/launch.ps1",
+        "engines/opencode/launch.sh",
+        "engines/opencode/launch.ps1",
+        "engines/kilo/launch.sh",
+        "engines/kilo/launch.ps1",
+        "connectors/ide/setup-ide.sh",
+        "connectors/ide/setup-ide.ps1",
+    ):
+        assert "lean-ctx-env" in (REPO_ROOT / relative).read_text(encoding="utf-8")
+
+    rule = (REPO_ROOT / ".cursor/rules/lean-ctx.mdc").read_text(encoding="utf-8")
+    assert "When the `ctx_*` tools are available" in rule
+    assert "raw diagnostic" in rule
+    assert "hook rewrite" not in rule
+    assert not (REPO_ROOT / ".cursor/hooks.json").exists()
+    for relative in ("bin/oracle", "bin/oracle.ps1"):
+        operator = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        assert "read-only local diagnostics only" in operator
+        assert "doctor --fix" not in operator
+        assert all(
+            command in operator
+            for command in ("status", "gain", "doctor", "benchmark")
+        )
+    mac_operator = (REPO_ROOT / "bin/oracle").read_text(encoding="utf-8")
+    assert 'exec "$ROOT/.tools/bin/lean-ctx"' in mac_operator
+    assert "exec lean-ctx" not in mac_operator
+    for relative in ("connectors/ide/agent-tab.sh", "connectors/ide/agent-tab.ps1"):
+        assert "ORACLE_PROJECT_ROOT" in (
+            REPO_ROOT / relative
+        ).read_text(encoding="utf-8")
+    conductor = (REPO_ROOT / "conductor/conductor.py").read_text(encoding="utf-8")
+    assert 'env["ORACLE_PROJECT_ROOT"] = str(cwd.resolve())' in conductor
+    assert 'env["LEAN_CTX_PROJECT_ROOT"] = str(cwd.resolve())' in conductor
+
+
+def test_lean_ctx_mcp_guard_filters_prompt_tools_and_hidden_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard_path = REPO_ROOT / "connectors/lean_ctx_mcp.py"
+    spec = importlib.util.spec_from_file_location("oracle_lean_ctx_mcp", guard_path)
+    assert spec is not None and spec.loader is not None
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+
+    initialized = guard.sanitize_server_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "serverInfo": {"name": "lean-ctx", "version": "3.9.3"},
+                "instructions": "Use ctx_call and unavailable tools.",
+            },
+        }
+    )
+    instructions = initialized["result"]["instructions"]
+    assert "ctx_call" not in instructions
+    assert "Native tools remain valid" in instructions
+    advertised = guard.sanitize_server_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [
+                    {"name": "ctx_read"},
+                    {"name": "ctx_call"},
+                    {"name": "ctx_shell"},
+                ]
+            },
+        }
+    )
+    assert [tool["name"] for tool in advertised["result"]["tools"]] == [
+        "ctx_read",
+        "ctx_shell",
+    ]
+    runtime_policy = tomllib.loads(
+        (
+            REPO_ROOT / "engines/shared/lean-ctx-config.toml"
+        ).read_text(encoding="utf-8")
+    )
+    assert set(runtime_policy["shell_allowlist"]) == guard.ALLOWED_SHELL_COMMANDS
+    assert guard.blocked_tool_response(
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "ctx_call", "arguments": {}},
+        }
+    )["result"]["isError"] is True
+    assert (
+        guard.blocked_tool_response(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "ctx_read", "arguments": {}},
+            }
+        )
+        is None
+    )
+    assert (
+        guard.blocked_tool_response(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {
+                    "name": "ctx_shell",
+                    "arguments": {"command": "pwd"},
+                },
+            }
+        )
+        is None
+    )
+    for request_id, command in enumerate(
+        (
+            "git status --short",
+            "grep TODO README.md | wc -l",
+            "uniq README.md AGENTS.md",
+            "tree -o AGENTS.md",
+            "where -InputObject x -FilterScript { Start-Process calc }",
+            "cat /etc/passwd",
+            r"type C:\private\secret.txt",
+            r"type \\host\share\file",
+            "ls ..",
+            "rg TODO",
+            r"""rg --pre\='sh -c "touch PWNED"' TODO README.md""",
+            'rg --pre^="cmd /c echo PWNED" TODO README.md',
+        ),
+        start=6,
+    ):
+        blocked = guard.blocked_tool_response(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": "tools/call",
+                "params": {"name": "ctx_shell", "arguments": {"command": command}},
+            }
+        )
+        assert blocked["result"]["isError"] is True
+
+    runtime_root = tmp_path / "runtime"
+    binary_name = "lean-ctx.exe" if os.name == "nt" else "lean-ctx"
+    binary = runtime_root / ".tools/bin" / binary_name
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"policy-bound binary")
+    template = runtime_root / "engines/shared/lean-ctx-config.toml"
+    policy = runtime_root / "state/lean-ctx/config/config.toml"
+    template.parent.mkdir(parents=True)
+    policy.parent.mkdir(parents=True)
+    template.write_text("tool_profile = \"minimal\"\n", encoding="utf-8")
+    policy.write_bytes(template.read_bytes())
+    git_dir = runtime_root / ".git/worktrees/feature"
+    git_dir.mkdir(parents=True)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    (worktree / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    monkeypatch.delenv("ORACLE_ROOT", raising=False)
+    monkeypatch.setenv("LEAN_CTX_PROJECT_ROOT", str(worktree))
+    command, child_env = guard._lean_ctx_runtime()
+    assert Path(command) == binary
+    assert Path(child_env["ORACLE_ROOT"]) == runtime_root
+    assert Path(child_env["LEAN_CTX_CONFIG_DIR"]) == policy.parent
+
+    policy.write_text("tool_profile = \"power\"\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="policy is missing or differs"):
+        guard._lean_ctx_runtime()
+
+    isolated = tmp_path / "isolated"
+    isolated.mkdir()
+    path_binary = tmp_path / "path-bin" / binary_name
+    path_binary.parent.mkdir()
+    path_binary.write_bytes(b"unmanaged binary")
+    monkeypatch.setenv("LEAN_CTX_PROJECT_ROOT", str(isolated))
+    monkeypatch.setenv("PATH", str(path_binary.parent))
+    with pytest.raises(RuntimeError, match="policy-bound lean-ctx is missing"):
+        guard._lean_ctx_runtime()
+
+
 def test_doctors_report_dependency_cache_and_install_state_health() -> None:
     for relative in ("bootstrap/doctor.ps1", "bootstrap/doctor.sh"):
         source = (REPO_ROOT / relative).read_text(encoding="utf-8")
         assert "validate-dependencies" in source
         assert "dependency-cache" in source
         assert ".install-state" in source
+        assert "lean-ctx" in source
+        assert "LEAN_CTX_VERSION" in source
+        assert "lean-ctx-config.toml" in source
 
 
 def test_platform_generated_config_writers_use_same_directory_atomic_replacement() -> (

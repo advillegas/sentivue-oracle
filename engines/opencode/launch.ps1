@@ -4,9 +4,12 @@ $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $env:XDG_CONFIG_HOME = Join-Path $Root "engines\opencode\xdg"
 $env:XDG_DATA_HOME = Join-Path $Root "engines\opencode\xdg-data"
 $env:ORACLE_ROOT = $Root
+. (Join-Path $Root "engines\shared\lean-ctx-env.ps1")
 $env:UV_OFFLINE = "1"
 $env:UV_CACHE_DIR = Join-Path $Root "incoming\dependency-cache\uv"
-$env:PATH = (Join-Path $Root ".tools\bin") + ";" + (Join-Path $Root ".tools\npm") + ";" + (Join-Path $Root ".tools\npm\node_modules\.bin") + ";" + $env:PATH
+$env:PATH = (Join-Path $Root "env\.venv\Scripts") + ";" +
+    (Join-Path $Root ".tools\bin") + ";" + (Join-Path $Root ".tools\npm") + ";" +
+    (Join-Path $Root ".tools\npm\node_modules\.bin") + ";" + $env:PATH
 $env:OPENCODE_CONFIG = Join-Path $Root "state\generated\opencode\opencode.json"
 $oc = Get-Command opencode -ErrorAction SilentlyContinue
 if (-not $oc) { Write-Host "ERROR: opencode not installed - run: bin\oracle.ps1 setup"; exit 1 }

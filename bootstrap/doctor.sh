@@ -2,6 +2,10 @@
 # oracle doctor — full diagnostic with suggested fixes. Read-only, safe to run anytime.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export ORACLE_ROOT="$ROOT"
+export ORACLE_PROJECT_ROOT="$ROOT"
+# shellcheck source=/dev/null
+source "$ROOT/engines/shared/lean-ctx-env.sh"
 cd "$ROOT"
 PASS=0; FAIL=0; WARN=0
 ok()   { printf ' \033[1;32mPASS\033[0m  %s\n' "$1"; PASS=$((PASS+1)); }
@@ -20,12 +24,31 @@ for spec in ".tools/bin/llama-server:re-run ./install with the policy-bound cach
             ".tools/npm/bin/claude:re-run ./install (bootstrap phase)" \
             ".tools/npm/bin/opencode:re-run ./install (bootstrap phase)" \
             ".tools/npm/bin/kilo:re-run ./install (bootstrap phase)" \
+            ".tools/bin/lean-ctx:re-run ./install with the policy-bound cache" \
             ".tools/bin/uv:re-run ./install with the policy-bound cache" \
             ".tools/bin/jq:re-run ./install with the policy-bound cache"; do
   b="${spec%%:*}"; fix="${spec#*:}"
   if [[ "$b" == */* ]]; then [[ -x "$b" ]] && ok "$b" || bad "$b missing" "$fix"
   else command -v "$b" >/dev/null && ok "$b" || bad "$b missing" "$fix"; fi
 done
+locked_lean_ctx="$(
+  awk -F= '$1 == "LEAN_CTX_VERSION" {print $2}' "$ROOT/VERSIONS.lock" |
+    awk '{print $1}' | sed 's/^v//'
+)"
+if [[ -x "$ROOT/.tools/bin/lean-ctx" ]] &&
+   [[ "$("$ROOT/.tools/bin/lean-ctx" --version 2>/dev/null)" == \
+      "lean-ctx ${locked_lean_ctx} "* ]]; then
+  if cmp -s "$ROOT/engines/shared/lean-ctx-config.toml" \
+      "$ROOT/state/lean-ctx/config/config.toml"; then
+    ok "lean-ctx: $locked_lean_ctx (offline restricted MCP profile)"
+  else
+    bad "lean-ctx repo-local policy is missing or differs" \
+      "re-run ./install with the policy-bound cache"
+  fi
+else
+  bad "lean-ctx version differs from LEAN_CTX_VERSION" \
+    "re-run ./install with the policy-bound cache"
+fi
 command -v oracle >/dev/null && ok "oracle on PATH" \
   || meh "oracle not on PATH" "add $HOME/.local/bin to PATH and re-run ./install"
 

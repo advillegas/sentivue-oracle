@@ -5,7 +5,11 @@ SELF="${BASH_SOURCE[0]}"
 [[ -L "$SELF" ]] && SELF="$(readlink -f "$SELF")"
 ROOT="$(cd "$(dirname "$SELF")/.." && pwd)"
 cd "$ROOT"
-export PATH="$ROOT/.tools/bin:$ROOT/.tools/npm/bin:$PATH"
+export PATH="$ROOT/env/.venv/bin:$ROOT/.tools/bin:$ROOT/.tools/npm/bin:$PATH"
+export ORACLE_ROOT="$ROOT"
+export ORACLE_PROJECT_ROOT="$ROOT"
+# shellcheck source=/dev/null
+source "$ROOT/engines/shared/lean-ctx-env.sh"
 export UV_OFFLINE=1
 export UV_CACHE_DIR="$ROOT/incoming/dependency-cache/uv"
 
@@ -14,6 +18,31 @@ case "$cmd" in
   claude)     exec bash engines/claude-code/launch.sh "$@" ;;
   opencode)   exec bash engines/opencode/launch.sh "$@" ;;
   kilo)       exec bash engines/kilo/launch.sh "$@" ;;
+  context|ctx)
+    sub="${1:-status}"; shift || true
+    allowed=false
+    case "$sub" in
+      status|doctor|version|help|--version|--help)
+        [[ "$#" -eq 0 ]] && allowed=true
+        ;;
+      gain)
+        [[ "$#" -eq 0 || ( "$#" -eq 1 && "$1" == "--json" ) ]] && allowed=true
+        ;;
+      benchmark)
+        [[ "$#" -eq 0 || ( "$#" -eq 2 && "$1" == "run" && "$2" == "." ) ]] \
+          && allowed=true
+        ;;
+    esac
+    [[ "$allowed" == true ]] || {
+      echo "ERROR: oracle ctx exposes read-only local diagnostics only." >&2
+      exit 2
+    }
+    [[ -x "$ROOT/.tools/bin/lean-ctx" ]] || {
+      echo "ERROR: policy-bound lean-ctx is missing; run ./install." >&2
+      exit 1
+    }
+    exec "$ROOT/.tools/bin/lean-ctx" "$sub" "$@"
+    ;;
   serve)      exec bash serving/service.sh start ;;
   stop)       exec bash serving/service.sh stop ;;
   restart)    exec bash serving/service.sh restart ;;
@@ -73,6 +102,7 @@ case "$cmd" in
 oracle — offline agentic workstation
 
   engines        oracle claude [...]     oracle opencode [...]     oracle kilo [...]
+  context        oracle ctx [status|gain|doctor|benchmark ...]
   serving        oracle serve|stop|restart|status
                  oracle service install|uninstall|start|stop|restart|status
                  oracle capabilities     inferred vs loaded backend/context evidence

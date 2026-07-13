@@ -116,14 +116,26 @@ install_cached_binary "uv-darwin-arm64" "$UV_VERSION" "$UV_VERSION" uvx \
   "$ROOT/.tools/bin/uvx"
 install_cached_binary "jq-darwin-arm64" "$JQ_VERSION" "$JQ_RESOLVED_VERSION" jq \
   "$ROOT/.tools/bin/jq"
+install_cached_binary "lean-ctx-darwin-arm64" "$LEAN_CTX_VERSION" \
+  "$LEAN_CTX_VERSION" lean-ctx "$ROOT/.tools/bin/lean-ctx"
+mkdir -p "$ROOT/state/lean-ctx/config" "$ROOT/state/lean-ctx/data" \
+  "$ROOT/state/lean-ctx/state" "$ROOT/state/lean-ctx/cache"
+cp "$ROOT/engines/shared/lean-ctx-config.toml" \
+  "$ROOT/state/lean-ctx/config/config.toml.new"
+mv -f "$ROOT/state/lean-ctx/config/config.toml.new" \
+  "$ROOT/state/lean-ctx/config/config.toml"
 install_cached_binary "brew-llama-cpp" "$LLAMA_CPP_BREW_VERSION" \
   "$LLAMA_CPP_BREW_RESOLVED_VERSION" llama-server "$ROOT/.tools/bin/llama-server"
-for required in tar node npm uv uvx jq git llama-server; do
+for required in tar node npm uv uvx jq git lean-ctx llama-server; do
   command -v "$required" >/dev/null || {
     echo "ERROR: $required is absent; install it from the validated platform export." >&2
     exit 1
   }
 done
+[[ "$(lean-ctx --version)" == "lean-ctx ${LEAN_CTX_VERSION#v} "* ]] || {
+  echo "ERROR: installed lean-ctx does not match $LEAN_CTX_VERSION." >&2
+  exit 1
+}
 chmod +x bootstrap/*.sh serving/service.sh engines/*/launch.sh harness/ecc/install-ecc.sh \
          bin/* connectors/ide/*.sh connectors/gitea/*.sh
 

@@ -1,0 +1,19 @@
+# SentiVue Oracle's repo-local global LeanCTX policy template.
+tool_profile = "minimal"
+disabled_tools = ["ctx_call"]
+update_check_disabled = true
+rules_injection = "off"
+shell_hook_disabled = true
+shell_security = "enforce"
+shell_allow_writes = false
+shell_allowlist = ["pwd", "ls", "dir"]
+team_auto_push = false
+
+[cloud]
+auto_sync = false
+contribute_enabled = false
+
+[setup]
+auto_inject_rules = false
+auto_inject_skills = false
+auto_update_mcp = false

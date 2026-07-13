@@ -5,9 +5,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export ORACLE_ROOT="$ROOT"
+# shellcheck source=/dev/null
+source "$ROOT/engines/shared/lean-ctx-env.sh"
 export UV_OFFLINE=1
 export UV_CACHE_DIR="$ROOT/incoming/dependency-cache/uv"
-export PATH="$ROOT/.tools/bin:$ROOT/.tools/npm/bin:$PATH"
+export PATH="$ROOT/env/.venv/bin:$ROOT/.tools/bin:$ROOT/.tools/npm/bin:$PATH"
 export KILO_CONFIG="$ROOT/state/generated/kilo/kilo.jsonc"
 export OPENCODE_CONFIG="$KILO_CONFIG"
 # hardening profile: disable every Kilo call-home path (telemetry, sharing,

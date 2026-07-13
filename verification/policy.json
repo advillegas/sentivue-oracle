@@ -290,6 +290,28 @@
       }
     },
     {
+      "id": "lean-ctx-darwin-arm64",
+      "kind": "native",
+      "version_key": "LEAN_CTX_VERSION",
+      "allow_dynamic": false,
+      "platforms": ["darwin-arm64"],
+      "source": {
+        "identity": "https://github.com/yvgude/lean-ctx/releases/download/{version}/lean-ctx-aarch64-apple-darwin.tar.gz",
+        "digest_key": "LEAN_CTX_DARWIN_ARM64_SHA256"
+      }
+    },
+    {
+      "id": "lean-ctx-windows-x64",
+      "kind": "native",
+      "version_key": "LEAN_CTX_VERSION",
+      "allow_dynamic": false,
+      "platforms": ["windows-x64"],
+      "source": {
+        "identity": "https://github.com/yvgude/lean-ctx/releases/download/{version}/lean-ctx-x86_64-pc-windows-msvc.zip",
+        "digest_key": "LEAN_CTX_WINDOWS_X64_SHA256"
+      }
+    },
+    {
       "id": "vscodium-darwin-arm64",
       "kind": "ide",
       "version_key": "VSCODIUM_VERSION",

@@ -79,7 +79,7 @@ verification/   shared resource, profile, admission, render, and probe implement
 engines/        claude-code/ and opencode/ configs, subagents, conventions
 harness/ecc/    pinned ECC version + curated-subset installer
 skills/         10 domain skill packs (engine-agnostic SKILL.md)
-connectors/     MCP servers (DuckDB, Postgres), self-hosted Supabase compose
+connectors/     MCP servers (LeanCTX, DuckDB, Postgres), self-hosted Supabase compose
 conductor/      mission daemon, mission specs
 env/            uv-managed Python quant stack
 memory/         plain-text ledger + state (runtime, gitignored)
@@ -221,6 +221,7 @@ oracle service status
 oracle capabilities  # inferred capability versus loaded/offloaded evidence
 oracle verify        # production-shaped read-only runtime probes
 oracle doctor        # full diagnostic with suggested fixes
+oracle ctx status    # repo-local LeanCTX context runtime health
 oracle harden        # software air gap (pf egress block); undo: oracle harden off
 ```
 
@@ -242,6 +243,22 @@ All three engines read the same skills, subagents, conventions (`AGENTS.md`), an
 connectors. Kilo's CLI and IDE panel explicitly select the same generated
 `state/generated/kilo/kilo.jsonc`, so they agree without replacing a user's Kilo
 configuration. Switching engines is a per-session decision, not a migration.
+
+### LeanCTX context runtime
+
+[LeanCTX](https://github.com/yvgude/lean-ctx) v3.9.3 is installed as a pinned,
+SHA-256-bound native binary from the same offline dependency export as the engines.
+Claude Code, OpenCode, Kilo, and the project Cursor configuration expose it in
+MCP-only `minimal` mode (`ctx_read`, `ctx_search`, `ctx_glob`, `ctx_tree`, and
+`ctx_shell`). This keeps tool-schema overhead small and avoids transparent shell
+rewrites hiding release or failure evidence. Config, cache, session memory, and
+indexes stay under `state/lean-ctx/`; update checks and autonomous features are
+disabled. `ctx_shell` permits only argument-free `pwd`, `ls`, or `dir`; every
+command with options or paths, plus builds, tests, Git, interpreters, and package
+managers, keeps its native permission path. No global shell profile or user-level
+editor configuration is modified.
+Use `oracle ctx status`, `oracle ctx gain`, or `oracle ctx benchmark run .` to inspect
+it. Do not run `lean-ctx setup` or `lean-ctx update` on the air-gapped appliance.
 
 ## Local git vault (the ecosystem's own "origin" — on every node)
 

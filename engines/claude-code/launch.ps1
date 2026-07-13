@@ -3,9 +3,12 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $env:CLAUDE_CONFIG_DIR = Join-Path $Root "engines\claude-code\home"
 $env:ORACLE_ROOT = $Root
+. (Join-Path $Root "engines\shared\lean-ctx-env.ps1")
 $env:UV_OFFLINE = "1"
 $env:UV_CACHE_DIR = Join-Path $Root "incoming\dependency-cache\uv"
-$env:PATH = (Join-Path $Root ".tools\bin") + ";" + (Join-Path $Root ".tools\npm") + ";" + (Join-Path $Root ".tools\npm\node_modules\.bin") + ";" + $env:PATH
+$env:PATH = (Join-Path $Root "env\.venv\Scripts") + ";" +
+    (Join-Path $Root ".tools\bin") + ";" + (Join-Path $Root ".tools\npm") + ";" +
+    (Join-Path $Root ".tools\npm\node_modules\.bin") + ";" + $env:PATH
 $GeneratedSettings = Join-Path $Root "state\generated\claude-code\settings.json"
 $claude = Get-Command claude -ErrorAction SilentlyContinue
 if (-not $claude) { Write-Host "ERROR: claude not installed - run: bin\oracle.ps1 setup"; exit 1 }

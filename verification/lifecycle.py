@@ -5792,6 +5792,31 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
             str(root / "engines" / "shared" / "CONVENTIONS.md"),
             str(root / "engines" / "shared" / "AUTONOMY.md"),
         ],
+        "mcp": {
+            "lean-ctx": {
+                "type": "local",
+                "command": [
+                    "python",
+                    "{env:ORACLE_ROOT}/connectors/lean_ctx_mcp.py",
+                ],
+                "environment": {
+                    "LEAN_CTX_CONFIG_DIR": (
+                        "{env:ORACLE_ROOT}/state/lean-ctx/config"
+                    ),
+                    "LEAN_CTX_DATA_DIR": "{env:ORACLE_ROOT}/state/lean-ctx/data",
+                    "LEAN_CTX_STATE_DIR": "{env:ORACLE_ROOT}/state/lean-ctx/state",
+                    "LEAN_CTX_CACHE_DIR": "{env:ORACLE_ROOT}/state/lean-ctx/cache",
+                    "LEAN_CTX_PROJECT_ROOT": "{env:ORACLE_PROJECT_ROOT}",
+                    "LEAN_CTX_TOOL_PROFILE": "minimal",
+                    "LEAN_CTX_DISABLED_TOOLS": "ctx_call",
+                    "LEAN_CTX_NO_UPDATE_CHECK": "1",
+                    "LEAN_CTX_AUTONOMY": "false",
+                    "LEAN_CTX_NO_HOOK": "1",
+                    "LEAN_CTX_RULES_INJECTION": "off",
+                },
+                "enabled": True,
+            }
+        },
         "provider": {
             "openai-compatible": {
                 "options": {

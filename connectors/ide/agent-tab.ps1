@@ -40,6 +40,7 @@ $launcher = switch ($Engine) {
     "opencode" { "engines\opencode\launch.ps1" }
     "kilo"     { "engines\kilo\launch.ps1" }
 }
+$env:ORACLE_PROJECT_ROOT = $dir
 Set-Location $dir
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root $launcher)
 

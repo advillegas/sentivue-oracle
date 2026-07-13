@@ -2030,6 +2030,8 @@ class Conductor:
                    tag: str, stall_min: int | None = None) -> str:
         self.ensure_serving()
         argv, env = engine_cmd(self.m.engine, prompt, tier)
+        env["ORACLE_PROJECT_ROOT"] = str(cwd.resolve())
+        env["LEAN_CTX_PROJECT_ROOT"] = str(cwd.resolve())
         # Only one big-slot (sonnet/opus) request at a time: concurrent big requests
         # from the parallel worker would thrash the model hot-swap. Fast-lane requests
         # (haiku model, always resident, --parallel 2) run without the lock.

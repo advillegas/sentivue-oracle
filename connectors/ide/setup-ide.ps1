@@ -12,6 +12,11 @@
 param([Parameter(Position = 0)][string]$Cmd = "launch")
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$env:ORACLE_ROOT = $Root
+$env:ORACLE_PROJECT_ROOT = $Root
+. (Join-Path $Root "engines\shared\lean-ctx-env.ps1")
+$env:PATH = (Join-Path $Root "env\.venv\Scripts") + ";" +
+    (Join-Path $Root ".tools\bin") + ";" + $env:PATH
 $DependencyCache = if ($env:ORACLE_DEPENDENCY_CACHE) {
     $env:ORACLE_DEPENDENCY_CACHE
 } else {

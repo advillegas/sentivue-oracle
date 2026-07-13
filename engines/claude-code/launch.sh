@@ -5,10 +5,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 export CLAUDE_CONFIG_DIR="$ROOT/engines/claude-code/home"
 export ORACLE_ROOT="$ROOT"
+# shellcheck source=/dev/null
+source "$ROOT/engines/shared/lean-ctx-env.sh"
 export UV_OFFLINE=1
 export UV_CACHE_DIR="$ROOT/incoming/dependency-cache/uv"
 export ORACLE_PG_PASSWORD="${ORACLE_PG_PASSWORD:-$(grep -s '^POSTGRES_PASSWORD=' "$ROOT/connectors/supabase/.env" | cut -d= -f2 || true)}"
-export PATH="$ROOT/.tools/bin:$ROOT/.tools/npm/bin:$PATH"
+export PATH="$ROOT/env/.venv/bin:$ROOT/.tools/bin:$ROOT/.tools/npm/bin:$PATH"
 GENERATED_SETTINGS="$ROOT/state/generated/claude-code/settings.json"
 
 command -v claude >/dev/null || { echo "ERROR: claude not installed — run 'make install'"; exit 1; }

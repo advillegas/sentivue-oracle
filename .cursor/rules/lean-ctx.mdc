@@ -1,0 +1,24 @@
+---
+description: Use the local LeanCTX MCP context runtime without hiding diagnostic evidence
+alwaysApply: true
+---
+
+# LeanCTX
+
+When the `ctx_*` tools are available, use the five-tool minimal profile:
+
+- `ctx_read` for cached file reads; use `map` or `signatures` while orienting and
+  `full` only when exact content is needed.
+- `ctx_search` for text, symbol, or semantic lookup.
+- `ctx_glob` and `ctx_tree` for compact file discovery.
+- `ctx_shell` only for argument-free `pwd`, `ls`, or `dir` inspection. Use native
+  shell tools for all commands with options or paths, and for builds, tests, Git,
+  interpreters, package managers, and deployment CLIs.
+
+Use native tools when they are more exact or when LeanCTX is unavailable. In
+particular, preserve raw diagnostic output for failures, security evidence,
+release manifests, and production-shaped verification probes. Never let
+compression replace reading the actual error artifact.
+
+LeanCTX is provisioned from the policy-bound offline cache. Do not run its
+installer, setup, update, cloud, login, sync, proxy, daemon, or publish commands.

@@ -51,6 +51,20 @@ Tier aliases are remapped per machine to whatever is actually installed
 - These files are the single source of truth across sessions, engines, and missions.
   If context and ledger disagree, the ledger wins.
 
+## Local context runtime
+
+- LeanCTX is available as an MCP server in its five-tool `minimal` profile. Prefer
+  `ctx_read`, `ctx_search`, `ctx_glob`, and `ctx_tree` for compact exploration, and
+  `ctx_shell` only for argument-free `pwd`, `ls`, or `dir` inspection. Use native
+  shell tools for any command with options or paths, builds, tests, Git,
+  interpreters, package managers, and deployment CLIs, or whenever the MCP server
+  is unavailable or an exact native operation is clearer.
+- Compression never outranks evidence. Read raw stderr, logs, security artifacts,
+  release manifests, and production-shaped probe output before diagnosing a failure.
+- LeanCTX is already installed from the policy-bound offline cache. Never run its
+  installer, setup, update, cloud, login, sync, proxy, daemon, or publish commands.
+  Its state remains under `state/lean-ctx/` and all update checks are disabled.
+
 ## Worktree etiquette
 
 - Mission tasks execute in isolated git worktrees under `.worktrees/`. Never edit

@@ -13,6 +13,23 @@
       "env": {
         "DATABASE_URI": "postgresql://postgres:${ORACLE_PG_PASSWORD}@127.0.0.1:54322/postgres"
       }
+    },
+    "lean-ctx": {
+      "command": "python",
+      "args": ["${ORACLE_ROOT}/connectors/lean_ctx_mcp.py"],
+      "env": {
+        "LEAN_CTX_CONFIG_DIR": "${ORACLE_ROOT}/state/lean-ctx/config",
+        "LEAN_CTX_DATA_DIR": "${ORACLE_ROOT}/state/lean-ctx/data",
+        "LEAN_CTX_STATE_DIR": "${ORACLE_ROOT}/state/lean-ctx/state",
+        "LEAN_CTX_CACHE_DIR": "${ORACLE_ROOT}/state/lean-ctx/cache",
+        "LEAN_CTX_PROJECT_ROOT": "${ORACLE_PROJECT_ROOT}",
+        "LEAN_CTX_TOOL_PROFILE": "minimal",
+        "LEAN_CTX_DISABLED_TOOLS": "ctx_call",
+        "LEAN_CTX_NO_UPDATE_CHECK": "1",
+        "LEAN_CTX_AUTONOMY": "false",
+        "LEAN_CTX_NO_HOOK": "1",
+        "LEAN_CTX_RULES_INJECTION": "off"
+      }
     }
   }
 }

@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "lean-ctx": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["${workspaceFolder}/connectors/lean_ctx_mcp.py"],
+      "env": {
+        "LEAN_CTX_CONFIG_DIR": "${workspaceFolder}/state/lean-ctx/config",
+        "LEAN_CTX_DATA_DIR": "${workspaceFolder}/state/lean-ctx/data",
+        "LEAN_CTX_STATE_DIR": "${workspaceFolder}/state/lean-ctx/state",
+        "LEAN_CTX_CACHE_DIR": "${workspaceFolder}/state/lean-ctx/cache",
+        "LEAN_CTX_PROJECT_ROOT": "${workspaceFolder}",
+        "LEAN_CTX_TOOL_PROFILE": "minimal",
+        "LEAN_CTX_DISABLED_TOOLS": "ctx_call",
+        "LEAN_CTX_NO_UPDATE_CHECK": "1",
+        "LEAN_CTX_AUTONOMY": "false",
+        "LEAN_CTX_NO_HOOK": "1",
+        "LEAN_CTX_RULES_INJECTION": "off"
+      }
+    }
+  }
+}

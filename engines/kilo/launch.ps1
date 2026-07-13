@@ -4,9 +4,12 @@
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $env:ORACLE_ROOT = $Root
+. (Join-Path $Root "engines\shared\lean-ctx-env.ps1")
 $env:UV_OFFLINE = "1"
 $env:UV_CACHE_DIR = Join-Path $Root "incoming\dependency-cache\uv"
-$env:PATH = (Join-Path $Root ".tools\bin") + ";" + (Join-Path $Root ".tools\npm") + ";" + (Join-Path $Root ".tools\npm\node_modules\.bin") + ";" + $env:PATH
+$env:PATH = (Join-Path $Root "env\.venv\Scripts") + ";" +
+    (Join-Path $Root ".tools\bin") + ";" + (Join-Path $Root ".tools\npm") + ";" +
+    (Join-Path $Root ".tools\npm\node_modules\.bin") + ";" + $env:PATH
 $env:KILO_CONFIG = Join-Path $Root "state\generated\kilo\kilo.jsonc"
 $env:OPENCODE_CONFIG = $env:KILO_CONFIG
 # hardening profile: disable every Kilo call-home path (telemetry, sharing,
