@@ -11,7 +11,7 @@ hours = 24
 report_minutes = 60
 workers = 2                         # second worker drives haiku tasks on the fast lane
 
-# Per-task verification stack (all optional):
+# Per-task verification stack (acceptance and checks are mandatory):
 #   checks        shell commands the CONDUCTOR runs itself; every one must exit 0
 #                 before any LLM audit happens (deterministic gate)
 #   audit_tier    default "sonnet" — verifier as strong as the generator
@@ -84,6 +84,9 @@ acceptance = [
   "note embeds the metrics read programmatically from artifacts/",
   "leakage checklist section explicitly addresses each item",
 ]
+checks = [
+  "python -c \"from pathlib import Path; p=Path('docs/notes/momentum-baseline.md'); assert p.is_file() and p.stat().st_size > 1000\"",
+]
 tier = "haiku"
 timeout_minutes = 25
 
@@ -97,6 +100,7 @@ table research.doc_chunks using the local embeddings endpoint
 (http://127.0.0.1:9099/v1/embeddings, model qwen3-embedding-4b). Idempotent script
 under pipelines/index_docs.py with a --dry-run flag."""
 acceptance = ["re-running the indexer twice inserts zero duplicate chunks"]
+checks = ["python -m pytest pipelines/tests -q -k index_docs"]
 tier = "haiku"
 audit_tier = "haiku"      # keep grunt work entirely on the fast lane (true parallelism)
 escalate = false          # never spend the big slot on background chores
@@ -107,6 +111,7 @@ id = "test-sweep"
 title = "Full test + lint sweep"
 prompt = "Run the entire test suite and linters across the repo; fix trivial breakages (imports, formatting); ledger any real failures without fixing them."
 acceptance = ["ledger entry lists suite status per package"]
+checks = ["python -m pytest -q"]
 tier = "haiku"
 audit_tier = "haiku"
 escalate = false

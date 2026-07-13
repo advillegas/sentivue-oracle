@@ -26,6 +26,7 @@ id = "test-sweep"
 title = "Full test + lint sweep"
 prompt = "Run the entire test suite and linters across the repo; fix trivial breakages (imports, formatting); ledger any real failures without fixing them."
 acceptance = ["ledger entry lists suite status per package"]
+checks = ["python -m pytest -q"]
 tier = "haiku"
 audit_tier = "haiku"
 escalate = false

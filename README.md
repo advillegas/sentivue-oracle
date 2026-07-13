@@ -420,7 +420,8 @@ controls which rows are active on a machine.
   reopens that task. Done stays done.
 - **Operator countersign** — tasks marked `requires_approval` (the planner assigns it
   to irreversible work, which is always split dry-run → execute) hold until the
-  operator writes `APPROVE <id>` into `memory/APPROVALS.md`; reports surface the queue.
+  operator appends the exact run/task/nonce challenge from
+  `memory/PENDING-APPROVALS.json` to `memory/APPROVALS.md`; reports surface the queue.
 - **Self-healing** — llama-swap health checks with automatic service restart, bounded
   retries, idle-time work queue, hourly `REPORT-*.md`, and a `FINAL-REPORT.md`.
 - **Long-horizon protocol** — `engines/shared/AUTONOMY.md`, loaded globally by both

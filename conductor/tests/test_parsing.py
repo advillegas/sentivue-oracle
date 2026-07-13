@@ -4,6 +4,8 @@ import json
 import pathlib
 import sys
 
+import pytest
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import conductor as C  # noqa: E402
 
@@ -13,7 +15,13 @@ def plan_block(tasks):
 
 
 def task(i, **kw):
-    d = {"id": f"t{i}", "title": f"T{i}", "prompt": f"do {i}"}
+    d = {
+        "id": f"t{i}",
+        "title": f"T{i}",
+        "prompt": f"do {i}",
+        "acceptance": [f"task {i} is complete"],
+        "checks": ["python -V"],
+    }
     d.update(kw)
     return d
 
@@ -43,14 +51,18 @@ def test_parse_plan_duplicate_ids_rejects_block():
     assert C.parse_plan(plan_block([task(1), task(1)])) == []
 
 
-def test_parse_plan_prunes_unknown_and_self_deps():
-    out = C.parse_plan(plan_block([task(1, depends_on=["ghost", "t1", "t2"]), task(2)]))
-    assert out[0].depends_on == ["t2"]
+def test_parse_plan_rejects_unknown_and_self_deps():
+    assert C.parse_plan(
+        plan_block([task(1, depends_on=["ghost"]), task(2)])
+    ) == []
+    assert C.parse_plan(
+        plan_block([task(1, depends_on=["t1"]), task(2)])
+    ) == []
 
 
-def test_parse_plan_truncates_to_ten():
+def test_parse_plan_rejects_more_than_ten():
     out = C.parse_plan(plan_block([task(i) for i in range(15)]))
-    assert len(out) == 10
+    assert out == []
 
 
 def test_parse_plan_last_valid_block_wins():
@@ -59,9 +71,9 @@ def test_parse_plan_last_valid_block_wins():
     assert [t.id for t in out] == ["t2"]
 
 
-def test_parse_plan_skips_entries_missing_id_or_prompt():
+def test_parse_plan_rejects_entries_missing_required_fields():
     out = C.parse_plan(plan_block([{"id": "a"}, {"prompt": "p"}, task(3)]))
-    assert [t.id for t in out] == ["t3"]
+    assert out == []
 
 
 def test_parse_plan_last_block_invalid_falls_back_to_earlier():
@@ -124,24 +136,26 @@ def test_engine_cmd_unknown_engine_raises():
 
 # ---- Task.from_dict -----------------------------------------------------------
 
-def test_from_dict_drops_unknown_keys():
-    t = C.Task.from_dict({**task(1), "mystery_field": 42})
-    assert not hasattr(t, "mystery_field")
+def test_from_dict_rejects_unknown_keys():
+    with pytest.raises(C.ConductorError):
+        C.Task.from_dict({**task(1), "mystery_field": 42})
 
 
-def test_from_dict_clamps_bad_tiers():
-    t = C.Task.from_dict(task(1, tier="galaxy", audit_tier="galaxy"))
-    assert t.tier == "sonnet"
-    assert t.audit_tier == "sonnet"
+def test_from_dict_rejects_bad_tiers():
+    with pytest.raises(C.ConductorError):
+        C.Task.from_dict(task(1, tier="galaxy", audit_tier="galaxy"))
 
 
-def test_from_dict_clamps_timeout():
-    assert C.Task.from_dict(task(1, timeout_minutes=999)).timeout_minutes == 120
+def test_from_dict_rejects_out_of_range_timeout():
+    with pytest.raises(C.ConductorError):
+        C.Task.from_dict(task(1, timeout_minutes=999))
 
 
-def test_from_dict_clamps_best_of_n():
-    assert C.Task.from_dict(task(1, best_of_n=9)).best_of_n == 3
-    assert C.Task.from_dict(task(1, best_of_n=0)).best_of_n == 1
+def test_from_dict_rejects_out_of_range_best_of_n():
+    with pytest.raises(C.ConductorError):
+        C.Task.from_dict(task(1, best_of_n=9))
+    with pytest.raises(C.ConductorError):
+        C.Task.from_dict(task(1, best_of_n=0))
     assert C.Task.from_dict(task(1)).best_of_n == 1
 
 

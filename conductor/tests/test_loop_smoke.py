@@ -53,7 +53,16 @@ def test_full_loop_offline(tmp_path, monkeypatch):
 
     mission = C.Mission(
         name="smoke", goal="prove the loop", repo=repo,
-        tasks=[C.Task(id="one", title="One", prompt="build feature.py")],
+        tasks=[C.Task(
+            id="one",
+            title="One",
+            prompt="build feature.py",
+            acceptance=["feature.py contains the expected value"],
+            checks=[
+                "python -c \"from pathlib import Path; "
+                "assert 'VALUE = 42' in Path('feature.py').read_text()\""
+            ],
+        )],
         engine="claude", hours=1.0, report_minutes=60,
     )
     rc = C.Conductor(mission).run()
@@ -101,7 +110,13 @@ def test_blocked_status_short_circuits(tmp_path, monkeypatch):
 
     mission = C.Mission(
         name="smoke2", goal="g", repo=repo,
-        tasks=[C.Task(id="one", title="One", prompt="p")],
+        tasks=[C.Task(
+            id="one",
+            title="One",
+            prompt="p",
+            acceptance=["task reports a terminal state"],
+            checks=["python -V"],
+        )],
         engine="claude", hours=1.0,
     )
     rc = C.Conductor(mission).run()

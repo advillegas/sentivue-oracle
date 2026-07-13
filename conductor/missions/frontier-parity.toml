@@ -29,21 +29,21 @@ import conductor as C).
 
 Cover, at minimum:
 - C.parse_plan: valid ```json fenced array round-trips into Tasks; invalid JSON and
-  empty arrays return []; duplicate ids reject the block; unknown/self depends_on are
-  pruned; >10 tasks truncate to 10; the LAST valid json block wins.
+  empty arrays return []; duplicate ids reject the block; unknown/self/cyclic
+  depends_on reject the block; >10 tasks are rejected; the LAST valid json block wins.
 - C.extract_result (engine='claude'): picks the final {"type":"result"} event text
   from stream-json lines; falls back to the raw tail without one; engine='opencode'
   returns raw text unchanged.
-- C.Task.from_dict: unknown keys dropped; bad tier/audit_tier clamp to 'sonnet';
-  timeout_minutes clamps to <=120; best_of_n clamps into [1,3]; research and
+- C.Task.from_dict: unknown keys and bad tiers are rejected;
+  timeout_minutes outside [1,120] and best_of_n outside [1,3] are rejected; research and
   requires_approval booleans parse.
 Do NOT import anything that talks to git, network, or llama-swap; test pure logic
 only. Do NOT modify conductor.py."""
 acceptance = [
   "python -m pytest conductor/tests -q passes from a clean state",
-  "parse_plan edge cases covered: invalid JSON, duplicate ids, dep pruning, >10 truncation, last-block-wins",
+  "parse_plan edge cases covered: invalid JSON, duplicate ids, invalid dependencies rejected, >10 rejected, last-block-wins",
   "extract_result covered for result event, raw fallback, opencode passthrough",
-  "Task.from_dict clamps covered including best_of_n [1,3]",
+  "Task.from_dict strict range validation covered including best_of_n [1,3]",
 ]
 checks = ["python -m pytest conductor/tests -q"]
 tier = "sonnet"
@@ -143,7 +143,8 @@ Conductor.run_engine to return scripted outputs (developer transcript ending in 
 'DONE' status line, then 'AUDIT: PASS' for the audit call); ensure_serving and
 ensure_tools to no-ops; point conductor module MEMORY/REPORTS/LOGS/WORKTREES
 constants at tmp_path subdirs. Build a Mission in a tmp_path git repo (git init,
-user config, one commit) with one task (no checks). Assert: run() returns 0; the
+user config, one commit) with one task and a deterministic file check. Assert:
+run() returns 0; the
 task ends 'done'; LEDGER.md contains DISPATCH and AUDIT entries; STATE.md and
 FINAL-REPORT.md exist. Under 60 seconds; pytest.mark.skipif when git is missing.
 Fix conductor.py ONLY if the test exposes a real bug, minimally, noted in the ledger."""

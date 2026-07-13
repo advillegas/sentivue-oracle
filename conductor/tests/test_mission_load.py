@@ -26,6 +26,8 @@ workers = {workers}
 id = "a"
 title = "A"
 prompt = "pa"
+acceptance = ["a done"]
+checks = ["python -V"]
 
 [[tasks]]
 id = "b"
@@ -33,6 +35,8 @@ title = "B"
 prompt = "pb"
 depends_on = ["a"]
 research = true
+acceptance = ["b done"]
+checks = ["python -V"]
 """
 
 
@@ -49,9 +53,11 @@ def test_engine_hours_args_override_toml(tmp_path):
     assert m.engine == "claude" and m.hours == 2.0
 
 
-def test_workers_clamp(tmp_path):
-    assert C.Mission.load(write_mission(tmp_path, BASE.format(workers=9)), None, None).workers == 2
-    assert C.Mission.load(write_mission(tmp_path, BASE.format(workers=0)), None, None).workers == 1
+def test_workers_outside_supported_range_fail_closed(tmp_path):
+    with pytest.raises(C.ConductorError):
+        C.Mission.load(write_mission(tmp_path, BASE.format(workers=9)), None, None)
+    with pytest.raises(C.ConductorError):
+        C.Mission.load(write_mission(tmp_path, BASE.format(workers=0)), None, None)
 
 
 def test_name_defaults_to_stem(tmp_path):
@@ -66,6 +72,8 @@ def test_background_tasks_load_flagged(tmp_path):
 id = "bg"
 title = "BG"
 prompt = "pbg"
+acceptance = ["bg done"]
+checks = ["python -V"]
 """
     m = C.Mission.load(write_mission(tmp_path, body), None, None)
     bg = [t for t in m.tasks if t.background]
@@ -74,18 +82,18 @@ prompt = "pbg"
 
 def test_duplicate_ids_rejected(tmp_path):
     body = BASE.format(workers=1).replace('id = "b"', 'id = "a"')
-    with pytest.raises(AssertionError):
+    with pytest.raises(C.ConductorError):
         C.Mission.load(write_mission(tmp_path, body), None, None)
 
 
 def test_unknown_dependency_rejected(tmp_path):
     body = BASE.format(workers=1).replace('depends_on = ["a"]', 'depends_on = ["ghost"]')
-    with pytest.raises(AssertionError):
+    with pytest.raises(C.ConductorError):
         C.Mission.load(write_mission(tmp_path, body), None, None)
 
 
 def test_no_tasks_no_autoplan_rejected(tmp_path):
-    with pytest.raises(AssertionError):
+    with pytest.raises(C.ConductorError):
         C.Mission.load(write_mission(tmp_path, '[mission]\nname = "x"\ngoal = "g"\n'), None, None)
 
 

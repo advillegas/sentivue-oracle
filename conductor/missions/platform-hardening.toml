@@ -33,19 +33,19 @@ import conductor as C).
 Cover, at minimum:
 - C.parse_plan: a valid ```json fenced array round-trips into Task objects; invalid JSON
   and empty arrays return []; duplicate ids reject the block; depends_on entries pointing
-  at unknown ids or self are pruned; more than 10 tasks are truncated to 10; the LAST
+  at unknown ids, self, or a cycle reject the block; more than 10 tasks are rejected; the LAST
   valid json block in the text wins.
 - C.extract_result (engine='claude'): picks the text of the final {"type":"result"} event
   from stream-json lines; falls back to the raw tail when no result event exists;
   engine='opencode' returns raw text unchanged.
-- C.Task.from_dict: unknown keys are dropped; tier/audit_tier outside {opus,sonnet,haiku}
-  clamp to 'sonnet'; timeout_minutes clamps to <=120; background flag propagates;
+- C.Task.from_dict: unknown keys and invalid tiers are rejected;
+  timeout_minutes outside [1,120] is rejected; background flag propagates;
   research/requires_approval/adversary booleans parse.
 Do NOT import or execute anything that talks to git, the network, or llama-swap;
 test only pure logic. Do NOT modify conductor.py in this task."""
 acceptance = [
   "python -m pytest conductor/tests -q passes from a clean state",
-  "parse_plan edge cases covered: invalid JSON, duplicate ids, unknown/self deps pruned, >10 tasks truncated, last-valid-block-wins",
+  "parse_plan edge cases covered: invalid JSON, duplicate ids, invalid/cyclic deps rejected, >10 tasks rejected, last-valid-block-wins",
   "extract_result covered for stream-json result, raw fallback, and opencode passthrough",
   "Task.from_dict clamps covered: bad tier -> sonnet, timeout <= 120",
 ]
@@ -60,9 +60,9 @@ depends_on = ["tests-parsing"]
 prompt = """Add conductor/tests/test_mission_load.py. Using tmp_path pytest fixtures,
 write minimal mission TOML files and cover C.Mission.load:
 - name defaults to the file stem; engine/hours honor explicit arguments over TOML;
-- workers clamps into [1, 2]; report_minutes parses; auto_plan default false;
+- workers outside {1, 2} is rejected; report_minutes parses; auto_plan default false;
 - [[background]] tasks load with background=True;
-- duplicate task ids raise AssertionError; a dependency on an unknown id raises;
+- duplicate task ids raise ConductorError; an unknown or cyclic dependency raises;
 - a mission with neither tasks nor auto_plan raises;
 - research=true on a task round-trips (Task.research is True).
 Also assert the shipped missions still load: conductor/missions/example.toml and
@@ -113,7 +113,7 @@ Approach: monkeypatch conductor module internals -
 - C.Conductor.ensure_serving and ensure_tools to no-ops;
 - point C.MEMORY/C.REPORTS/C.LOGS/C.WORKTREES at tmp_path subdirs;
 - build a Mission in a tmp_path git repo (git init; git config user.email/name; one
-  commit) with a single task whose checks list is empty.
+  commit) with a single task whose deterministic check validates the produced file.
 Assert: mission run() returns 0; the task ends status 'done'; LEDGER.md contains
 DISPATCH and AUDIT entries; STATE.md and FINAL-REPORT.md exist.
 Keep the whole test under 60 seconds; skip cleanly (pytest.mark.skipif) if git is
