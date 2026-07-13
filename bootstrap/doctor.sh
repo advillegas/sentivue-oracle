@@ -14,10 +14,6 @@ echo "== system =="
 free_gb=$(df -g . 2>/dev/null | awk 'NR==2 {print $4}')
 [[ "${free_gb:-0}" -gt 100 ]] && ok "disk free: ${free_gb} GB" \
   || meh "disk free: ${free_gb:-?} GB" "models + artifacts need headroom; consider pruning"
-wired=$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)
-[[ "$wired" -ge 458752 ]] && ok "GPU wired limit: ${wired} MB" \
-  || bad "GPU wired limit: ${wired} MB" "provision before install: sudo sysctl iogpu.wired_limit_mb=458752"
-
 echo "== binaries =="
 for spec in ".tools/bin/llama-server:re-run ./install with the policy-bound cache" \
             ".tools/bin/llama-swap:re-run ./install (bootstrap phase)" \
@@ -42,6 +38,40 @@ for candidate in "$ROOT/env/.venv/bin/python" python3 python; do
   fi
 done
 if [[ -n "$python_bin" ]]; then
+  admission="$ROOT/state/generated/serving/admission.json"
+  if [[ -f "$admission" ]]; then
+    wired_required="$("$python_bin" - "$admission" <<'PY'
+import json
+import pathlib
+import sys
+
+payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+resources = payload.get("resources")
+required = resources.get("wired_memory_required_mib") if isinstance(resources, dict) else None
+if not isinstance(required, int) or isinstance(required, bool) or required < 0:
+    raise SystemExit(2)
+print(required)
+PY
+)"
+    wired_parse_exit=$?
+    if [[ "$wired_parse_exit" -ne 0 ]]; then
+      bad "selected placement has invalid wired-memory evidence" \
+        "re-render serving state before starting the service"
+    elif [[ "$wired_required" -eq 0 ]]; then
+      ok "selected placement does not require Metal wired memory"
+    else
+      wired=$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)
+      if [[ "$wired" -ge "$wired_required" ]]; then
+        ok "GPU wired limit: ${wired} MB (selected placement needs ${wired_required} MB)"
+      else
+        bad "GPU wired limit: ${wired} MB; selected placement needs ${wired_required} MB" \
+          "provision before start: sudo sysctl iogpu.wired_limit_mb=${wired_required}"
+      fi
+    fi
+  else
+    meh "selected placement wired-memory requirement unavailable" \
+      "render serving state before evaluating the Metal wired limit"
+  fi
   locked_python="$(awk -F= '$1 == "PYTHON_VERSION" {print $2}' "$ROOT/VERSIONS.lock" | awk '{print $1}')"
   actual_python="$("$python_bin" -c 'import platform; print(platform.python_version())')"
   if [[ "$actual_python" == "$locked_python" ]]; then

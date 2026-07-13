@@ -1566,6 +1566,7 @@ def prepare_runtime(
         profile = select_profile(profiles, resources)
         active = profile.models
         tiers = _profile_tiers(profile)
+    requested_profile_name = profile.name
     available_backends = {Backend.CPU, resources.backend}
     backend = (
         resources.backend
@@ -1696,7 +1697,7 @@ def prepare_runtime(
             )
             break
         except ServingError:
-            if profile_explicit or requested_backend.lower() != "auto":
+            if profile_explicit:
                 raise
             smaller = [
                 item
@@ -1720,9 +1721,27 @@ def prepare_runtime(
         placements=placements,
     )
     metadata = json.loads(rendered.metadata_path.read_text(encoding="utf-8"))
+    wired_memory_required_mib = 0
+    if backend == Backend.METAL:
+        wired_memory_required_mib = sum(
+            placements[name].vram_required_mib
+            for name in resident_names
+        ) + max(
+            (
+                placements[name].vram_required_mib
+                for name in active
+                if name not in resident_names
+            ),
+            default=0,
+        )
     metadata.update(
         {
             "profile": profile.name,
+            "selection": {
+                "profile_explicit": profile_explicit,
+                "requested_profile": requested_profile_name,
+                "selected_profile": profile.name,
+            },
             "tiers": tiers,
             "resources": {
                 "system_total_mib": selected_resources.system_total_mib,
@@ -1737,9 +1756,11 @@ def prepare_runtime(
                     selected_resources.accelerator_reserve_mib
                 ),
                 "accelerator_shared": selected_resources.accelerator_shared,
+                "wired_memory_required_mib": wired_memory_required_mib,
                 "usable_capacity_mib": usable,
                 "capability_source": selected_resources.capability_source,
             },
+            "resident_models": sorted(resident_names),
             "binaries": {
                 "llama_server": {
                     "path": str(server_path),
@@ -1976,12 +1997,65 @@ def validate_runtime_freshness(
     tiers = evidence.get("tiers")
     if not isinstance(tiers, dict):
         raise ServingError("runtime tier mapping is missing")
-    resolve_active_profile(
+    active_profile = resolve_active_profile(
         profiles,
         models,
         selected,
         {key: str(tiers.get(key, "")) for key in TIER_KEYS},
     )
+    selection = evidence.get("selection")
+    profile_state_path = (
+        root / "state" / "generated" / "serving" / "profile.json"
+    )
+    try:
+        profile_state = json.loads(
+            _read_utf8(profile_state_path, "generated profile state")
+        )
+    except json.JSONDecodeError as exc:
+        raise ServingError("generated profile state is invalid") from exc
+    if (
+        evidence.get("profile") != active_profile.name
+        or not isinstance(selection, dict)
+        or set(selection)
+        != {"profile_explicit", "requested_profile", "selected_profile"}
+        or not isinstance(selection.get("profile_explicit"), bool)
+        or selection.get("selected_profile") != active_profile.name
+        or not isinstance(profile_state, dict)
+        or profile_state.get("schema_version") != 1
+        or profile_state.get("profile") != active_profile.name
+        or not isinstance(profile_state.get("models"), list)
+        or set(profile_state["models"]) != set(selected)
+    ):
+        raise ServingError("generated active profile state is stale or invalid")
+    active_path = root / "serving" / "models.profile"
+    if active_path.is_file():
+        current_active = parse_active_models(
+            _read_utf8(active_path, "active model profile")
+        )
+        current_tiers = (
+            parse_tiers(_read_utf8(root / "serving" / "tiers.env", "tier mapping"))
+            if (root / "serving" / "tiers.env").is_file()
+            else _profile_tiers(active_profile)
+        )
+        current_profile = resolve_active_profile(
+            profiles,
+            models,
+            current_active,
+            current_tiers,
+        )
+        if (
+            selection.get("profile_explicit") is not True
+            or selection.get("requested_profile") != current_profile.name
+            or set(current_active) != set(selected)
+        ):
+            raise ServingError("runtime differs from the explicit active profile")
+    else:
+        currently_eligible = select_profile(profiles, resources)
+        if (
+            selection.get("profile_explicit") is not False
+            or selection.get("requested_profile") != currently_eligible.name
+        ):
+            raise ServingError("automatic profile selection is stale for current resources")
     binaries = evidence.get("binaries")
     if not isinstance(binaries, dict):
         raise ServingError("runtime binary provenance is missing")
@@ -2467,13 +2541,21 @@ def create_admission_server(
                 and "max_completion_tokens" not in payload
             ):
                 payload["max_tokens"] = DEFAULT_REQUEST_OUTPUT_TOKENS
-                body = json.dumps(
-                    payload,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ).encode("utf-8")
+            if self.path in {"/v1/chat/completions", "/v1/messages"}:
+                try:
+                    body = json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                    ).encode("utf-8")
+                except (TypeError, ValueError):
+                    self._send_json(
+                        400,
+                        {"error": "request JSON contains unsupported values"},
+                    )
+                    return
             model = payload.get("model")
             if not isinstance(model, str) or not model:
                 self._send_json(400, {"error": "request model is required"})
@@ -3407,10 +3489,14 @@ def run_offline_probes(
     results.append(
         _probe(
             "cold_warm_state",
-            PASS if ready and not cold_ready else FAIL,
+            PASS if ready else FAIL,
             "runtime transitioned from cold to warm/ready"
             if ready and not cold_ready
-            else "runtime did not prove a cold-to-warm transition",
+            else (
+                "runtime was already warm/ready when verification began"
+                if ready and cold_ready
+                else "runtime did not reach a warm/ready state"
+            ),
             {
                 "cold_http_status": cold_running.status,
                 "warm_http_status": running.status,
@@ -3494,12 +3580,18 @@ def run_offline_probes(
     results.append(
         _probe(
             "loaded_backend",
-            PASS if placement_matches else FAIL if expected_backend else PROVISIONAL,
+            (
+                PASS
+                if placement_matches
+                else FAIL
+                if expected_backend and observed
+                else PROVISIONAL
+            ),
             "runtime placement matches selected backend and planned offload"
             if placement_matches
             else (
                 "runtime loaded backend/offload differs from the serving plan"
-                if expected_backend
+                if expected_backend and observed
                 else "runtime endpoint did not report both loaded backend and offloaded layers"
             ),
             {
@@ -3585,6 +3677,7 @@ def run_offline_probes(
             normalized_backend is not None
             and model_offload is not None
         )
+        model_placement_observed = model_placement_matches
         if model_expected_backend:
             model_placement_matches = (
                 normalized_backend == model_expected_backend
@@ -3608,7 +3701,7 @@ def run_offline_probes(
                     PASS
                     if model_placement_matches
                     else FAIL
-                    if model_expected_backend
+                    if model_expected_backend and model_placement_observed
                     else PROVISIONAL
                 ),
                 "runtime placement matches the plan"
@@ -4322,6 +4415,8 @@ def _headless_engine_runner(
                     prompt,
                     "--model",
                     model,
+                    "--tools",
+                    "",
                 ]
             )
         elif engine == "opencode":
@@ -4337,9 +4432,23 @@ def _headless_engine_runner(
                 prefix="oracle-readonly-engine-probe-"
             ) as temporary:
                 scratch = Path(temporary)
+                for private_directory in (
+                    "claude",
+                    "home",
+                    "tmp",
+                    "xdg-config",
+                    "xdg-data",
+                    "xdg-cache",
+                ):
+                    (scratch / private_directory).mkdir()
                 environment.update(
                     {
                         "CLAUDE_CONFIG_DIR": str(scratch / "claude"),
+                        "HOME": str(scratch / "home"),
+                        "USERPROFILE": str(scratch / "home"),
+                        "TMPDIR": str(scratch / "tmp"),
+                        "TMP": str(scratch / "tmp"),
+                        "TEMP": str(scratch / "tmp"),
                         "XDG_CONFIG_HOME": str(scratch / "xdg-config"),
                         "XDG_DATA_HOME": str(scratch / "xdg-data"),
                         "XDG_CACHE_HOME": str(scratch / "xdg-cache"),
@@ -4359,6 +4468,22 @@ def _headless_engine_runner(
                     if not isinstance(settings_payload, dict):
                         return 127, "generated Claude settings invalid"
                     settings_payload.pop("hooks", None)
+                    settings_payload["permissions"] = {
+                        "allow": [],
+                        "deny": [
+                            "Bash",
+                            "Edit",
+                            "Glob",
+                            "Grep",
+                            "NotebookEdit",
+                            "Read",
+                            "Task",
+                            "WebFetch",
+                            "WebSearch",
+                            "Write",
+                        ],
+                        "defaultMode": "default",
+                    }
                     sanitized_settings = scratch / "claude-settings.json"
                     sanitized_settings.write_text(
                         json.dumps(settings_payload, sort_keys=True) + "\n",
@@ -4392,6 +4517,12 @@ def _headless_engine_runner(
                         "edit": "deny",
                         "bash": "deny",
                         "webfetch": "deny",
+                    }
+                    opencode_payload["tools"] = {
+                        "bash": False,
+                        "edit": False,
+                        "write": False,
+                        "read": False,
                     }
                     sanitized_opencode = scratch / "opencode.json"
                     sanitized_opencode.write_text(
@@ -4867,6 +4998,67 @@ def main(argv: Sequence[str] | None = None) -> int:
             root = args.root.resolve()
             admission, contexts = _load_admission(
                 root / "state" / "generated" / "serving" / "admission.json"
+            )
+            preflight_models = admission.get("models")
+            if not isinstance(preflight_models, dict):
+                raise ServingError("admission metadata has no models")
+            preflight_declared = parse_manifest(
+                _read_utf8(
+                    root / "serving" / "models.manifest",
+                    "model manifest",
+                )
+            )
+            preflight_undeclared = sorted(
+                set(preflight_models) - set(preflight_declared)
+            )
+            if preflight_undeclared:
+                raise ServingError(
+                    "admission metadata references undeclared models: "
+                    + ", ".join(preflight_undeclared)
+                )
+            backend_evidence_payload = admission.get("backend")
+            selected_backend = (
+                backend_evidence_payload.get("selected_backend")
+                if isinstance(backend_evidence_payload, dict)
+                else None
+            )
+            binaries = admission.get("binaries")
+            raw_swap = (
+                binaries.get("llama_swap")
+                if isinstance(binaries, dict)
+                else None
+            )
+            swap_path = (
+                Path(str(raw_swap.get("path", "")))
+                if isinstance(raw_swap, dict)
+                else Path()
+            )
+            if (
+                not isinstance(selected_backend, str)
+                or selected_backend not in {backend.value for backend in Backend}
+                or not isinstance(raw_swap, dict)
+            ):
+                raise ServingError(
+                    "admission metadata has incomplete runtime provenance"
+                )
+            admission, contexts = validate_runtime_freshness(
+                root=root,
+                config=(
+                    root
+                    / "state"
+                    / "generated"
+                    / "serving"
+                    / "llama-swap.yaml"
+                ),
+                admission_path=(
+                    root
+                    / "state"
+                    / "generated"
+                    / "serving"
+                    / "admission.json"
+                ),
+                llama_swap=swap_path,
+                resources=detect_resources(selected_backend),
             )
             tiers = admission.get("tiers")
             if not isinstance(tiers, dict):

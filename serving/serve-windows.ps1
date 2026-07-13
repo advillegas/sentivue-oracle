@@ -11,7 +11,8 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 $Tools = Join-Path $Root ".tools\win"
-$Server = Join-Path $Tools "llama\llama-server.exe"
+$NativeDir = Join-Path $Tools "llama"
+$Server = Join-Path $NativeDir "llama-server.exe"
 $Swap = Join-Path $Tools "llama-swap.exe"
 $Generated = Join-Path $Root "state\generated\serving"
 $Config = Join-Path $Generated "llama-swap.yaml"

@@ -1981,6 +1981,17 @@ def test_review_service_freshness_rechecks_models_config_resources_and_binaries(
         resources=resources,
     )
 
+    put(root, "serving/models.profile", "chat\n")
+    with pytest.raises(ServingError, match="active profile|active models"):
+        serving.validate_runtime_freshness(
+            root=root,
+            config=runtime.rendered.path,
+            admission_path=runtime.rendered.metadata_path,
+            llama_swap=llama_swap,
+            resources=resources,
+        )
+    put(root, "serving/models.profile", "chat\nembed\n")
+
     model_path = root / "models/chat/chat.gguf"
     model_path.write_bytes(b"changed GGUF")
     with pytest.raises(ServingError, match="model|digest|size"):
@@ -2652,9 +2663,26 @@ def test_final_review_headless_engine_probe_does_not_call_syncing_launchers(
     put(tmp_path, ".tools/npm/claude.cmd", "@exit /b 0\n")
     put(tmp_path, ".tools/npm/opencode.cmd", "@exit /b 0\n")
     calls: list[list[str]] = []
+    sanitized: dict[str, object] = {}
 
-    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append(args)
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        if Path(args[0]).stem == "claude":
+            settings_path = Path(args[args.index("--settings") + 1])
+            sanitized["claude"] = json.loads(
+                settings_path.read_text(encoding="utf-8")
+            )
+            assert args[args.index("--tools") + 1] == ""
+            assert Path(str(environment["HOME"])).name == "home"
+            assert Path(str(environment["HOME"])).is_dir()
+        else:
+            sanitized["opencode"] = json.loads(
+                Path(str(environment["OPENCODE_CONFIG"])).read_text(
+                    encoding="utf-8"
+                )
+            )
         return subprocess.CompletedProcess(args, 0, "ENGINE-OK")
 
     monkeypatch.setattr(serving.subprocess, "run", fake_run)
@@ -2663,6 +2691,13 @@ def test_final_review_headless_engine_probe_does_not_call_syncing_launchers(
     assert runner("opencode")[0] == 0
     assert all("launch.ps1" not in " ".join(call) for call in calls)
     assert all("launch.sh" not in " ".join(call) for call in calls)
+    claude_permissions = sanitized["claude"]["permissions"]  # type: ignore[index]
+    assert claude_permissions["allow"] == []
+    assert claude_permissions["defaultMode"] == "default"
+    assert {"Bash", "Edit", "Read", "Write"}.issubset(
+        claude_permissions["deny"]
+    )
+    assert sanitized["opencode"]["permission"]["bash"] == "deny"  # type: ignore[index]
 
 
 def test_final_review_doctors_fail_concrete_runtime_probe_failures() -> None:
@@ -2672,6 +2707,11 @@ def test_final_review_doctors_fail_concrete_runtime_probe_failures() -> None:
     assert re.search(r'loaded_status.*FAIL.*bad', macos, re.DOTALL)
     assert re.search(r'VerifyExit.*else.*BAD', windows, re.DOTALL)
     assert re.search(r'verify_exit.*else.*bad', macos, re.DOTALL)
+    assert "wired_memory_required_mib" in macos
+    assert "458752" not in macos
+    assert "$NativeDir = Join-Path $Tools \"llama\"" in (
+        REPO_ROOT / "serving/serve-windows.ps1"
+    ).read_text(encoding="utf-8")
 
 
 def test_final_review_verifier_exercises_every_admitted_chat_context() -> None:
@@ -2826,3 +2866,274 @@ def test_final_review_metal_placement_respects_wired_memory_limit() -> None:
         requested_backend="auto",
     )
     assert fallback.backend == Backend.CPU
+
+
+def test_final_review_gateway_forwards_normalized_completion_limit() -> None:
+    received: list[dict[str, object]] = []
+
+    class CaptureHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            received.append(json.loads(self.rfile.read(length)))
+            body = b'{"choices":[{"message":{"content":"ok"}}]}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), CaptureHandler)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    gateway = serving.create_admission_server(
+        host="127.0.0.1",
+        port=0,
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        contexts={"chat": production_plan()},
+        evidence={},
+    )
+    threading.Thread(target=gateway.serve_forever, daemon=True).start()
+    try:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            gateway.server_port,
+            timeout=5,
+        )
+        connection.request(
+            "POST",
+            "/v1/chat/completions",
+            body=json.dumps(
+                {
+                    "model": "chat",
+                    "max_completion_tokens": 73,
+                    "messages": [{"role": "user", "content": "normalize"}],
+                }
+            ),
+            headers={"Content-Type": "application/json"},
+        )
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        assert response.status == 200
+        assert received == [
+            {
+                "model": "chat",
+                "max_tokens": 73,
+                "messages": [{"role": "user", "content": "normalize"}],
+            }
+        ]
+    finally:
+        gateway.shutdown()
+        upstream.shutdown()
+        gateway.server_close()
+        upstream.server_close()
+
+
+def test_final_review_explicit_backend_still_falls_back_to_smaller_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    revision = "a" * 40
+    put(
+        tmp_path,
+        "serving/profiles.conf",
+        "large | 16 | large,embed | large | large | large | fixture\n"
+        "small | 8 | small,embed | small | small | small | fixture\n",
+    )
+    put(
+        tmp_path,
+        "serving/models.manifest",
+        f"large | example/large | *.gguf | big | 65536 | | {revision}\n"
+        f"small | example/small | *.gguf | fast | 32768 | | {revision}\n"
+        f"embed | example/embed | *.gguf | embed | 8192 | | {revision}\n",
+    )
+    model_paths = {
+        name: put(tmp_path, f"models/{name}/{name}.gguf", b"x")
+        for name in ("large", "small", "embed")
+    }
+    server = put(tmp_path, ".tools/bin/llama-server", b"server")
+    swap = put(tmp_path, ".tools/bin/llama-swap", b"swap")
+
+    def snapshots(
+        _root: Path,
+        _models: dict[str, serving.ModelSpec],
+        selected: tuple[str, ...],
+    ) -> dict[str, serving.ModelSnapshot]:
+        return {
+            name: serving.ModelSnapshot(
+                name=name,
+                paths=(model_paths[name],),
+                size_bytes=1024 * 1024,
+                authority_digest="b" * 64,
+                layer_mib=(1,),
+                kv_mib_per_token=0.001,
+            )
+            for name in selected
+        }
+
+    def placements(**kwargs: object) -> dict[str, serving.PlacementPlan]:
+        names = tuple(kwargs["model_names"])  # type: ignore[arg-type]
+        if "large" in names:
+            raise ServingError("large profile placement exceeds capacity")
+        memory = kwargs["model_memory_mib"]
+        runtime = kwargs["kv_runtime_mib"]
+        assert isinstance(memory, dict)
+        assert isinstance(runtime, dict)
+        return {
+            name: serving.PlacementPlan(
+                model_name=name,
+                backend=Backend.CPU,
+                offloaded_layers=0,
+                total_layers=1,
+                ram_required_mib=int(memory[name]) + int(runtime[name]),
+                vram_required_mib=0,
+                kv_runtime_mib=int(runtime[name]),
+                split_mode="none",
+            )
+            for name in names
+        }
+
+    monkeypatch.setattr(serving, "validate_policy_bound_models", snapshots)
+    monkeypatch.setattr(serving, "plan_shared_model_placements", placements)
+    plan = serving.prepare_runtime(
+        root=tmp_path,
+        server_path=server,
+        llama_swap_path=swap,
+        platform="windows",
+        resources=ResourceSnapshot(
+            system_total_mib=32 * GIB,
+            system_available_mib=30 * GIB,
+            backend=Backend.CPU,
+            capability_source="fixture",
+        ),
+        requested_backend="cpu",
+    )
+
+    assert plan.profile.name == "small"
+    evidence = json.loads(plan.rendered.metadata_path.read_text(encoding="utf-8"))
+    assert evidence["selection"] == {
+        "profile_explicit": False,
+        "requested_profile": "large",
+        "selected_profile": "small",
+    }
+
+
+def test_final_review_warm_start_and_absent_backend_metadata_are_not_false_failures() -> None:
+    def transport(
+        _method: str,
+        path: str,
+        payload: dict[str, object] | None,
+    ) -> HttpResponse:
+        if path == "/health":
+            return HttpResponse(200, {"status": "ok"}, {}, 1)
+        if path == "/v1/models":
+            return HttpResponse(
+                200,
+                {"data": [{"id": "chat"}, {"id": "embed"}]},
+                {},
+                1,
+            )
+        if path == "/running":
+            return HttpResponse(
+                200,
+                {
+                    "running": [
+                        {
+                            "model": "chat",
+                            "state": "ready",
+                            "port": 19001,
+                        }
+                    ]
+                },
+                {},
+                1,
+            )
+        if path == "/v1/embeddings":
+            return HttpResponse(
+                200,
+                {"data": [{"embedding": [0.0] * 8}]},
+                {},
+                1,
+            )
+        if path == "/v1/messages":
+            return HttpResponse(
+                200,
+                {"content": [{"type": "text", "text": "ORACLE-OK"}]},
+                {},
+                1,
+            )
+        if path == "/v1/chat/completions" and payload is not None:
+            messages = payload.get("messages")
+            content = (
+                str(messages[0].get("content", ""))
+                if isinstance(messages, list)
+                and messages
+                and isinstance(messages[0], dict)
+                else ""
+            )
+            if content.startswith("oversize-boundary "):
+                return HttpResponse(
+                    413,
+                    {"error": "rejected"},
+                    {"X-Oracle-Admission": "rejected"},
+                    1,
+                )
+            if payload.get("tools"):
+                return HttpResponse(
+                    200,
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "tool_calls": [
+                                        {"function": {"name": "oracle_probe"}}
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    {},
+                    1,
+                )
+            if payload.get("response_format"):
+                return HttpResponse(
+                    200,
+                    {"choices": [{"message": {"content": '{"ok":true}'}}]},
+                    {},
+                    1,
+                )
+            return HttpResponse(
+                200,
+                {
+                    "choices": [{"message": {"content": "ORACLE-OK"}}],
+                    "usage": {"prompt_tokens": 25000},
+                },
+                {},
+                1,
+            )
+        raise AssertionError(path)
+
+    results = serving.run_offline_probes(
+        transport=transport,
+        contexts={"chat": production_plan()},
+        chat_model="chat",
+        embedding_model="embed",
+        listeners=("127.0.0.1:9099",),
+        listener_inspector=lambda port: (
+            (f"127.0.0.1:{port}",)
+            if port in {9099, 9098, 19001}
+            else ()
+        ),
+        expected_listener_ports={"public": 9099, "internal": 9098},
+        planned_placements={
+            "chat": {"backend": "cpu", "offloaded_layers": 0}
+        },
+        engine_runner=None,
+    )
+    by_name = {result.name: result for result in results}
+
+    assert by_name["cold_warm_state"].status == PASS
+    assert "already warm" in by_name["cold_warm_state"].reason
+    assert by_name["loaded_backend"].status == PROVISIONAL

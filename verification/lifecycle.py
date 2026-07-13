@@ -3956,14 +3956,42 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
             "configuration is unavailable"
         )
     by_name = {model["name"]: model for model in models}
+    admission_path = (
+        root / "state" / "generated" / "serving" / "admission.json"
+    )
+    admission_payload: dict[str, Any] | None = None
+    admission_models: dict[str, Any] | None = None
+    admission_tiers: dict[str, Any] | None = None
+    if admission_path.is_file():
+        try:
+            raw_admission = json.loads(
+                admission_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LifecycleError(
+                f"serving admission metadata is invalid: {exc}"
+            ) from exc
+        if (
+            not isinstance(raw_admission, dict)
+            or raw_admission.get("schema_version") != SCHEMA_VERSION
+            or not isinstance(raw_admission.get("models"), dict)
+            or not isinstance(raw_admission.get("tiers"), dict)
+        ):
+            raise LifecycleError("serving admission metadata is invalid")
+        admission_payload = raw_admission
+        admission_models = raw_admission["models"]
+        admission_tiers = raw_admission["tiers"]
     profile_path = root / "serving" / "models.profile"
-    profile = set(ids)
-    if profile_path.is_file():
+    if admission_models is not None:
+        profile = set(admission_models)
+    elif profile_path.is_file():
         profile = {
             line.strip()
             for line in profile_path.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
+    else:
+        profile = set(ids)
     profiles_path = root / "serving" / "profiles.conf"
     declared_profile: dict[str, Any] | None = None
     if profiles_path.is_file():
@@ -3993,6 +4021,14 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
         opus = str(tiers["OPUS_MODEL"])
         sonnet = str(tiers["SONNET_MODEL"])
         haiku = str(tiers["HAIKU_MODEL"])
+        if admission_tiers is not None and admission_tiers != {
+            "OPUS_MODEL": opus,
+            "SONNET_MODEL": sonnet,
+            "HAIKU_MODEL": haiku,
+        }:
+            raise LifecycleError(
+                "serving admission tier mapping differs from its active profile"
+            )
     else:
         sonnet = _pick_tier(chat, profile, ("fast", "big"))
         opus = _pick_tier(chat, profile, ("big", "fast"))
@@ -4021,35 +4057,14 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
     )
     tiers_path = root / "serving" / "tiers.env"
     admitted_contexts: dict[str, int] = {}
-    admission_path = root / "state" / "generated" / "serving" / "admission.json"
-    if admission_path.is_file():
-        try:
-            admission_payload = json.loads(
-                admission_path.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise LifecycleError(
-                f"serving admission metadata is invalid: {exc}"
-            ) from exc
-        admission_models = (
-            admission_payload.get("models")
-            if isinstance(admission_payload, dict)
-            else None
-        )
-        admission_tiers = (
-            admission_payload.get("tiers")
-            if isinstance(admission_payload, dict)
-            else None
-        )
+    if admission_payload is not None:
         expected_tiers = {
             "OPUS_MODEL": opus,
             "SONNET_MODEL": sonnet,
             "HAIKU_MODEL": haiku,
         }
         if (
-            not isinstance(admission_payload, dict)
-            or admission_payload.get("schema_version") != SCHEMA_VERSION
-            or not isinstance(admission_models, dict)
+            not isinstance(admission_models, dict)
             or set(admission_models) != set(active_order)
             or admission_tiers != expected_tiers
         ):

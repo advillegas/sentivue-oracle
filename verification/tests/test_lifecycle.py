@@ -1080,10 +1080,14 @@ def test_generated_model_configs_are_atomic_owned_and_preserve_user_files(
         + "\n"
         "embed-model | example/embed | embed.gguf | embed | 8192 | | "
         + ("b" * 40)
+        + "\n"
+        "extra-model | example/extra | extra.gguf | big | 65536 | | "
+        + ("d" * 40)
         + "\n",
     )
     put(root, "models/chat-model/model.gguf", b"GGUF chat")
     put(root, "models/embed-model/embed.gguf", b"GGUF embed")
+    put(root, "models/extra-model/extra.gguf", b"GGUF extra")
     promote_fixture_models(
         root,
         root / "incoming/dependency-cache",
@@ -1104,7 +1108,40 @@ def test_generated_model_configs_are_atomic_owned_and_preserve_user_files(
                 "embed.gguf",
                 b"GGUF embed",
             ),
+            (
+                "extra-model",
+                "example/extra",
+                "extra.gguf",
+                "d" * 40,
+                "extra.gguf",
+                b"GGUF extra",
+            ),
         ],
+    )
+    put(
+        root,
+        "serving/profiles.conf",
+        "active | 8 | chat-model,embed-model | chat-model | chat-model | "
+        "chat-model | fixture\n",
+    )
+    put(
+        root,
+        "state/generated/serving/admission.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tiers": {
+                    "OPUS_MODEL": "chat-model",
+                    "SONNET_MODEL": "chat-model",
+                    "HAIKU_MODEL": "chat-model",
+                },
+                "models": {
+                    "chat-model": {"advertised_context": 24576},
+                    "embed-model": {"advertised_context": 4096},
+                },
+            }
+        )
+        + "\n",
     )
     claude_template = put(
         root,
@@ -1141,6 +1178,14 @@ def test_generated_model_configs_are_atomic_owned_and_preserve_user_files(
         "SONNET_MODEL=chat-model\n"
         "HAIKU_MODEL=chat-model\n"
     )
+    generated_opencode = json.loads(
+        (root / "state/generated/opencode/opencode.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert set(
+        generated_opencode["provider"]["oracle"]["models"]
+    ) == {"chat-model"}
     for path, digest in template_hashes.items():
         assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
     for path in written:
