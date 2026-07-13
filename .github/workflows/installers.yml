@@ -183,11 +183,12 @@ jobs:
           )
           base_command="$(find "$RUNNER_TEMP/installer bundle" -maxdepth 1 -name '*.command' -print -quit)"
           cmp "$RUNNER_TEMP/expanded package/Scripts/one-click.command" "$base_command"
-          sudo rm -rf "/Applications/SentiVue Oracle"
+          package_destination="$HOME/sentivue-oracle"
+          sudo rm -rf "$package_destination"
           sudo installer -pkg "$package" -target /
           sudo installer -pkg "$package" -target /
-          test -f "/Applications/SentiVue Oracle/ARTIFACTS.json"
-          sudo rm -rf "/Applications/SentiVue Oracle"
+          test -f "$package_destination/ARTIFACTS.json"
+          sudo rm -rf "$package_destination"
           set +e
           signature="$(pkgutil --check-signature "$package" 2>&1)"
           status=$?
@@ -268,7 +269,7 @@ jobs:
               --verify-tag \
               --draft \
               --title "SentiVue Oracle $tag" \
-              --notes "One-click Windows (.cmd), macOS (.command.zip), and macOS (.pkg) installers. One launch selects a hardware profile, downloads every checksum-bound dependency and model shard, installs the local IDE and engines, and resumes interrupted downloads. These artifacts are currently unsigned; the macOS artifacts are not notarized. Verify RELEASE-SHA256SUMS before opening."
+              --notes "One-click Windows (.cmd) and macOS (.command.zip) installers, plus an optional source-only macOS (.pkg). The one-click installers select a hardware profile, download every checksum-bound dependency and model shard, install the local IDE and engines, and resume interrupted downloads. These artifacts are currently unsigned; the macOS artifacts are not notarized. Verify RELEASE-SHA256SUMS before opening."
           fi
 
           declare -A local_digest=()

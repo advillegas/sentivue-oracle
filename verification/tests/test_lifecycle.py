@@ -2936,6 +2936,7 @@ def test_one_click_builders_publish_native_unsigned_artifacts_honestly() -> None
     assert "pkgbuild" in package
     assert "--nopayload" in package
     assert "ORACLE_INSTALLER_SKIP_SETUP=1" in package
+    assert "This .pkg is source-only." in package
     assert "checked-out package builder differs from immutable source" in package
     assert "base dependency sidecar is missing or invalid" in package
     assert 'if [[ "$DEPENDENCY_BUNDLE_NAME" != "-" ]]' in package
@@ -2952,7 +2953,9 @@ def test_one_click_builders_publish_native_unsigned_artifacts_honestly() -> None
     assert "ORACLE_DEPENDENCY_RELEASE_TAG" not in workflow
     assert "ORACLE_DEPENDENCY_ASSET_SHA256" not in workflow
     assert "ORACLE_RELEASE_DEPENDENCY_CACHE" not in workflow
-    assert "downloads every checksum-bound dependency and model shard" in workflow
+    assert "download every checksum-bound dependency and model shard" in workflow
+    assert 'package_destination="$HOME/sentivue-oracle"' in workflow
+    assert '"/Applications/SentiVue Oracle"' not in workflow
     assert "github.ref_name }}\"" not in workflow
 
 

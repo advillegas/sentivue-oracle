@@ -237,9 +237,9 @@ echo "SentiVue Oracle source installed at $DEST"
 if compgen -G "$SCRIPT_DIR/SentiVue-Oracle-Dependencies-*.zip" >/dev/null; then
   echo "The verified offline dependency export was installed with the source."
 else
-  echo "A policy-bound offline dependency export is still required."
+  echo "Use the .command release artifact for complete connected setup."
 fi
-echo "Models remain a separate explicit import. Run bash \"$DEST/install\" as the console user to complete guided setup."
+echo "This .pkg is source-only. Run ORACLE_CONNECTED_SETUP=1 bash \"$DEST/install\" as the console user, or use the one-click .command artifact."
 POSTINSTALL
 chmod 755 "$SCRIPTS/postinstall"
 
@@ -280,7 +280,7 @@ cat > "$PROVENANCE" <<EOF
   "dependency_bundle_sha256": "$DEPENDENCY_BUNDLE_SHA",
   "code_signing": "unsigned",
   "notarization": "not-notarized",
-  "scope": "atomic source install; offline dependencies and models remain explicit prerequisites"
+  "scope": "atomic source-only install; connected dependencies and models are acquired by the one-click .command artifact"
 }
 EOF
 PROVENANCE_SHA="$(shasum -a 256 "$PROVENANCE" | awk '{print $1}')"
