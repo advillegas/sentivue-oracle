@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# SentiVue Oracle offline bootstrap for the Mac Studio.
-# Network acquisition is a separate export operation and is never implicit here.
+# SentiVue Oracle bootstrap for the Mac Studio.
+# Connected acquisition is explicit; all downloaded roots remain checksum-bound.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -10,7 +10,8 @@ ARTIFACT_MANIFEST="$DEPENDENCY_CACHE/manifest.json"
 
 find_python() {
   local candidate
-  for candidate in "$ROOT/env/.venv/bin/python" python3 python; do
+  for candidate in "$ROOT/env/.venv/bin/python" \
+      "$ROOT/.tools/python-bootstrap/bin/python3" python3 python; do
     if command -v "$candidate" >/dev/null 2>&1; then
       printf '%s\n' "$candidate"
       return 0
@@ -96,6 +97,11 @@ ACTUAL_PYTHON_VERSION="$("$PYTHON_BIN" -c 'import platform; print(platform.pytho
   echo "ERROR: bootstrap trust root requires Python $PYTHON_VERSION, found $ACTUAL_PYTHON_VERSION." >&2
   exit 1
 }
+CONNECTED_SETUP="${ORACLE_CONNECTED_SETUP:-0}"
+if [[ "$CONNECTED_SETUP" == "1" ]]; then
+  echo "==> acquiring promoted dependencies (connected, resumable)"
+  ORACLE_PYTHON="$PYTHON_BIN" bash bootstrap/acquire-dependencies.sh
+fi
 "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" validate-dependencies \
   --root "$ROOT"
 
@@ -126,7 +132,7 @@ mv -f "$ROOT/state/lean-ctx/config/config.toml.new" \
   "$ROOT/state/lean-ctx/config/config.toml"
 install_cached_binary "brew-llama-cpp" "$LLAMA_CPP_BREW_VERSION" \
   "$LLAMA_CPP_BREW_RESOLVED_VERSION" llama-server "$ROOT/.tools/bin/llama-server"
-for required in tar node npm uv uvx jq git lean-ctx llama-server; do
+for required in tar node npm uv uvx jq lean-ctx llama-server; do
   command -v "$required" >/dev/null || {
     echo "ERROR: $required is absent; install it from the validated platform export." >&2
     exit 1
@@ -153,7 +159,14 @@ echo "==> [3/8] Engines (pinned, repo-local npm prefix — nothing global)"
 # but npm is the right choice here: exact version pin, no background auto-updates.
 export npm_config_prefix="$ROOT/.tools/npm"
 export npm_config_cache="$DEPENDENCY_CACHE/npm"
-export npm_config_offline=true
+if [[ "$CONNECTED_SETUP" == "1" ]]; then
+  export npm_config_offline=false
+  unset UV_OFFLINE
+  UV_MODE=()
+else
+  export npm_config_offline=true
+  UV_MODE=(--offline)
+fi
 mkdir -p "$npm_config_prefix"
 CLAUDE_ARCHIVE="$(artifact_path "npm-claude-code" "$CLAUDE_CODE_NPM_VERSION")"
 OPENCODE_ARCHIVE="$(artifact_path "npm-opencode" "$OPENCODE_NPM_VERSION")"
@@ -167,7 +180,11 @@ ln -sfn "$ROOT/bin/oracle" "$HOME/.local/bin/oracle"
 echo "    linked ~/.local/bin/oracle (ensure ~/.local/bin is on PATH)"
 
 echo "==> [4/8] Python quant environment (uv)"
-( cd env && uv sync --offline --frozen )
+if [[ "$CONNECTED_SETUP" == "1" ]]; then
+  ( cd env && uv sync --frozen )
+else
+  ( cd env && uv sync --offline --frozen )
+fi
 # Warm uvx caches only from policy-bound root artifacts; transitive wheels are
 # resolved from the offline uv cache populated during explicit export.
 MCP_DUCKDB_ARCHIVE="$(artifact_path "python-mcp-duckdb" "$MCP_DUCKDB")"
@@ -175,9 +192,9 @@ MCP_POSTGRES_ARCHIVE="$(artifact_path "python-mcp-postgres" "$MCP_POSTGRES")"
 HF_CLI_ARCHIVE="$(
   artifact_path "hf-cli" "$HF_CLI_VERSION" "$HF_CLI_RESOLVED_VERSION"
 )"
-uvx --offline --from "$MCP_DUCKDB_ARCHIVE" mcp-server-duckdb --help >/dev/null
-uvx --offline --from "$MCP_POSTGRES_ARCHIVE" postgres-mcp --help >/dev/null
-uv tool install --offline "$HF_CLI_ARCHIVE"
+uvx "${UV_MODE[@]}" --from "$MCP_DUCKDB_ARCHIVE" mcp-server-duckdb --help >/dev/null
+uvx "${UV_MODE[@]}" --from "$MCP_POSTGRES_ARCHIVE" postgres-mcp --help >/dev/null
+uv tool install "${UV_MODE[@]}" "$HF_CLI_ARCHIVE"
 
 echo "==> [5/8] Skills -> both engines"
 bash bootstrap/sync-skills.sh
@@ -194,17 +211,12 @@ bash harness/skill-packs/install-skill-packs.sh
 
 echo "==> [7/8] Generated engine configuration deferred until model validation"
 
-echo "==> [8/8] GPU wired-limit prerequisite"
-WIRED_LIMIT="$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)"
-if [[ "$WIRED_LIMIT" -lt 458752 ]]; then
-  echo "ERROR: iogpu.wired_limit_mb must be provisioned to at least 458752 before install." >&2
-  echo "       No unowned system daemon is created automatically." >&2
-  exit 1
-fi
-
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  echo "==> [8b/8] Local git vault (offline private remote + auto-backup target)"
+if [[ "$(uname -s)" == "Darwin" ]] && git --version >/dev/null 2>&1; then
+  echo "==> [8/8] Local git vault (offline private remote + auto-backup target)"
   bash bootstrap/vault.sh init
+elif [[ "$(uname -s)" == "Darwin" ]]; then
+  echo "WARN: Apple Git is unavailable; vault and worktree missions remain disabled"
+  echo "      until Command Line Tools are installed."
 fi
 
 mkdir -p memory logs reports state && touch memory/.gitkeep
@@ -226,6 +238,4 @@ done
 "$PYTHON_BIN" "$ROOT/verification/lifecycle.py" state own \
   --root "$ROOT" --home "$HOME" --path "$HOME/.local/bin/oracle"
 echo
-echo "Bootstrap complete. Next:"
-echo "  make models   (~700 GB download, resumable)"
-echo "  make serve && make verify"
+echo "Bootstrap complete; the guided installer will acquire the selected models next."

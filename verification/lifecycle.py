@@ -17,6 +17,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -47,7 +48,7 @@ VERSION_PATTERN = re.compile(
     r"^v?[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?$"
 )
 PORTABLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-reparse-v3"
+INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-reparse-v4"
 DEPENDENCY_AUTHORITY_FILE = "verification/dependency-authorities.json"
 WINDOWS_RESERVED_NAMES = {
     "aux",
@@ -265,6 +266,33 @@ def atomic_write_bytes(path: Path, data: bytes, mode: int | None = None) -> None
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def atomic_copy_file(path: Path, source: Path, mode: int | None = None) -> None:
+    """Atomically stream a file into place without loading large artifacts in RAM."""
+
+    path = Path(os.path.abspath(os.fspath(path)))
+    source = source.resolve()
+    if not source.is_file() or _is_reparse_point(source):
+        raise LifecycleError(f"copy source is missing or unsafe: {source}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_file:
+            shutil.copyfileobj(input_file, output, length=1024 * 1024)
+            output.flush()
+            os.fsync(output.fileno())
         if mode is not None:
             os.chmod(temporary, mode)
         os.replace(temporary, path)
@@ -2143,7 +2171,7 @@ def _installer_atomic_helper() -> str:
     """Return the ASCII PowerShell helper injected into protected installers."""
 
     return r"""
-# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v3
+# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v4
 function Assert-SafeAtomicPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     if (Test-Path -LiteralPath $full) {
@@ -2358,7 +2386,7 @@ def _macos_installer_header(
         else payload_sha256
     )
     template = r"""#!/bin/bash
-# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v3
+# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v4
 set -euo pipefail
 set -f
 EXPECTED_PAYLOAD_SHA256="__PAYLOAD_SHA256__"
@@ -2371,6 +2399,7 @@ DEPENDENCY_BUNDLE_SHA256="__DEPENDENCY_BUNDLE_SHA256__"
 INSTALL_IDENTITY="__INSTALL_IDENTITY__"
 PRODUCT_NAME="sentivue-oracle"
 MARKER_NAME=".oracle-installer-payload.sha256"
+COMPLETE_MARKER_NAME=".oracle-install-complete"
 WORK=""
 PUBLISHED_NOW=0
 ALREADY_INSTALLED=0
@@ -2456,24 +2485,10 @@ verify_immutable_source() {
   rm -f "$records"
 }
 publish_no_replace() {
-  local source="$1" destination="$2" compiler helper_source helper
-  compiler="$(xcrun --find clang 2>/dev/null)" ||
-    fail "Xcode Command Line Tools are required for atomic no-replace installation"
-  helper_source="$WORK/rename-no-replace.c"
-  helper="$WORK/rename-no-replace"
-  cat > "$helper_source" <<'C'
-#include <errno.h>
-#include <stdio.h>
-extern int renamex_np(const char *, const char *, unsigned int);
-int main(int argc, char **argv) {
-  if (argc != 3) return 64;
-  if (renamex_np(argv[1], argv[2], 0x00000004U) == 0) return 0;
-  perror("renamex_np");
-  return errno ? errno : 1;
-}
-C
-  "$compiler" -Os -o "$helper" "$helper_source" || return 1
-  "$helper" "$source" "$destination"
+  local source="$1" destination="$2"
+  [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+  mv -n "$source" "$destination" || return 1
+  [[ -d "$destination" && ! -e "$source" ]]
 }
 rollback_new_install() {
   [[ "$PUBLISHED_NOW" -eq 1 ]] || return 0
@@ -2586,8 +2601,12 @@ fi
 if [[ "$ALREADY_INSTALLED" -eq 1 ]]; then
   verify_immutable_source "$DEST" ||
     fail "installed source was modified; existing tree was preserved without executing child setup"
-  printf '==> verified existing installation; child setup was not re-executed\n'
-  exit 0
+  if [[ -f "$DEST/$COMPLETE_MARKER_NAME" ]] &&
+     [[ "$(<"$DEST/$COMPLETE_MARKER_NAME")" == "$INSTALL_IDENTITY" ]]; then
+    printf '==> verified complete existing installation; child setup was not re-executed\n'
+    exit 0
+  fi
+  printf '==> resuming incomplete installation at %s\n' "$DEST"
 fi
 
 if [[ "${ORACLE_INSTALLER_SKIP_SETUP:-0}" == "1" ]]; then
@@ -2601,14 +2620,19 @@ fi
 verify_immutable_source "$DEST" ||
   fail "installed source was modified; preserved without executing child setup"
 if [[ ! -f "$DEST/incoming/dependency-cache/manifest.json" ]]; then
-  rollback_new_install
-  fail "the policy-bound offline dependency cache is missing, so the new destination was rolled back. Rebuild with --dependency-cache and keep its sidecar beside this installer. Models remain a separate explicit import."
+  if [[ -n "$DEPENDENCY_BUNDLE_NAME" ]]; then
+    rollback_new_install
+    fail "the embedded policy-bound dependency cache is missing, so the new destination was rolled back"
+  fi
+  export ORACLE_CONNECTED_SETUP=1
+  printf '==> connected install: downloading checksum-bound dependencies\n'
 fi
-printf '==> running ownership-scoped offline setup (unsigned/not notarized installer)\n'
+printf '==> running ownership-scoped platform setup (unsigned/not notarized installer)\n'
 if ! bash "$DEST/install"; then
-  rollback_new_install
-  fail "installer child setup failed; newly published source was rolled back"
+  fail "installer child setup failed; verified partial downloads were preserved for rerun"
 fi
+printf '%s\n' "$INSTALL_IDENTITY" > "$DEST/$COMPLETE_MARKER_NAME.new"
+mv -f "$DEST/$COMPLETE_MARKER_NAME.new" "$DEST/$COMPLETE_MARKER_NAME"
 printf '==> SentiVue Oracle setup completed\n'
 exit 0
 __PAYLOAD_BELOW__
@@ -2654,8 +2678,11 @@ $DependencyBundleSha256 = "__DEPENDENCY_BUNDLE_SHA256__"
 $InstallIdentity = "__INSTALL_IDENTITY__"
 $ProductName = "sentivue-oracle"
 $MarkerName = ".oracle-installer-payload.sha256"
+$CompleteMarkerName = ".oracle-install-complete"
 $Stage = $null
 $PublishedNow = $false
+$SetupStarted = $false
+$BaseSetupComplete = $false
 
 function Get-Sha256Hex([byte[]]$Bytes) {
     $algorithm = [Security.Cryptography.SHA256]::Create()
@@ -2793,7 +2820,7 @@ function Select-InstallerProfile([string]$Root) {
         "HAIKU_MODEL=$($selected.Haiku)"
     )
     Write-Utf8NoBomAtomic $tiersPath (($tiers -join "`n") + "`n")
-    Write-Host "==> profile '$($selected.Name)' selected; models are a separate policy-bound import"
+    Write-Host "==> profile '$($selected.Name)' selected for policy-bound model acquisition"
 }
 
 try {
@@ -2970,8 +2997,13 @@ try {
     }
     if ($AlreadyInstalled) {
         Assert-ImmutableSource $Destination
-        Write-Host "==> verified existing installation; child setup was not re-executed"
-        exit 0
+        $completeMarker = Join-Path $Destination $CompleteMarkerName
+        if ((Test-Path -LiteralPath $completeMarker -PathType Leaf) -and
+            (Get-Content -LiteralPath $completeMarker -Raw).Trim() -eq $InstallIdentity) {
+            Write-Host "==> verified complete existing installation; child setup was not re-executed"
+            exit 0
+        }
+        Write-Host "==> resuming incomplete installation at $Destination"
     }
     if ($env:ORACLE_INSTALLER_SKIP_SETUP -eq "1") {
         if ($env:ORACLE_INSTALLER_REQUIRE_IMMUTABLE -eq "1") {
@@ -2983,19 +3015,64 @@ try {
     Assert-ImmutableSource $Destination
     $dependencyManifest = Join-Path $Destination "incoming\dependency-cache\manifest.json"
     if (-not (Test-Path -LiteralPath $dependencyManifest -PathType Leaf)) {
-        throw "the policy-bound offline dependency cache is missing; the newly published destination will be rolled back. Rebuild with -DependencyCache and keep its sidecar beside this installer. Models remain a separate explicit import."
+        if ($DependencyBundleName) {
+            throw "the embedded policy-bound dependency cache is missing; the newly published destination will be rolled back"
+        }
+        $env:ORACLE_CONNECTED_SETUP = "1"
+        Write-Host "==> connected install: downloading checksum-bound dependencies"
     }
-    Write-Host "==> running ownership-scoped offline setup (unsigned installer)"
+    Write-Host "==> running ownership-scoped platform setup (unsigned installer)"
+    $SetupStarted = $true
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Destination "bin\oracle.ps1") setup
     if ($LASTEXITCODE -ne 0) {
         throw "installer child setup failed: $LASTEXITCODE"
+    }
+    $BaseSetupComplete = $true
+    if ($env:ORACLE_INSTALLER_SKIP_MODELS -ne "1") {
+        $modelDownloader = Join-Path $Destination "bootstrap\download-models.ps1"
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $modelDownloader
+        if ($LASTEXITCODE -ne 0) {
+            throw "model acquisition failed: $LASTEXITCODE"
+        }
+        $ideSetup = Join-Path $Destination "connectors\ide\setup-ide.ps1"
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $ideSetup install
+        if ($LASTEXITCODE -ne 0) {
+            throw "IDE setup failed: $LASTEXITCODE"
+        }
+        $servingSetup = Join-Path $Destination "serving\serve-windows.ps1"
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $servingSetup install
+        if ($LASTEXITCODE -ne 0) {
+            throw "local serving installation failed: $LASTEXITCODE"
+        }
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $servingSetup start
+        if ($LASTEXITCODE -ne 0) {
+            throw "local serving startup failed: $LASTEXITCODE"
+        }
+    }
+    if ($env:ORACLE_INSTALLER_SKIP_MODELS -ne "1") {
+        Write-Utf8NoBomAtomic (Join-Path $Destination $CompleteMarkerName) ($InstallIdentity + "`n")
     }
     Write-Host "==> SentiVue Oracle setup completed"
     exit 0
 } catch {
     Write-Host ""
     Write-Host "INSTALLER ERROR: $($_.Exception.Message)"
-    if ($PublishedNow -and (Test-Path -LiteralPath $Destination -PathType Container)) {
+    if ($SetupStarted -and -not $DependencyBundleName -and
+        (Test-Path -LiteralPath $Destination -PathType Container)) {
+        if (-not $BaseSetupComplete) {
+            try {
+                $uninstaller = Join-Path $Destination "bootstrap\uninstall.ps1"
+                & powershell -NoProfile -ExecutionPolicy Bypass -File $uninstaller `
+                    -Apply -Root $Destination -HomePath $env:USERPROFILE
+                if ($LASTEXITCODE -ne 0) {
+                    throw "ownership-scoped uninstaller failed: $LASTEXITCODE"
+                }
+            } catch {
+                Write-Host "WARN: ownership-scoped side-effect rollback reported an error"
+            }
+        }
+        Write-Host "Verified partial downloads were preserved; run this installer again to resume."
+    } elseif ($PublishedNow -and (Test-Path -LiteralPath $Destination -PathType Container)) {
         try {
             $uninstaller = Join-Path $Destination "bootstrap\uninstall.ps1"
             & powershell -NoProfile -ExecutionPolicy Bypass -File $uninstaller `
@@ -3858,7 +3935,7 @@ def record_cached_artifact(
     validate_relative_path(relative)
     destination = cache_root / Path(*PurePosixPath(relative).parts)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_bytes(destination, source_file.read_bytes())
+    atomic_copy_file(destination, source_file)
     record = ArtifactRecord(
         artifact_id=artifact_id,
         cache_path=relative,
@@ -3980,19 +4057,102 @@ def _extract_source_archive(archive_path: Path, destination: Path) -> Path:
     if archive_path.suffix.lower() == ".zip":
         try:
             with zipfile.ZipFile(archive_path) as archive:
+                members: dict[str, zipfile.ZipInfo] = {}
+                links: list[tuple[str, zipfile.ZipInfo]] = []
                 for info in archive.infolist():
                     relative = validate_relative_path(info.filename.rstrip("/"))
+                    if relative in members:
+                        raise LifecycleError(
+                            f"source archive contains a duplicate member: {relative}"
+                        )
+                    members[relative] = info
                     target = destination / Path(*PurePosixPath(relative).parts)
                     unix_type = (info.external_attr >> 16) & 0o170000
                     if unix_type == stat.S_IFLNK:
-                        raise LifecycleError("source archive contains a symbolic link")
+                        links.append((relative, info))
+                        continue
                     if info.is_dir():
                         target.mkdir(parents=True, exist_ok=True)
                         continue
+                    if unix_type not in {0, stat.S_IFREG}:
+                        raise LifecycleError(
+                            "source archive contains a special entry"
+                        )
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(info) as source, target.open("xb") as output:
                         shutil.copyfileobj(source, output)
                     mode = (info.external_attr >> 16) & 0o777
+                    if mode:
+                        os.chmod(target, mode)
+                for relative, info in links:
+                    seen = {relative}
+                    current_relative = relative
+                    current_info = info
+                    while ((current_info.external_attr >> 16) & 0o170000) == stat.S_IFLNK:
+                        raw_target = archive.read(current_info)
+                        if len(raw_target) > 4096 or b"\x00" in raw_target:
+                            raise LifecycleError(
+                                "source archive symbolic link target is invalid"
+                            )
+                        try:
+                            link_target = raw_target.decode("utf-8")
+                        except UnicodeDecodeError as exc:
+                            raise LifecycleError(
+                                "source archive symbolic link target is not UTF-8"
+                            ) from exc
+                        resolved = posixpath.normpath(
+                            posixpath.join(
+                                posixpath.dirname(current_relative),
+                                link_target,
+                            )
+                        )
+                        resolved = validate_relative_path(resolved)
+                        if (
+                            PurePosixPath(resolved).parts[0]
+                            != PurePosixPath(relative).parts[0]
+                        ):
+                            raise LifecycleError(
+                                "source archive symbolic link escapes its source root"
+                            )
+                        if resolved in seen:
+                            raise LifecycleError(
+                                "source archive contains a symbolic link cycle"
+                            )
+                        seen.add(resolved)
+                        current_relative = resolved
+                        current_info = members.get(resolved)  # type: ignore[assignment]
+                        if current_info is None:
+                            raise LifecycleError(
+                                "source archive symbolic link target is missing"
+                            )
+                    current_type = (current_info.external_attr >> 16) & 0o170000
+                    target = destination / Path(*PurePosixPath(relative).parts)
+                    if current_info.is_dir():
+                        prefix = current_relative.rstrip("/") + "/"
+                        if any(
+                            nested_relative.startswith(prefix)
+                            for nested_relative, _nested_info in links
+                        ):
+                            raise LifecycleError(
+                                "source archive directory link target contains links"
+                            )
+                        source_directory = destination / Path(
+                            *PurePosixPath(current_relative).parts
+                        )
+                        if not source_directory.is_dir():
+                            raise LifecycleError(
+                                "source archive symbolic link directory is missing"
+                            )
+                        shutil.copytree(source_directory, target)
+                        continue
+                    if current_type not in {0, stat.S_IFREG}:
+                        raise LifecycleError(
+                            "source archive symbolic link target is not a regular file"
+                        )
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(current_info) as source, target.open("xb") as output:
+                        shutil.copyfileobj(source, output)
+                    mode = (current_info.external_attr >> 16) & 0o777
                     if mode:
                         os.chmod(target, mode)
         except (zipfile.BadZipFile, OSError) as exc:
@@ -4801,7 +4961,11 @@ def export_artifact(
         temporary = Path(temporary_directory) / filename
         with temporary.open("wb") as output:
             try:
-                with urllib.request.urlopen(source_url, timeout=120) as response:
+                request = urllib.request.Request(
+                    source_url,
+                    headers={"User-Agent": "sentivue-oracle-dependency-acquisition/1"},
+                )
+                with urllib.request.urlopen(request, timeout=600) as response:
                     while True:
                         chunk = response.read(1024 * 1024)
                         if not chunk:
@@ -4828,6 +4992,135 @@ def export_artifact(
             resolved_version=resolved_version,
             trust="policy-bound" if trusted else "untrusted",
         )
+
+
+def acquire_dependency_inputs(
+    root: Path,
+    cache_root: Path,
+    *,
+    platform: str,
+    include_optional: bool = False,
+    retries: int = 3,
+    progress: Callable[[str], None] | None = None,
+) -> list[ArtifactRecord]:
+    """Download the platform's promoted dependency set into a resumable cache."""
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,63}", platform):
+        raise LifecycleError(f"invalid dependency platform: {platform!r}")
+    if retries < 1 or retries > 10:
+        raise LifecycleError("dependency acquisition retries must be in [1, 10]")
+    root = root.resolve()
+    cache_root = cache_root.resolve()
+    versions, policy = _load_dependency_policy(root)
+    authorities = _load_dependency_authorities(root)
+    raw_inputs = policy.get("dependency_inputs", [])
+    if not isinstance(raw_inputs, list):
+        raise LifecycleError("dependency policy inputs must be a list")
+    selected: list[tuple[Mapping[str, Any], dict[str, str]]] = []
+    for raw in raw_inputs:
+        if not isinstance(raw, dict):
+            continue
+        supported = raw.get("platforms", [])
+        if supported and platform not in supported:
+            continue
+        if raw.get("optional", False) and not include_optional:
+            continue
+        authority = _effective_dependency_authority(
+            root,
+            versions,
+            raw,
+            authorities=authorities,
+        )
+        selected.append((raw, authority))
+    if not selected:
+        raise LifecycleError(f"dependency policy has no inputs for {platform}")
+
+    manifest_path = cache_root / "manifest.json"
+    existing, manifest_errors = _load_artifact_records(
+        manifest_path if manifest_path.is_file() else None
+    )
+    if manifest_errors:
+        raise LifecycleError("; ".join(manifest_errors))
+    acquired: list[ArtifactRecord] = []
+    selected_ids: set[str] = set()
+    for raw, authority in selected:
+        artifact_id = str(raw["id"])
+        selected_ids.add(artifact_id)
+        current = existing.get(artifact_id)
+        current_path: Path | None = None
+        if current is not None:
+            try:
+                relative = validate_relative_path(current.cache_path)
+                current_path = cache_root / Path(*PurePosixPath(relative).parts)
+            except LifecycleError:
+                current_path = None
+        reusable = (
+            current is not None
+            and current_path is not None
+            and current.trust == "policy-bound"
+            and current.source_url == authority["source_url"]
+            and current.requested_version == authority["requested_version"]
+            and current.resolved_version == authority["resolved_version"]
+            and current.sha256 == authority["sha256"]
+            and current_path.is_file()
+            and not _is_reparse_point(current_path)
+            and current_path.stat().st_size == current.size
+            and _sha256_file(current_path) == current.sha256
+        )
+        if reusable:
+            if progress:
+                progress(f"dependency already verified: {artifact_id}")
+            acquired.append(current)
+            continue
+        if progress:
+            progress(f"downloading dependency: {artifact_id}")
+        last_error: LifecycleError | None = None
+        for attempt in range(1, retries + 1):
+            try:
+                record = export_artifact(
+                    cache_root,
+                    artifact_id=artifact_id,
+                    source_url=authority["source_url"],
+                    requested_version=authority["requested_version"],
+                    resolved_version=authority["resolved_version"],
+                    expected_sha256=authority["sha256"],
+                    policy_root=root,
+                    trusted=True,
+                )
+                acquired.append(record)
+                existing[artifact_id] = record
+                last_error = None
+                break
+            except LifecycleError as exc:
+                last_error = exc
+                if attempt < retries:
+                    if progress:
+                        progress(
+                            f"retrying dependency {artifact_id} "
+                            f"({attempt}/{retries}): {exc}"
+                        )
+                    time.sleep(min(20, attempt * 5))
+        if last_error is not None:
+            raise LifecycleError(
+                f"{artifact_id}: acquisition failed after {retries} attempts: "
+                f"{last_error}"
+            ) from last_error
+
+    validation = validate_dependency_inputs(
+        root,
+        artifact_manifest=manifest_path,
+        cache_root=cache_root,
+        reproducible=True,
+        artifact_ids=selected_ids,
+        include_models=False,
+        include_optional=include_optional,
+    )
+    if validation:
+        raise LifecycleError(
+            "acquired dependency cache failed policy validation: "
+            + "; ".join(validation)
+        )
+    return acquired
 
 
 def record_model_snapshot(
@@ -6711,6 +7004,24 @@ def _command_export_artifact(args: argparse.Namespace) -> int:
     return 0
 
 
+def _command_acquire_dependencies(args: argparse.Namespace) -> int:
+    records = acquire_dependency_inputs(
+        args.root,
+        args.cache,
+        platform=args.platform,
+        include_optional=args.include_optional,
+        retries=args.retries,
+        progress=lambda message: print(f"==> {message}", file=sys.stderr),
+    )
+    print(
+        json.dumps(
+            [record.to_payload() for record in records],
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def _command_import_artifact(args: argparse.Namespace) -> int:
     record = import_artifact(
         args.root,
@@ -6969,6 +7280,14 @@ def build_parser() -> argparse.ArgumentParser:
     export.add_argument("--root", type=Path)
     export.add_argument("--trusted", action="store_true")
     export.set_defaults(handler=_command_export_artifact)
+
+    acquire = subparsers.add_parser("acquire-dependencies")
+    acquire.add_argument("--root", type=Path, required=True)
+    acquire.add_argument("--cache", type=Path, required=True)
+    acquire.add_argument("--platform", required=True)
+    acquire.add_argument("--include-optional", action="store_true")
+    acquire.add_argument("--retries", type=int, default=3)
+    acquire.set_defaults(handler=_command_acquire_dependencies)
 
     import_dependency = subparsers.add_parser("import-artifact")
     import_dependency.add_argument("--root", type=Path, required=True)

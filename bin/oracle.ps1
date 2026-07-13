@@ -23,6 +23,8 @@ function Find-CodiumInstalled {
 function Find-RealPython {
     $venv = Join-Path $Root "env\.venv\Scripts\python.exe"
     if (Test-Path -LiteralPath $venv) { return $venv }
+    $bootstrap = Join-Path $Root ".tools\python-bootstrap\python.exe"
+    if (Test-Path -LiteralPath $bootstrap) { return $bootstrap }
     $cmd = Get-Command python -ErrorAction SilentlyContinue
     if ($cmd -and $cmd.Source -notmatch "WindowsApps") { return $cmd.Source }
     $c = Get-ChildItem "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue |
@@ -95,11 +97,33 @@ switch ($Cmd) {
         $lock = Get-Content (Join-Path $Root "VERSIONS.lock") | Where-Object { $_ -match "=" }
         $pins = @{}
         foreach ($l in $lock) { $kv = $l -split "=", 2; $pins[$kv[0].Trim()] = ($kv[1] -split "#")[0].Trim() }
+        $connectedSetup = $env:ORACLE_CONNECTED_SETUP -eq "1"
         $python = Find-RealPython
+        if (-not $python -and $connectedSetup) {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File `
+                (Join-Path $Root "bootstrap\bootstrap-python.ps1") `
+                -Root $Root | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "portable Python bootstrap failed: $LASTEXITCODE"
+            }
+            $python = Find-RealPython
+        }
         if (-not $python) { throw "Python 3.12 is a platform prerequisite for offline cache validation" }
         $actualPython = (& $python -c "import platform; print(platform.python_version())").Trim()
         if ($LASTEXITCODE -ne 0 -or $actualPython -ne $pins["PYTHON_VERSION"]) {
             throw "bootstrap trust root requires Python $($pins['PYTHON_VERSION']), found $actualPython"
+        }
+        $cache = if ($env:ORACLE_DEPENDENCY_CACHE) {
+            $env:ORACLE_DEPENDENCY_CACHE
+        } else {
+            Join-Path $Root "incoming\dependency-cache"
+        }
+        if ($connectedSetup) {
+            Invoke-NativeChecked "connected dependency acquisition" {
+                & powershell -NoProfile -ExecutionPolicy Bypass -File `
+                    (Join-Path $Root "bootstrap\acquire-dependencies.ps1") `
+                    -Root $Root -CacheDir $cache
+            }
         }
         $lifecycle = Join-Path $Root "verification\lifecycle.py"
         Invoke-NativeChecked "state init" {
@@ -115,14 +139,13 @@ switch ($Cmd) {
             & $python $lifecycle state begin-phase --root $Root `
                 --home $env:USERPROFILE --phase "windows-setup" | Out-Null
         }
-        $cache = if ($env:ORACLE_DEPENDENCY_CACHE) {
-            $env:ORACLE_DEPENDENCY_CACHE
-        } else {
-            Join-Path $Root "incoming\dependency-cache"
-        }
         $env:npm_config_prefix = Join-Path $Root ".tools\npm"
         $env:npm_config_cache = Join-Path $cache "npm"
-        $env:npm_config_offline = "true"
+        $env:npm_config_offline = if ($connectedSetup) { "false" } else { "true" }
+        $uvMode = if ($connectedSetup) { @() } else { @("--offline") }
+        if ($connectedSetup) {
+            Remove-Item Env:\UV_OFFLINE -ErrorAction SilentlyContinue
+        }
         New-Item -ItemType Directory -Force -Path $env:npm_config_prefix | Out-Null
         $nodeArchive = Get-CachedArtifact "node-windows-x64" $pins["NODE_VERSION"] $python
         $nodeRoot = Join-Path $Root ".tools\node"
@@ -214,23 +237,23 @@ switch ($Cmd) {
         $env:PATH = $toolsBin + ";" + (Split-Path -Parent $npmCommand.FullName) + ";" + $env:PATH
         $env:UV_CACHE_DIR = Join-Path $cache "uv"
         Invoke-NativeChecked "uv sync" {
-            & (Join-Path $toolsBin "uv.exe") sync --offline --frozen `
+            & (Join-Path $toolsBin "uv.exe") sync @uvMode --frozen `
                 --project (Join-Path $Root "env")
         }
         $mcpDuckdb = Get-CachedArtifact "python-mcp-duckdb" $pins["MCP_DUCKDB"] $python
         $mcpPostgres = Get-CachedArtifact "python-mcp-postgres" $pins["MCP_POSTGRES"] $python
         $hfCli = Get-CachedArtifact "hf-cli" $pins["HF_CLI_VERSION"] $python
         Invoke-NativeChecked "MCP cache warmup" {
-            & (Join-Path $toolsBin "uvx.exe") --offline --from $mcpDuckdb `
+            & (Join-Path $toolsBin "uvx.exe") @uvMode --from $mcpDuckdb `
                 mcp-server-duckdb --help | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "DuckDB MCP cache warmup failed" }
-            & (Join-Path $toolsBin "uvx.exe") --offline --from $mcpPostgres `
+            & (Join-Path $toolsBin "uvx.exe") @uvMode --from $mcpPostgres `
                 postgres-mcp --help | Out-Null
         }
         $env:UV_TOOL_DIR = Join-Path $Root ".tools\uv-tools"
         $env:UV_TOOL_BIN_DIR = $toolsBin
         Invoke-NativeChecked "HF CLI install" {
-            & (Join-Path $toolsBin "uv.exe") tool install --offline $hfCli
+            & (Join-Path $toolsBin "uv.exe") tool install @uvMode $hfCli
         }
         Write-Host "==> engines: claude-code@$($pins['CLAUDE_CODE_NPM_VERSION']) + opencode@$($pins['OPENCODE_NPM_VERSION']) + kilo@$($pins['KILO_CLI_NPM_VERSION'])"
         $claudeArchive = Get-CachedArtifact "npm-claude-code" $pins["CLAUDE_CODE_NPM_VERSION"] $python

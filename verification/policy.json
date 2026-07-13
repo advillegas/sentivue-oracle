@@ -43,7 +43,7 @@
       "id": "python",
       "version_key": "PYTHON_VERSION",
       "platforms": ["darwin-arm64", "windows-x64"],
-      "reason": "Python runs the standard-library validator before cached artifacts can be trusted."
+      "reason": "The native installer verifies and extracts the pinned portable Python runtime before it runs the standard-library validator."
     },
     {
       "id": "os-tooling",
@@ -53,6 +53,28 @@
     }
   ],
   "dependency_inputs": [
+    {
+      "id": "python-bootstrap-darwin-arm64",
+      "kind": "toolchain",
+      "version_key": "PYTHON_VERSION",
+      "allow_dynamic": false,
+      "platforms": ["darwin-arm64"],
+      "source": {
+        "identity": "https://github.com/astral-sh/python-build-standalone/releases/download/20250517/cpython-3.12.10%2B20250517-aarch64-apple-darwin-install_only.tar.gz",
+        "digest_key": "PYTHON_DARWIN_ARM64_SHA256"
+      }
+    },
+    {
+      "id": "python-bootstrap-windows-x64",
+      "kind": "toolchain",
+      "version_key": "PYTHON_VERSION",
+      "allow_dynamic": false,
+      "platforms": ["windows-x64"],
+      "source": {
+        "identity": "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
+        "digest_key": "PYTHON_WINDOWS_X64_SHA256"
+      }
+    },
     {
       "id": "npm-claude-code",
       "kind": "npm",
@@ -178,7 +200,7 @@
       "allow_dynamic": false,
       "source": {
         "identity_key": "SUPERPOWERS_REPO",
-        "url": "{identity}/archive/{resolved}.tar.gz",
+        "url": "{identity}/archive/{resolved}.zip",
         "revision_key": "SUPERPOWERS_COMMIT",
         "digest_key": "SUPERPOWERS_ARCHIVE_SHA256"
       }
@@ -190,7 +212,7 @@
       "allow_dynamic": false,
       "source": {
         "identity_key": "GSTACK_REPO",
-        "url": "{identity}/archive/{resolved}.tar.gz",
+        "url": "{identity}/archive/{resolved}.zip",
         "revision_key": "GSTACK_COMMIT",
         "digest_key": "GSTACK_ARCHIVE_SHA256"
       }
@@ -200,8 +222,9 @@
       "kind": "native",
       "version_key": "LLAMA_CPP_BREW_VERSION",
       "allow_dynamic": true,
+      "platforms": ["darwin-arm64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://github.com/ggml-org/llama.cpp/releases/download/{resolved}/llama-{resolved}-bin-macos-arm64.tar.gz",
         "resolved_version_key": "LLAMA_CPP_BREW_RESOLVED_VERSION",
         "digest_key": "LLAMA_CPP_BREW_SHA256"
       }
@@ -211,8 +234,9 @@
       "kind": "native",
       "version_key": "LLAMA_SWAP_VERSION",
       "allow_dynamic": false,
+      "platforms": ["darwin-arm64"],
       "source": {
-        "identity": "https://github.com/mostlygeek/llama-swap/releases/download/{version}/llama-swap_{version}_darwin_arm64.tar.gz",
+        "identity": "https://github.com/mostlygeek/llama-swap/releases/download/v{version}/llama-swap_{version}_darwin_arm64.tar.gz",
         "digest_key": "LLAMA_SWAP_DARWIN_ARM64_SHA256"
       }
     },
@@ -221,8 +245,9 @@
       "kind": "native",
       "version_key": "LLAMA_SWAP_VERSION",
       "allow_dynamic": false,
+      "platforms": ["windows-x64"],
       "source": {
-        "identity": "https://github.com/mostlygeek/llama-swap/releases/download/{version}/llama-swap_{version}_windows_amd64.zip",
+        "identity": "https://github.com/mostlygeek/llama-swap/releases/download/v{version}/llama-swap_{version}_windows_amd64.zip",
         "digest_key": "LLAMA_SWAP_WINDOWS_AMD64_SHA256"
       }
     },
@@ -231,6 +256,7 @@
       "kind": "native",
       "version_key": "LLAMA_CPP_WIN_TAG",
       "allow_dynamic": false,
+      "platforms": ["windows-x64"],
       "source": {
         "identity": "https://github.com/ggml-org/llama.cpp/releases/download/{version}/llama-{version}-bin-win-vulkan-x64.zip",
         "digest_key": "LLAMA_CPP_WINDOWS_VULKAN_SHA256"
@@ -241,8 +267,9 @@
       "kind": "toolchain",
       "version_key": "UV_VERSION",
       "allow_dynamic": false,
+      "platforms": ["darwin-arm64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://github.com/astral-sh/uv/releases/download/{version}/uv-aarch64-apple-darwin.tar.gz",
         "digest_key": "UV_DARWIN_ARM64_SHA256"
       }
     },
@@ -251,8 +278,9 @@
       "kind": "toolchain",
       "version_key": "UV_VERSION",
       "allow_dynamic": false,
+      "platforms": ["windows-x64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://github.com/astral-sh/uv/releases/download/{version}/uv-x86_64-pc-windows-msvc.zip",
         "digest_key": "UV_WINDOWS_X64_SHA256"
       }
     },
@@ -261,8 +289,9 @@
       "kind": "toolchain",
       "version_key": "NODE_VERSION",
       "allow_dynamic": true,
+      "platforms": ["darwin-arm64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://nodejs.org/dist/{resolved}/node-{resolved}-darwin-arm64.tar.gz",
         "resolved_version_key": "NODE_RESOLVED_VERSION",
         "digest_key": "NODE_DARWIN_ARM64_SHA256"
       }
@@ -272,8 +301,9 @@
       "kind": "toolchain",
       "version_key": "NODE_VERSION",
       "allow_dynamic": true,
+      "platforms": ["windows-x64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://nodejs.org/dist/{resolved}/node-{resolved}-win-x64.zip",
         "resolved_version_key": "NODE_RESOLVED_VERSION",
         "digest_key": "NODE_WINDOWS_X64_SHA256"
       }
@@ -283,8 +313,9 @@
       "kind": "toolchain",
       "version_key": "JQ_VERSION",
       "allow_dynamic": true,
+      "platforms": ["darwin-arm64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://github.com/jqlang/jq/releases/download/{resolved}/jq-macos-arm64",
         "resolved_version_key": "JQ_RESOLVED_VERSION",
         "digest_key": "JQ_DARWIN_ARM64_SHA256"
       }
@@ -316,8 +347,9 @@
       "kind": "ide",
       "version_key": "VSCODIUM_VERSION",
       "allow_dynamic": true,
+      "platforms": ["darwin-arm64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://github.com/VSCodium/vscodium/releases/download/{resolved}/VSCodium-darwin-arm64-{resolved}.zip",
         "resolved_version_key": "VSCODIUM_RESOLVED_VERSION",
         "digest_key": "VSCODIUM_DARWIN_ARM64_SHA256"
       }
@@ -327,6 +359,7 @@
       "kind": "ide",
       "version_key": "VSCODIUM_VERSION",
       "allow_dynamic": true,
+      "platforms": ["darwin-x64"],
       "source": {
         "identity": "unresolved",
         "resolved_version_key": "VSCODIUM_RESOLVED_VERSION",
@@ -338,8 +371,9 @@
       "kind": "ide",
       "version_key": "VSCODIUM_VERSION",
       "allow_dynamic": true,
+      "platforms": ["windows-x64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://github.com/VSCodium/vscodium/releases/download/{resolved}/VSCodium-win32-x64-{resolved}.zip",
         "resolved_version_key": "VSCODIUM_RESOLVED_VERSION",
         "digest_key": "VSCODIUM_WINDOWS_X64_SHA256"
       }
@@ -349,8 +383,9 @@
       "kind": "ide-extension",
       "version_key": "CONTINUE_VSIX_VERSION",
       "allow_dynamic": true,
+      "platforms": ["darwin-arm64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://open-vsx.org/api/Continue/continue/darwin-arm64/{resolved}/file/Continue.continue-{resolved}@darwin-arm64.vsix",
         "resolved_version_key": "CONTINUE_VSIX_RESOLVED_VERSION",
         "digest_key": "CONTINUE_VSIX_DARWIN_ARM64_SHA256"
       }
@@ -360,6 +395,7 @@
       "kind": "ide-extension",
       "version_key": "CONTINUE_VSIX_VERSION",
       "allow_dynamic": true,
+      "platforms": ["darwin-x64"],
       "source": {
         "identity": "unresolved",
         "resolved_version_key": "CONTINUE_VSIX_RESOLVED_VERSION",
@@ -371,8 +407,9 @@
       "kind": "ide-extension",
       "version_key": "CONTINUE_VSIX_VERSION",
       "allow_dynamic": true,
+      "platforms": ["windows-x64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://open-vsx.org/api/Continue/continue/win32-x64/{resolved}/file/Continue.continue-{resolved}@win32-x64.vsix",
         "resolved_version_key": "CONTINUE_VSIX_RESOLVED_VERSION",
         "digest_key": "CONTINUE_VSIX_WINDOWS_X64_SHA256"
       }
@@ -382,8 +419,9 @@
       "kind": "ide-extension",
       "version_key": "KILO_VSIX_VERSION",
       "allow_dynamic": true,
+      "platforms": ["darwin-arm64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://open-vsx.org/api/kilocode/kilo-code/darwin-arm64/{resolved}/file/kilocode.kilo-code-{resolved}@darwin-arm64.vsix",
         "resolved_version_key": "KILO_VSIX_RESOLVED_VERSION",
         "digest_key": "KILO_VSIX_DARWIN_ARM64_SHA256"
       }
@@ -393,6 +431,7 @@
       "kind": "ide-extension",
       "version_key": "KILO_VSIX_VERSION",
       "allow_dynamic": true,
+      "platforms": ["darwin-x64"],
       "source": {
         "identity": "unresolved",
         "resolved_version_key": "KILO_VSIX_RESOLVED_VERSION",
@@ -404,8 +443,9 @@
       "kind": "ide-extension",
       "version_key": "KILO_VSIX_VERSION",
       "allow_dynamic": true,
+      "platforms": ["windows-x64"],
       "source": {
-        "identity": "unresolved",
+        "identity": "https://open-vsx.org/api/kilocode/kilo-code/win32-x64/{resolved}/file/kilocode.kilo-code-{resolved}@win32-x64.vsix",
         "resolved_version_key": "KILO_VSIX_RESOLVED_VERSION",
         "digest_key": "KILO_VSIX_WINDOWS_X64_SHA256"
       }
@@ -416,7 +456,7 @@
       "version_key": "HF_CLI_VERSION",
       "allow_dynamic": true,
       "source": {
-        "identity": "unresolved",
+        "identity": "https://files.pythonhosted.org/packages/f1/ce/13b2ba57838b8db1e6bd033c1b21ce0b9f6153b87d4e4939f77074e41eb0/huggingface_hub-1.23.0-py3-none-any.whl",
         "resolved_version_key": "HF_CLI_RESOLVED_VERSION",
         "digest_key": "HF_CLI_ARCHIVE_SHA256"
       }
@@ -505,7 +545,7 @@
       "version_key": "MCP_DUCKDB",
       "allow_dynamic": false,
       "source": {
-        "identity": "unresolved",
+        "identity": "https://files.pythonhosted.org/packages/bc/8c/82ad06ba64941efce4ef39ae64922567c653597313d5fbffaeebfc1b7c13/mcp_server_duckdb-1.1.0-py3-none-any.whl",
         "digest_key": "MCP_DUCKDB_SHA256"
       }
     },
@@ -515,7 +555,7 @@
       "version_key": "MCP_POSTGRES",
       "allow_dynamic": false,
       "source": {
-        "identity": "unresolved",
+        "identity": "https://files.pythonhosted.org/packages/00/69/eff3720bc60311299c9819560783aaf3ae62c5d67a45c7d672cbab3346a4/postgres_mcp-0.3.0-py3-none-any.whl",
         "digest_key": "MCP_POSTGRES_SHA256"
       }
     }

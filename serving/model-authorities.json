@@ -1,4 +1,179 @@
 {
-  "models": {},
+  "models": {
+    "deepseek-v3.2": {
+      "files": [
+        {
+          "path": "UD-Q3_K_XL/DeepSeek-V3.2-UD-Q3_K_XL-00001-of-00007.gguf",
+          "sha256": "b022710d255fdb5a05bc68e39965f3466c4712e0a8c83ee80d76ac268d185861",
+          "size": 48605243168
+        },
+        {
+          "path": "UD-Q3_K_XL/DeepSeek-V3.2-UD-Q3_K_XL-00002-of-00007.gguf",
+          "sha256": "09f8ab9c0e95649502a459b5170bde71dcf4fa48b5ebd8c65f9745b775b043e2",
+          "size": 49432542624
+        },
+        {
+          "path": "UD-Q3_K_XL/DeepSeek-V3.2-UD-Q3_K_XL-00003-of-00007.gguf",
+          "sha256": "a1bfd9c87949097c6f7fae0192c8ed553d3af1166aada11379dcad1cf07d9395",
+          "size": 49422810528
+        },
+        {
+          "path": "UD-Q3_K_XL/DeepSeek-V3.2-UD-Q3_K_XL-00004-of-00007.gguf",
+          "sha256": "2f5a9c22e458bbd0e01d2b1e61de231c0a05fef4056b4709a0674d058a9207f2",
+          "size": 49442307488
+        },
+        {
+          "path": "UD-Q3_K_XL/DeepSeek-V3.2-UD-Q3_K_XL-00005-of-00007.gguf",
+          "sha256": "0d553da75a003ce078ed62628f64572f33fdf747413b1feac09aefba4c841ccd",
+          "size": 49461149088
+        },
+        {
+          "path": "UD-Q3_K_XL/DeepSeek-V3.2-UD-Q3_K_XL-00006-of-00007.gguf",
+          "sha256": "52105765050b71e25dbe42b12ad116f9e1d7864808d9eed829d449d217f51c34",
+          "size": 49422810528
+        },
+        {
+          "path": "UD-Q3_K_XL/DeepSeek-V3.2-UD-Q3_K_XL-00007-of-00007.gguf",
+          "sha256": "9f5db4955a25b7b40cb513e01da0fe12a1dbf6d0904c3ff56f53ff5417041282",
+          "size": 25238721632
+        }
+      ],
+      "include": "UD-Q3_K_XL/*",
+      "repository": "unsloth/DeepSeek-V3.2-GGUF",
+      "revision": "a787696863bafd5c736955ef81cc869a0bf6178a"
+    },
+    "kimi-k2-thinking": {
+      "files": [
+        {
+          "path": "UD-Q2_K_XL/Kimi-K2-Thinking-UD-Q2_K_XL-00001-of-00008.gguf",
+          "sha256": "0690916351a38d7168e33235ae0befea5f31dc99d8b0670448fdd3501e1bc387",
+          "size": 48379118944
+        },
+        {
+          "path": "UD-Q2_K_XL/Kimi-K2-Thinking-UD-Q2_K_XL-00002-of-00008.gguf",
+          "sha256": "e439052d4c4021803dde6ade3650b3e36c731bc9ac7e71f7fa5a1157bd177520",
+          "size": 47348946016
+        },
+        {
+          "path": "UD-Q2_K_XL/Kimi-K2-Thinking-UD-Q2_K_XL-00003-of-00008.gguf",
+          "sha256": "5111dd5b39e9537afae23294c673ecbe1fe5238ed51f44355f363691e9115038",
+          "size": 48198998784
+        },
+        {
+          "path": "UD-Q2_K_XL/Kimi-K2-Thinking-UD-Q2_K_XL-00004-of-00008.gguf",
+          "sha256": "4082ca8976005d203f368fa72884c5893b7fdd5980ff11e394ae6d722ae94348",
+          "size": 49783198976
+        },
+        {
+          "path": "UD-Q2_K_XL/Kimi-K2-Thinking-UD-Q2_K_XL-00005-of-00008.gguf",
+          "sha256": "cc7e1b78ec457204ecc4b5b3b734cfa2859071439e3e94fe9456135bd6f431cd",
+          "size": 49779299584
+        },
+        {
+          "path": "UD-Q2_K_XL/Kimi-K2-Thinking-UD-Q2_K_XL-00006-of-00008.gguf",
+          "sha256": "5bbac81e2bab03d26e9ae17be8a0f7a156fd3ea12dc6af0d3d33fe5c97f17113",
+          "size": 49779299584
+        },
+        {
+          "path": "UD-Q2_K_XL/Kimi-K2-Thinking-UD-Q2_K_XL-00007-of-00008.gguf",
+          "sha256": "de70a97ea80ad68501af5bdd48bd82952e20e19b47059aac3ee3f3b0f8903926",
+          "size": 49784804608
+        },
+        {
+          "path": "UD-Q2_K_XL/Kimi-K2-Thinking-UD-Q2_K_XL-00008-of-00008.gguf",
+          "sha256": "0967698517f65a7e7c1a0231ceb7e5f1e3f39eaef1028849e80a28b355baad23",
+          "size": 43293020544
+        }
+      ],
+      "include": "UD-Q2_K_XL/*",
+      "repository": "unsloth/Kimi-K2-Thinking-GGUF",
+      "revision": "7e4f5d413a9bb469174b2cc9e47d457d16bc6702"
+    },
+    "qwen2.5-coder-7b": {
+      "files": [
+        {
+          "path": "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+          "sha256": "9a961bb225cb2b9fd84b2297df0d53089895c049d7d9dc5f5f8aebbcd3247872",
+          "size": 4683073504
+        }
+      ],
+      "include": "*Q4_K_M.gguf",
+      "repository": "unsloth/Qwen2.5-Coder-7B-Instruct-GGUF",
+      "revision": "0ecf11859560b2bf42e703207f9371186d02245f"
+    },
+    "qwen3-coder-30b": {
+      "files": [
+        {
+          "path": "Qwen3-Coder-30B-A3B-Instruct-Q8_0.gguf",
+          "sha256": "4ff1cff607804037bf6d2168249c570baa4e1621292b159c0e06591e0d7c3066",
+          "size": 32483935392
+        }
+      ],
+      "include": "*Q8_0.gguf",
+      "repository": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+      "revision": "b17cb02dd882d5b6ab62fc777ad2995f19668350"
+    },
+    "qwen3-coder-30b-q4": {
+      "files": [
+        {
+          "path": "Qwen3-Coder-30B-A3B-Instruct-UD-Q4_K_XL.gguf",
+          "sha256": "2841aa314d916434860cfb8990347528dcdfe5c350dbcb9d1461dbee88ff2533",
+          "size": 17665334432
+        }
+      ],
+      "include": "*UD-Q4_K_XL.gguf",
+      "repository": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+      "revision": "b17cb02dd882d5b6ab62fc777ad2995f19668350"
+    },
+    "qwen3-coder-480b": {
+      "files": [
+        {
+          "path": "UD-Q4_K_XL/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-00001-of-00006.gguf",
+          "sha256": "ae0d41c4baa6871a3702e389be00dac564fd28ad407504ec8e2f46b7c4ee0a47",
+          "size": 48615410784
+        },
+        {
+          "path": "UD-Q4_K_XL/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-00002-of-00006.gguf",
+          "sha256": "3d65caa201b580575b7ad5aa06ebd73d16e08357a4a7d56aed998d51c18fdbc6",
+          "size": 49277629152
+        },
+        {
+          "path": "UD-Q4_K_XL/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-00003-of-00006.gguf",
+          "sha256": "130979c0b4d45bdf4c378173d3ad5e661768db3c5aec56f951731e7f1d025023",
+          "size": 49500163392
+        },
+        {
+          "path": "UD-Q4_K_XL/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-00004-of-00006.gguf",
+          "sha256": "23dee00ef4a9b899974d01a55232845b7e5d8d5709aceb73e69cd1267080e103",
+          "size": 48783133952
+        },
+        {
+          "path": "UD-Q4_K_XL/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-00005-of-00006.gguf",
+          "sha256": "64fdefb519125edd98af3d8d357871677d7ec6504cf2c22bff0f3095d2d7fe52",
+          "size": 49916997056
+        },
+        {
+          "path": "UD-Q4_K_XL/Qwen3-Coder-480B-A35B-Instruct-UD-Q4_K_XL-00006-of-00006.gguf",
+          "sha256": "990944011d347e8fb57d250fdd4a065cbbb41b6ab3fae7604c325e4b39e58f56",
+          "size": 29460245120
+        }
+      ],
+      "include": "UD-Q4_K_XL/*",
+      "repository": "unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF",
+      "revision": "b86deeefd82f1a3374c5536dfc1dd0ce27ac092d"
+    },
+    "qwen3-embedding-4b": {
+      "files": [
+        {
+          "path": "Qwen3-Embedding-4B-Q8_0.gguf",
+          "sha256": "b60ae5ce2dd6a0b77f82cadf21def1f310a3e10cde380ad0081b07a9d416949d",
+          "size": 4279660224
+        }
+      ],
+      "include": "*Q8_0.gguf",
+      "repository": "Qwen/Qwen3-Embedding-4B-GGUF",
+      "revision": "f4602530db1d980e16da9d7d3a70294cf5c190be"
+    }
+  },
   "schema_version": 1
 }

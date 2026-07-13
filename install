@@ -3,9 +3,9 @@
 #  SentiVue Oracle — guided installer for the Mac Studio
 #
 #    ./install                    interactive
-#    ./install --yes              non-interactive (full ensemble)
-#    ./install --profile coder    full|coder|minimal
-#    ./install --no-models        everything except model downloads
+#    ./install --yes              non-interactive (suggested hardware profile)
+#    ./install --profile coder    full|coder|mid|lite|micro
+#    ./install --no-models        install platform dependencies only
 #
 #  Phases are idempotent and checkpointed in .install-state — if anything
 #  fails, just re-run ./install and
@@ -36,7 +36,8 @@ PYTHON_BIN=""
 STATE_READY=0
 find_python() {
   local candidate
-  for candidate in "$ROOT/env/.venv/bin/python" python3 python; do
+  for candidate in "$ROOT/env/.venv/bin/python" \
+      "$ROOT/.tools/python-bootstrap/bin/python3" python3 python; do
     if command -v "$candidate" >/dev/null 2>&1 &&
        "$candidate" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
       PYTHON_BIN="$candidate"
@@ -122,18 +123,19 @@ load_profile_state() {
     die "persisted model tiers are incomplete"
 }
 
-init_state || die "Pinned Python is required before offline installation can begin."
+if ! find_python && [[ "${ORACLE_CONNECTED_SETUP:-0}" == "1" ]]; then
+  bash bootstrap/bootstrap-python.sh >/dev/null
+fi
+init_state || die "Pinned Python is required before installation can begin."
 
 # ---------------------------------------------------------------- preflight
 if ! phase_done preflight; then
   say "Preflight"
   [[ "$(uname -s)/$(uname -m)" == "Darwin/arm64" ]] \
     || die "This installer targets macOS on Apple Silicon (Mac Studio)."
-  xcode-select -p >/dev/null 2>&1 \
-    || die "Xcode Command Line Tools are a platform prerequisite; provision them before offline install."
   ram_gb=$(( $(sysctl -n hw.memsize) / 1073741824 ))
   ok "macOS arm64, ${ram_gb} GB unified memory"
-  [[ $ram_gb -lt 500 ]] && warn "Less than 512 GB RAM — pick the 'coder' or 'minimal' profile."
+  [[ $ram_gb -lt 500 ]] && warn "Less than 512 GB RAM - use the suggested coder, mid, lite, or micro profile."
   mark_done preflight
 fi
 
@@ -194,15 +196,32 @@ else ok "profile already chosen ($(cat serving/tiers.env 2>/dev/null | tr '\n' '
 # ---------------------------------------------------------------- models
 if [[ $NO_MODELS -eq 0 ]] && ! phase_done models; then
   load_profile_state
-  say "Validate policy-bound local model snapshot"
+  say "Download and verify the policy-bound model profile"
+  required_wired_mib=0
+  case "$OPUS" in
+    kimi-k2-thinking) required_wired_mib=458752 ;;
+    qwen3-coder-480b) required_wired_mib=327680 ;;
+  esac
+  if [[ "$required_wired_mib" -gt 0 ]]; then
+    actual_wired_mib="$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)"
+    if [[ "$actual_wired_mib" -lt "$required_wired_mib" ]]; then
+      warn "This profile needs a ${required_wired_mib} MiB GPU wired-memory limit."
+      sudo sysctl -w "iogpu.wired_limit_mb=$required_wired_mib" >/dev/null ||
+        die "Could not configure the GPU wired-memory limit."
+      actual_wired_mib="$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)"
+      [[ "$actual_wired_mib" -ge "$required_wired_mib" ]] ||
+        die "GPU wired-memory limit did not take effect."
+    fi
+  fi
   free_gb=$(df -Pk . | awk 'NR==2 {print int($4 / 1048576)}')
   case "$(head -1 serving/tiers.env)" in
-    OPUS_MODEL=kimi*) need=800 ;;
+    OPUS_MODEL=kimi*) need=1100 ;;
     OPUS_MODEL=qwen3-coder-480b) need=400 ;;
     OPUS_MODEL=qwen3-coder-30b) need=60 ;;
     *) need=35 ;;
   esac
   [[ $free_gb -lt $need ]] && die "Only ${free_gb} GB free; this profile needs ~${need} GB. Free space and re-run."
+  bash bootstrap/download-models.sh
   IFS=',' read -r -a selected_models <<< "$MODELS"
   for model_name in "${selected_models[@]}"; do
     model_name="$(echo "$model_name" | xargs)"
@@ -227,8 +246,15 @@ if [[ $NO_MODELS -eq 0 ]] && ! phase_done models; then
       die "Could not register selected model ownership for $model_name."
   done
   mark_done models
-elif [[ $NO_MODELS -eq 1 ]]; then warn "skipping model downloads (--no-models)"
+elif [[ $NO_MODELS -eq 1 ]]; then warn "skipping model acquisition (--no-models)"
 else ok "models already downloaded"; fi
+
+# ---------------------------------------------------------------- IDE
+if ! phase_done ide; then
+  say "Install the local VSCodium workspace"
+  bash connectors/ide/setup-ide.sh install
+  mark_done ide
+else ok "local IDE already installed"; fi
 
 # ---------------------------------------------------------------- serve+verify
 if [[ $NO_MODELS -eq 0 ]]; then

@@ -56,46 +56,12 @@ jobs:
             throw "invalid release version: $version"
           }
           "ORACLE_RELEASE_VERSION=$version" >> $env:GITHUB_ENV
-      - name: Fetch policy-bound full-offline dependency export
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ORACLE_DEPENDENCY_RELEASE_TAG: ${{ vars.ORACLE_DEPENDENCY_RELEASE_TAG }}
-          ORACLE_DEPENDENCY_ASSET_NAME: ${{ vars.ORACLE_DEPENDENCY_ASSET_NAME }}
-          ORACLE_DEPENDENCY_ASSET_SHA256: ${{ vars.ORACLE_DEPENDENCY_ASSET_SHA256 }}
-          ORACLE_REPOSITORY: ${{ github.repository }}
-        shell: powershell
-        run: |
-          if (
-            $env:ORACLE_DEPENDENCY_RELEASE_TAG -notmatch '^dependencies-v[0-9A-Za-z.-]+$' -or
-            $env:ORACLE_DEPENDENCY_ASSET_NAME -notmatch '^SentiVue-Oracle-Dependency-Export-[0-9A-Za-z.-]+\.zip$' -or
-            $env:ORACLE_DEPENDENCY_ASSET_SHA256 -notmatch '^[0-9a-f]{64}$'
-          ) {
-            throw "full-offline dependency release variables are missing or invalid"
-          }
-          $download = Join-Path $env:RUNNER_TEMP "dependency-export-download"
-          $cache = Join-Path $env:RUNNER_TEMP "dependency-cache"
-          New-Item -ItemType Directory -Force -Path $download | Out-Null
-          gh release download $env:ORACLE_DEPENDENCY_RELEASE_TAG `
-            --repo $env:ORACLE_REPOSITORY `
-            --pattern $env:ORACLE_DEPENDENCY_ASSET_NAME `
-            --dir $download
-          $archive = Join-Path $download $env:ORACLE_DEPENDENCY_ASSET_NAME
-          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $env:ORACLE_DEPENDENCY_ASSET_SHA256) {
-            throw "full-offline dependency export digest mismatch"
-          }
-          python -c "import sys; from pathlib import Path; from verification.lifecycle import _extract_source_archive; _extract_source_archive(Path(sys.argv[1]), Path(sys.argv[2]))" $archive $cache
-          python verification/lifecycle.py validate-dependencies `
-            --root . --manifest "$cache\manifest.json" --cache $cache `
-            --reproducible --exclude-models --include-optional
-          "ORACLE_RELEASE_DEPENDENCY_CACHE=$cache" >> $env:GITHUB_ENV
       - name: Build both immutable installers
         shell: powershell
         run: |
           .\bootstrap\build-one-click-installers.ps1 `
             -Version $env:ORACLE_RELEASE_VERSION `
             -Revision $env:GITHUB_SHA `
-            -DependencyCache $env:ORACLE_RELEASE_DEPENDENCY_CACHE `
             -OutDir "$env:RUNNER_TEMP\installer bundle"
       - name: Exercise Windows clean install and rerun
         shell: powershell
@@ -138,21 +104,6 @@ jobs:
           if ($reparse.ExitCode -eq 0 -or (Get-ChildItem -LiteralPath $outside -Force)) {
             throw "Windows installer did not reject a reparse destination"
           }
-          $tampered = "$env:RUNNER_TEMP\tampered installer bundle"
-          Copy-Item -LiteralPath "$env:RUNNER_TEMP\installer bundle" `
-            -Destination $tampered -Recurse
-          $tamperedInstaller = Get-ChildItem "$tampered\*.cmd" |
-            Select-Object -ExpandProperty FullName -First 1
-          $dependency = Get-ChildItem "$tampered\SentiVue-Oracle-Dependencies-*.zip" |
-            Select-Object -ExpandProperty FullName -First 1
-          [IO.File]::AppendAllText($dependency, "tampered")
-          $env:ORACLE_INSTALLER_DEST = "$env:RUNNER_TEMP\tampered dependency destination"
-          $tamperResult = Start-Process cmd.exe `
-            -ArgumentList @("/d", "/c", "`"$tamperedInstaller`"") `
-            -Wait -PassThru -NoNewWindow
-          if ($tamperResult.ExitCode -eq 0 -or (Test-Path $env:ORACLE_INSTALLER_DEST)) {
-            throw "Windows installer accepted a tampered dependency sidecar"
-          }
       - uses: actions/upload-artifact@v4
         with:
           name: installer-bundle-windows
@@ -184,42 +135,12 @@ jobs:
             exit 1
           }
           printf 'ORACLE_RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
-      - name: Fetch policy-bound full-offline dependency export
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ORACLE_DEPENDENCY_RELEASE_TAG: ${{ vars.ORACLE_DEPENDENCY_RELEASE_TAG }}
-          ORACLE_DEPENDENCY_ASSET_NAME: ${{ vars.ORACLE_DEPENDENCY_ASSET_NAME }}
-          ORACLE_DEPENDENCY_ASSET_SHA256: ${{ vars.ORACLE_DEPENDENCY_ASSET_SHA256 }}
-          ORACLE_REPOSITORY: ${{ github.repository }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          [[ "$ORACLE_DEPENDENCY_RELEASE_TAG" =~ ^dependencies-v[0-9A-Za-z.-]+$ ]]
-          [[ "$ORACLE_DEPENDENCY_ASSET_NAME" =~ ^SentiVue-Oracle-Dependency-Export-[0-9A-Za-z.-]+\.zip$ ]]
-          [[ "$ORACLE_DEPENDENCY_ASSET_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          download="$RUNNER_TEMP/dependency-export-download"
-          cache="$RUNNER_TEMP/dependency-cache"
-          mkdir -p "$download"
-          gh release download "$ORACLE_DEPENDENCY_RELEASE_TAG" \
-            --repo "$ORACLE_REPOSITORY" \
-            --pattern "$ORACLE_DEPENDENCY_ASSET_NAME" \
-            --dir "$download"
-          archive="$download/$ORACLE_DEPENDENCY_ASSET_NAME"
-          [[ "$(shasum -a 256 "$archive" | awk '{print $1}')" == \
-              "$ORACLE_DEPENDENCY_ASSET_SHA256" ]]
-          python -c 'import sys; from pathlib import Path; from verification.lifecycle import _extract_source_archive; _extract_source_archive(Path(sys.argv[1]), Path(sys.argv[2]))' \
-            "$archive" "$cache"
-          python verification/lifecycle.py validate-dependencies \
-            --root . --manifest "$cache/manifest.json" --cache "$cache" \
-            --reproducible --exclude-models --include-optional
-          printf 'ORACLE_RELEASE_DEPENDENCY_CACHE=%s\n' "$cache" >> "$GITHUB_ENV"
       - name: Build both immutable installers
         shell: bash
         run: |
           bash bootstrap/build-one-click-installers.sh \
             --version "$ORACLE_RELEASE_VERSION" \
             --revision "$GITHUB_SHA" \
-            --dependency-cache "$ORACLE_RELEASE_DEPENDENCY_CACHE" \
             --output "$RUNNER_TEMP/installer bundle"
       - name: Exercise macOS clean install and rerun
         shell: bash
@@ -249,16 +170,6 @@ jobs:
             echo "macOS installer did not reject a symlink destination" >&2
             exit 1
           fi
-          tampered="$RUNNER_TEMP/tampered installer bundle"
-          cp -R "$RUNNER_TEMP/installer bundle" "$tampered"
-          tampered_installer="$(find "$tampered" -maxdepth 1 -name '*.command' -print -quit)"
-          dependency="$(find "$tampered" -maxdepth 1 -name 'SentiVue-Oracle-Dependencies-*.zip' -print -quit)"
-          printf 'tampered' >> "$dependency"
-          export ORACLE_INSTALLER_DEST="$RUNNER_TEMP/tampered dependency destination"
-          if "$tampered_installer" || [[ -e "$ORACLE_INSTALLER_DEST" ]]; then
-            echo "macOS installer accepted a tampered dependency sidecar" >&2
-            exit 1
-          fi
       - name: Build and inspect unsigned macOS package
         shell: bash
         run: |
@@ -272,13 +183,6 @@ jobs:
           )
           base_command="$(find "$RUNNER_TEMP/installer bundle" -maxdepth 1 -name '*.command' -print -quit)"
           cmp "$RUNNER_TEMP/expanded package/Scripts/one-click.command" "$base_command"
-          dependency_name="$(
-            python -c 'import json,sys; print(json.load(open(sys.argv[1]))["dependency_cache"]["bundle_name"])' \
-              "$RUNNER_TEMP/installer bundle/PROVENANCE.json"
-          )"
-          test -f "$RUNNER_TEMP/expanded package/Scripts/$dependency_name"
-          cmp "$RUNNER_TEMP/expanded package/Scripts/$dependency_name" \
-            "$RUNNER_TEMP/installer bundle/$dependency_name"
           sudo rm -rf "/Applications/SentiVue Oracle"
           sudo installer -pkg "$package" -target /
           sudo installer -pkg "$package" -target /
@@ -364,7 +268,7 @@ jobs:
               --verify-tag \
               --draft \
               --title "SentiVue Oracle $tag" \
-              --notes "One-click Windows (.cmd), macOS (.command.zip), and fixed-path source-only macOS (.pkg) installers. These artifacts are currently unsigned; the macOS artifacts are not notarized. Verify RELEASE-SHA256SUMS before opening."
+              --notes "One-click Windows (.cmd), macOS (.command.zip), and macOS (.pkg) installers. One launch selects a hardware profile, downloads every checksum-bound dependency and model shard, installs the local IDE and engines, and resumes interrupted downloads. These artifacts are currently unsigned; the macOS artifacts are not notarized. Verify RELEASE-SHA256SUMS before opening."
           fi
 
           declare -A local_digest=()

@@ -19,15 +19,15 @@ CLAUDE_CODE_NPM_VERSION=2.1.205         # npm: @anthropic-ai/claude-code
 OPENCODE_NPM_VERSION=1.17.16            # npm: opencode-ai
 KILO_CLI_NPM_VERSION=7.4.5              # npm: @kilocode/cli (OpenCode fork; third engine:
                                         # agent tabs + missions; same kilo.jsonc as the IDE panel)
-CLAUDE_CODE_NPM_SHA256=unresolved       # promote independently verified tarball digest here
-OPENCODE_NPM_SHA256=unresolved
-KILO_CLI_NPM_SHA256=unresolved
+CLAUDE_CODE_NPM_SHA256=287e5ef2ec39e653cd78c356fb80a5c206241879bc17cefa42df5605b806db91
+OPENCODE_NPM_SHA256=f8f0f13dfac24bb25c2209f65b8e304104636b874dbebb6bdb2e84071a09accd
+KILO_CLI_NPM_SHA256=acd785cc7a207668d5bf613ded42b5dcb93ab555350bdc139bddf07fff88e269
 
 # --- harness ---
 ECC_REPO=https://github.com/affaan-m/ECC
 ECC_PIN=v2.0.0                          # tag; curated subset only (see harness/ecc/profile.txt)
-ECC_COMMIT=unresolved                   # tag resolution is acquisition evidence until promoted
-ECC_ARCHIVE_SHA256=unresolved
+ECC_COMMIT=7d80c7433c4c914da9487138f185f2eab9b22073
+ECC_ARCHIVE_SHA256=4b09f6036fa8665b8cd898a8831b7cb3cd996204db9359a5be1c0bde4c18b59a
 AGENT_MCP_REPO=https://github.com/rinadelph/Agent-MCP
 AGENT_MCP_PIN=v4.20.1                   # tag verified 2026-07-10; orchestration viewer (dashboard)
 AGENT_MCP_COMMIT=unresolved
@@ -46,39 +46,41 @@ LOOP_COST_NPM_SHA256=unresolved
 LOOP_SYNC_NPM_SHA256=unresolved
 SUPERPOWERS_REPO=https://github.com/obra/superpowers
 SUPERPOWERS_PIN=v6.1.1                  # tag verified 2026-07-10; 252k stars, MIT
-SUPERPOWERS_COMMIT=unresolved
-SUPERPOWERS_ARCHIVE_SHA256=unresolved
+SUPERPOWERS_COMMIT=c984ea2e7aeffdcc865784fd6c5e3ab75da0209a
+SUPERPOWERS_ARCHIVE_SHA256=5c7db58c3b2e9c6a8e5a255d9eebd3d57db840b68e65e62fe7a3714cd478ad18
 GSTACK_REPO=https://github.com/garrytan/gstack
 GSTACK_PIN=7c9df1c568a9ea745508f679a329332b2c338063  # main 2026-07-10 (no tags); 121k stars, MIT
 GSTACK_COMMIT=7c9df1c568a9ea745508f679a329332b2c338063
-GSTACK_ARCHIVE_SHA256=unresolved
+GSTACK_ARCHIVE_SHA256=a18401926b4c2826e9fe42e39e97323e3811352f1f3a081eb5f746d0b0703057
 
 # --- serving (verified on GitHub releases 2026-07-09/10) ---
 LLAMA_CPP_BREW_FORMULA=llama.cpp        # brew pin after install (Mac)
-LLAMA_CPP_BREW_VERSION=unresolved       # acquisition may discover; reproducible mode rejects
-LLAMA_CPP_BREW_RESOLVED_VERSION=unresolved
-LLAMA_CPP_BREW_SHA256=unresolved
-LLAMA_SWAP_VERSION=v236                 # github: mostlygeek/llama-swap
+LLAMA_CPP_BREW_VERSION=b9948            # official macOS arm64 llama.cpp release archive
+LLAMA_CPP_BREW_RESOLVED_VERSION=b9948
+LLAMA_CPP_BREW_SHA256=80d8b0a63a6c97ceea4b6d2f839ca98058ac85da004e8c1a2b3dae025147f893
+LLAMA_SWAP_VERSION=236                  # GitHub tag v236; asset filenames use 236
                                         # assets: ..._darwin_arm64.tar.gz / ..._windows_amd64.zip
-LLAMA_SWAP_DARWIN_ARM64_SHA256=unresolved
-LLAMA_SWAP_WINDOWS_AMD64_SHA256=unresolved
+LLAMA_SWAP_DARWIN_ARM64_SHA256=94d50dc65fba4a8ba5bc4ade3578ed3a2727ddf4aa7e160656c5f922c4d45405
+LLAMA_SWAP_WINDOWS_AMD64_SHA256=276a00765f072c8f5a276861906b2fea4c69b0620d5f3aeb9288206cda4ef421
 LLAMA_CPP_WIN_TAG=b9948                 # github: ggml-org/llama.cpp
                                         # asset: llama-b9948-bin-win-vulkan-x64.zip (AMD/Intel/NVIDIA)
-LLAMA_CPP_WINDOWS_VULKAN_SHA256=unresolved
+LLAMA_CPP_WINDOWS_VULKAN_SHA256=18d1c0d56792e6a9f5082d4343c2431617cd2914243bafdac852758240bb9bfa
 
 # --- tooling ---
 PYTHON_VERSION=3.12.10                  # verified on the Windows authoring host
+PYTHON_DARWIN_ARM64_SHA256=15c6d24d9eb40749a742c537b32091e9a30c7116ee1b9fdf39b8f48ea4890ec8
+PYTHON_WINDOWS_X64_SHA256=4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3
 UV_VERSION=0.11.26                      # verified on the Windows authoring host
-UV_DARWIN_ARM64_SHA256=unresolved
-UV_WINDOWS_X64_SHA256=unresolved
-NODE_VERSION=unresolved                 # acquisition may discover; reproducible mode rejects
-NODE_RESOLVED_VERSION=unresolved
-NODE_DARWIN_ARM64_SHA256=unresolved
-NODE_WINDOWS_X64_SHA256=unresolved
+UV_DARWIN_ARM64_SHA256=8f7fbf1708399b921857bce71e1d60f0d3ccf52a30caebc1c1a2f175dce13ab6
+UV_WINDOWS_X64_SHA256=4e1278ede866be6c0bf32d2f466cc6de7a9fb399ecf20c9ce2d186e52424be47
+NODE_VERSION=v22.23.1
+NODE_RESOLVED_VERSION=v22.23.1
+NODE_DARWIN_ARM64_SHA256=ef28d8fab2c0e4314522d4bb1b7173270aa3937e93b92cb7de79c112ac1fa953
+NODE_WINDOWS_X64_SHA256=7df0bc9375723f4a86b3aa1b7cc73342423d9677a8df4538aca31a049e309c29
 NODE_MAJOR=22                           # compatibility selector, not an artifact identity
-JQ_VERSION=unresolved                   # acquisition may discover; reproducible mode rejects
-JQ_RESOLVED_VERSION=unresolved
-JQ_DARWIN_ARM64_SHA256=unresolved
+JQ_VERSION=jq-1.8.2
+JQ_RESOLVED_VERSION=jq-1.8.2
+JQ_DARWIN_ARM64_SHA256=2d75340ba57a4b4b4c8708a21c2dc8e958a48aaa8bba13b27f77f6e4c0eca07e
 # lean-ctx: local Apache-2.0 MCP context runtime. The release tag and platform
 # assets were verified against upstream SHA256SUMS on 2026-07-13.
 LEAN_CTX_REPO=https://github.com/yvgude/lean-ctx
@@ -87,30 +89,30 @@ LEAN_CTX_COMMIT=4e728c0e2c8cfc3516d4f38241d0dee37e0cb792
 LEAN_CTX_DARWIN_ARM64_SHA256=2adf67848020a198fd08eeeafc8957b83cf793b42719a196ea4b3a40a2597eb8
 LEAN_CTX_WINDOWS_X64_SHA256=d4f0037df84e60a9761c0717b0441179d09560f8cc89e511340d31b75d89775f
 UV_INSTALL=dependency-cache             # executable comes from the policy-bound export
-HF_CLI_VERSION=unresolved               # acquisition may discover; reproducible mode rejects
-HF_CLI_RESOLVED_VERSION=unresolved
-HF_CLI_ARCHIVE_SHA256=unresolved
+HF_CLI_VERSION=1.23.0
+HF_CLI_RESOLVED_VERSION=1.23.0
+HF_CLI_ARCHIVE_SHA256=b1d604788f5adc7f0eb246e03e0ec19011ca06e38400218c347dccc3dffa64a2
 HF_CLI=huggingface_hub[cli]             # package name; version is resolved separately
 GITEA_BREW_FORMULA=gitea                # optional vault UI; brew pin after install
 GITEA_VERSION=unresolved                # acquisition may discover; reproducible mode rejects
 GITEA_RESOLVED_VERSION=unresolved
 GITEA_BREW_SHA256=unresolved
 VSCODIUM_CASK=vscodium                  # package name; exact artifact is exported
-VSCODIUM_VERSION=dynamic
-VSCODIUM_RESOLVED_VERSION=unresolved
-VSCODIUM_DARWIN_ARM64_SHA256=unresolved
+VSCODIUM_VERSION=1.126.04524
+VSCODIUM_RESOLVED_VERSION=1.126.04524
+VSCODIUM_DARWIN_ARM64_SHA256=f21ee52629eb5e39c055daea70118b7a6055c639aecf3dad05e1997a9ad83ac0
 VSCODIUM_DARWIN_X64_SHA256=unresolved
-VSCODIUM_WINDOWS_X64_SHA256=unresolved
-CONTINUE_VSIX_VERSION=dynamic           # Open VSX resolution must be exported and hashed
-CONTINUE_VSIX_RESOLVED_VERSION=unresolved
-CONTINUE_VSIX_DARWIN_ARM64_SHA256=unresolved
+VSCODIUM_WINDOWS_X64_SHA256=5b5bc348861ce861aed968b086233b45050694013c0607ea66b401f31b987c57
+CONTINUE_VSIX_VERSION=2.1.0
+CONTINUE_VSIX_RESOLVED_VERSION=2.1.0
+CONTINUE_VSIX_DARWIN_ARM64_SHA256=739d26de25aa7f66a11d3eb85b8bbd16c48d8bd8a628cc477e686659a700ef1d
 CONTINUE_VSIX_DARWIN_X64_SHA256=unresolved
-CONTINUE_VSIX_WINDOWS_X64_SHA256=unresolved
-KILO_VSIX_VERSION=dynamic               # Open VSX resolution must be exported and hashed
-KILO_VSIX_RESOLVED_VERSION=unresolved
-KILO_VSIX_DARWIN_ARM64_SHA256=unresolved
+CONTINUE_VSIX_WINDOWS_X64_SHA256=0aa7844bcd6b042517e1bd5d77d26a14c2d68914d832fbfc6a0d49d921ac8f88
+KILO_VSIX_VERSION=7.4.7
+KILO_VSIX_RESOLVED_VERSION=7.4.7
+KILO_VSIX_DARWIN_ARM64_SHA256=6442e7bdae5e1519feef8b839dea758a0fa82fdaff2dc9b7ff7fbc3c89ab1264
 KILO_VSIX_DARWIN_X64_SHA256=unresolved
-KILO_VSIX_WINDOWS_X64_SHA256=unresolved
+KILO_VSIX_WINDOWS_X64_SHA256=13dfa8337b26e7e73238b3fdfca6ec9113139c36d154b87c5a441efe8760a87e
 RUST_BREW_FORMULA=rust                  # builds desk/ (oracle-desk frontend); pin after install
 RUST_VERSION=unresolved                 # acquisition may discover; reproducible mode rejects
 RUST_RESOLVED_VERSION=unresolved
@@ -132,9 +134,9 @@ SUPABASE_STUDIO_ARCHIVE_SHA256=unresolved
 
 # --- mcp servers (verified on PyPI 2026-07-09; warmed into uv caches at bootstrap) ---
 MCP_DUCKDB=mcp-server-duckdb==1.1.0     # uvx (ktanaka101)
-MCP_DUCKDB_SHA256=unresolved
+MCP_DUCKDB_SHA256=8adaf1a991ee74b6fe6548c19b6b6aea1589bc93aea2c2f69984af9e23595902
 MCP_POSTGRES=postgres-mcp==0.3.0        # uvx (crystaldba)
-MCP_POSTGRES_SHA256=unresolved
+MCP_POSTGRES_SHA256=455dd71ed8deab77a67af2468e6f059dd0f114e05c0031ab47306a7048dc30bf
 
 # --- model files: revisions live in serving/models.manifest; independently
 #     verified shard hashes live in serving/model-authorities.json. Local scans

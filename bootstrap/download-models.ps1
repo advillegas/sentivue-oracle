@@ -1,6 +1,4 @@
-# download-models.ps1 - Windows model downloader for SentiVue Oracle.
-# Zero dependencies: uses the Hugging Face API for file listings and Windows'
-# built-in curl.exe for resumable downloads. No Python required.
+# download-models.ps1 - Resumable, policy-bound Windows model downloader.
 #
 #   powershell -ExecutionPolicy Bypass -File bootstrap\download-models.ps1
 #   ... -Dest E:\oracle-models          # download straight onto an external drive
@@ -45,38 +43,6 @@ if (-not (Test-Path $python)) {
 $authHeader = @()
 if ($env:HF_TOKEN) { $authHeader = @("-H", "Authorization: Bearer $($env:HF_TOKEN)") }
 
-function Resolve-RepoRevision([string]$repo, [string]$requested) {
-    if ($repo -notmatch "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$") {
-        throw "unsafe model repository: $repo"
-    }
-    $resolved = $requested
-    if ($requested -eq "dynamic") {
-        $headers = @{}
-        if ($env:HF_TOKEN) { $headers["Authorization"] = "Bearer $($env:HF_TOKEN)" }
-        $metadata = Invoke-RestMethod -Uri "https://huggingface.co/api/models/$repo" -Headers $headers
-        $resolved = [string]$metadata.sha
-    }
-    if ($resolved -notmatch "^[0-9a-f]{40}$") {
-        throw "model revision did not resolve to a commit: $repo"
-    }
-    return $resolved
-}
-
-function Get-RepoFiles([string]$repo, [string]$revision) {
-    # Full recursive file listing, following API pagination if present.
-    $files = @()
-    $uri = "https://huggingface.co/api/models/$repo/tree/$revision`?recursive=true"
-    while ($uri) {
-        $headers = @{}
-        if ($env:HF_TOKEN) { $headers["Authorization"] = "Bearer $($env:HF_TOKEN)" }
-        $resp = Invoke-WebRequest -Uri $uri -Headers $headers -UseBasicParsing
-        $files += ($resp.Content | ConvertFrom-Json) | Where-Object { $_.type -eq "file" }
-        $uri = $null
-        if ($resp.Headers.Link -and $resp.Headers.Link -match '<([^>]+)>;\s*rel="next"') { $uri = $Matches[1] }
-    }
-    return $files
-}
-
 # ---- manifest + profile ------------------------------------------------------
 $manifest = Join-Path $Root "serving\models.manifest"
 $profileFile = Join-Path $Root "serving\models.profile"
@@ -102,21 +68,51 @@ $rows = Get-Content $manifest | Where-Object { $_.Trim() -and -not $_.Trim().Sta
 if (-not $rows) { Write-Host "Nothing to download (check -Only / serving\models.profile)"; exit 1 }
 
 # ---- plan ---------------------------------------------------------------------
+$authorityPath = Join-Path $Root "serving\model-authorities.json"
+$authorityPayload = Get-Content -LiteralPath $authorityPath -Raw | ConvertFrom-Json
+if ($authorityPayload.schema_version -ne 1 -or -not $authorityPayload.models) {
+    throw "model authority policy is missing or unsupported"
+}
 $plan = @()
 foreach ($r in $rows) {
-    $r.Revision = Resolve-RepoRevision $r.Repo $r.RequestedRevision
-    Write-Host ("==> listing {0}  ({1}@{2} :: {3})" -f $r.Name, $r.Repo, $r.Revision, $r.Include)
-    $matched = Get-RepoFiles $r.Repo $r.Revision | Where-Object { $_.path -like $r.Include }
-    if (-not $matched) { Write-Host "    WARN: no files match pattern '$($r.Include)'"; continue }
+    if ($r.Revision -notmatch "^[0-9a-f]{40}$") {
+        throw "model $($r.Name) lacks a pinned revision"
+    }
+    $property = $authorityPayload.models.PSObject.Properties[$r.Name]
+    if (-not $property) { throw "model authority is missing: $($r.Name)" }
+    $authority = $property.Value
+    if (
+        $authority.repository -ne $r.Repo -or
+        $authority.revision -ne $r.Revision -or
+        $authority.include -ne $r.Include
+    ) {
+        throw "model authority differs from manifest: $($r.Name)"
+    }
+    $matched = @($authority.files)
+    if (-not $matched) { throw "model authority has no files: $($r.Name)" }
+    Write-Host ("==> locked {0}  ({1}@{2} :: {3})" -f $r.Name, $r.Repo, $r.Revision, $r.Include)
     foreach ($m in $matched) {
+        $relative = [string]$m.path
+        if (
+            $relative.Contains("\") -or $relative.StartsWith("/") -or
+            $relative -match "(^|/)\.\.?(/|$)" -or
+            [string]$m.sha256 -notmatch "^[0-9a-f]{64}$" -or
+            [long]$m.size -le 0
+        ) {
+            throw "invalid model authority file: $($r.Name)/$relative"
+        }
+        $encodedPath = (($relative -split "/") | ForEach-Object {
+            [uri]::EscapeDataString($_)
+        }) -join "/"
         $plan += [pscustomobject]@{
-            Model = $r.Name; Repo = $r.Repo; Path = $m.path; Size = [long]$m.size
-            Url   = "https://huggingface.co/$($r.Repo)/resolve/$($r.Revision)/$($m.path)"
-            Local = Join-Path (Join-Path $Dest $r.Name) ($m.path -replace "/", "\")
+            Model = $r.Name; Repo = $r.Repo; Path = $relative
+            Size = [long]$m.size; Sha256 = [string]$m.sha256
+            Url = "https://huggingface.co/$($r.Repo)/resolve/$($r.Revision)/$encodedPath"
+            Local = Join-Path (Join-Path $Dest $r.Name) ($relative -replace "/", "\")
         }
     }
 }
-if (-not $plan) { Write-Host "ERROR: nothing matched - check include patterns in the manifest."; exit 1 }
+if (-not $plan) { throw "model authority plan is empty" }
 
 $totalGB = [math]::Round(($plan | Measure-Object Size -Sum).Sum / 1GB, 1)
 $doneGB  = [math]::Round(($plan | Where-Object { (Test-Path $_.Local) } |
@@ -126,7 +122,7 @@ Write-Host ""
 Write-Host ("==> plan: {0} file(s), {1} GB total ({2} GB already on disk); {3} GB free on {4}" -f `
             @($plan).Count, $totalGB, $doneGB, $freeGB, (Split-Path -Qualifier $Dest))
 if ($freeGB -lt ($totalGB - $doneGB + 30)) {
-    Write-Host "WARN: free space looks tight - downloads resume, so you can free space and re-run."
+    throw "insufficient free space: need downloaded bytes plus 30 GB headroom; free space and re-run"
 }
 
 # ---- download (curl.exe: resume -C -, retries) ---------------------------------
@@ -136,18 +132,32 @@ foreach ($p in $plan) {
     $n++
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $p.Local) | Out-Null
     if ((Test-Path $p.Local) -and (Get-Item $p.Local).Length -eq $p.Size) {
-        Write-Host ("[{0}/{1}] SKIP (complete): {2}" -f $n, @($plan).Count, $p.Path)
-        continue
+        Write-Host ("[{0}/{1}] VERIFY: {2}" -f $n, @($plan).Count, $p.Path)
+        $existingSha256 = (Get-FileHash -LiteralPath $p.Local -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($existingSha256 -eq $p.Sha256) {
+            Write-Host "    checksum matches promoted policy"
+            continue
+        }
+        Write-Host "    existing complete-size file has the wrong checksum; replacing it"
+        Remove-Item -LiteralPath $p.Local -Force
     }
     Write-Host ("[{0}/{1}] {2}\{3}  ({4} GB)" -f $n, @($plan).Count, $p.Model, $p.Path, [math]::Round($p.Size/1GB,1))
     $ok = $false
     for ($i = 1; $i -le $Retries -and -not $ok; $i++) {
         & $curl -L -C - --fail --retry 10 --retry-all-errors --connect-timeout 30 `
             --progress-bar @authHeader -o $p.Local $p.Url
-        if ($LASTEXITCODE -eq 0 -and (Get-Item $p.Local).Length -eq $p.Size) { $ok = $true }
-        else {
+        if ($LASTEXITCODE -eq 0 -and (Get-Item $p.Local).Length -eq $p.Size) {
+            $downloadSha256 = (Get-FileHash -LiteralPath $p.Local -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($downloadSha256 -eq $p.Sha256) {
+                $ok = $true
+            } else {
+                Write-Host "    checksum mismatch; removing corrupt completed file"
+                Remove-Item -LiteralPath $p.Local -Force
+            }
+        }
+        if (-not $ok) {
             Write-Host ("    attempt {0}/{1} failed (exit {2}) - retrying in 20 s, progress is kept" -f $i, $Retries, $LASTEXITCODE)
-            Start-Sleep -Seconds 20
+            if ($i -lt $Retries) { Start-Sleep -Seconds 20 }
         }
     }
     if (-not $ok) { $failed += "$($p.Model)/$($p.Path)" }
@@ -164,19 +174,21 @@ if ($failed) {
     Write-Host ("FAILED after {0} attempts: {1}  - re-run to resume." -f $Retries, ($failed -join ", "))
     exit 1
 }
-foreach ($r in $rows) {
-    if (-not ($plan | Where-Object { $_.Model -eq $r.Name } | Select-Object -First 1)) {
-        continue
+$authorityCopy = Join-Path ([IO.Path]::GetTempPath()) `
+    ("oracle-model-authorities-" + [Guid]::NewGuid().ToString("N") + ".json")
+try {
+    Copy-Item -LiteralPath $authorityPath -Destination $authorityCopy
+    foreach ($r in $rows) {
+        & $python (Join-Path $Root "verification\lifecycle.py") import-model `
+            --root $Root --cache $DependencyCache --models-root $Dest `
+            --model-name $r.Name --authority $authorityCopy | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "model policy import failed: $($r.Name)"
+        }
+        Write-Host ("==> policy-bound snapshot recorded: {0}" -f $r.Name)
     }
-    & $python (Join-Path $Root "verification\lifecycle.py") record-model `
-        --root $Root --cache $DependencyCache --models-root $Dest `
-        --model-name $r.Name `
-        --repository $r.Repo --requested-revision $r.RequestedRevision `
-        --resolved-revision $r.Revision | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "model provenance failed: $($r.Name)" }
+} finally {
+    Remove-Item -LiteralPath $authorityCopy -Force -ErrorAction SilentlyContinue
 }
 Write-Host ""
-Write-Host "Acquisition complete (untrusted evidence only)."
-Write-Host "Independently verify revisions and shard digests, promote"
-Write-Host "serving\model-authorities.json, copy selected files under models\,"
-Write-Host "then run bootstrap\import-model.ps1 before serving."
+Write-Host "Policy-bound model acquisition complete."

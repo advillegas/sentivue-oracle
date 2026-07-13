@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import tarfile
 import time
@@ -277,7 +278,11 @@ def test_full_offline_installer_payload_includes_only_validated_dependency_expor
 ) -> None:
     root = tmp_path / "repository"
     root.mkdir()
-    dependency = put(tmp_path, "downloads/tool.bin", b"policy-bound dependency")
+    dependency = put(
+        tmp_path,
+        "downloads/tool.bin",
+        b"\x00sidecar-only-dependency-fixture\xff",
+    )
     digest = hashlib.sha256(dependency.read_bytes()).hexdigest()
     put(
         root,
@@ -2073,7 +2078,7 @@ def test_platform_generated_config_writers_use_same_directory_atomic_replacement
     assert "metadata_path" in shared
 
 
-def test_model_downloaders_resolve_revision_and_record_local_hashes() -> None:
+def test_model_downloaders_enforce_promoted_revision_and_shard_hashes() -> None:
     bash_source = (REPO_ROOT / "bootstrap/download-models.sh").read_text(
         encoding="utf-8"
     )
@@ -2081,11 +2086,15 @@ def test_model_downloaders_resolve_revision_and_record_local_hashes() -> None:
         encoding="utf-8"
     )
 
-    assert "resolved_revision" in bash_source
-    assert '--revision "$resolved_revision"' in bash_source
-    assert "record-model" in bash_source
+    assert '--revision "$revision"' in bash_source
+    assert "model-authorities.json" in bash_source
+    assert "import-model" in bash_source
+    assert "record-model" not in bash_source
     assert "Revision = $f[6].Trim()" in powershell_source
-    assert "record-model" in powershell_source
+    assert "model-authorities.json" in powershell_source
+    assert "Get-FileHash" in powershell_source
+    assert "import-model" in powershell_source
+    assert "record-model" not in powershell_source
     assert "tree/main" not in powershell_source
     assert "resolve/main" not in powershell_source
     render_source = (REPO_ROOT / "verification/serving.py").read_text(encoding="utf-8")
@@ -2310,7 +2319,8 @@ def test_review_offline_install_has_no_implicit_network_resolution() -> None:
         for needle in forbidden:
             assert needle not in source, f"{relative} still contains {needle!r}"
     assert "--reproducible" in install_sources["bootstrap/install.sh"]
-    assert "bootstrap/download-models.sh" not in install_sources["install"]
+    assert "bootstrap/download-models.sh" in install_sources["install"]
+    assert "ORACLE_CONNECTED_SETUP" in install_sources["install"]
     assert "bootstrap/download-models.sh" not in install_sources["bootstrap/install.sh"]
     for relative in ("bootstrap/doctor.sh", "bootstrap/doctor.ps1"):
         source = (REPO_ROOT / relative).read_text(encoding="utf-8")
@@ -2591,13 +2601,14 @@ __PAYLOAD__
     assert "Write-Utf8NoBomAtomic" in hardened
     assert "New-Object Text.UTF8Encoding($false)" in hardened
     assert "Move-Item -LiteralPath $temporary" in hardened
-    assert "download-models.ps1" not in hardened
-    assert "Models remain a separate explicit import" in hardened
+    assert "download-models.ps1" in hardened
+    assert "model acquisition failed" in hardened
+    assert "ORACLE_CONNECTED_SETUP" in hardened
     assert "embedded payload SHA-256 mismatch" in hardened
     assert "archive member has a traversal component" in hardened
     assert "existing unowned, different-version" in hardened
     assert "ORACLE_INSTALLER_SKIP_SETUP" in hardened
-    assert hardened.count("if ($LASTEXITCODE -ne 0)") == 2
+    assert hardened.count("if ($LASTEXITCODE -ne 0)") >= 5
     assert "ownership-scoped uninstaller failed" in hardened
     assert mac_record["payload_sha256"] == hashlib.sha256(tar_payload).hexdigest()
     assert windows_record["payload_sha256"] == hashlib.sha256(zip_payload).hexdigest()
@@ -2607,8 +2618,9 @@ __PAYLOAD__
     assert b"mktemp -d" in mac_header
     assert b"existing unowned, different-version" in mac_header
     assert b"Python 3.12 or newer is required for safe" not in mac_header
-    assert b"renamex_np" in mac_header
-    assert b"xcrun --find clang" in mac_header
+    assert b'mv -n "$source" "$destination"' in mac_header
+    assert b"renamex_np" not in mac_header
+    assert b"xcrun --find clang" not in mac_header
     assert b"rollback_new_install" in mac_header
     records_match = re.search(rb'SOURCE_RECORDS_B64="([A-Za-z0-9+/=]+)"', mac_header)
     assert records_match is not None
@@ -2670,7 +2682,8 @@ def test_one_click_windows_installer_is_atomic_idempotent_and_preserves_trees(
     )
     assert second.returncode == 0, second.stdout + second.stderr
     assert "existing files were preserved" in second.stdout
-    assert "child setup was not re-executed" in second.stdout
+    assert "resuming incomplete installation" in second.stdout
+    assert not (destination / ".oracle-install-complete").exists()
     (destination / "README.md").write_text("locally modified\n", encoding="utf-8")
     modified = subprocess.run(
         ["cmd", "/d", "/c", str(installer)],
@@ -2801,8 +2814,9 @@ def test_one_click_windows_installer_is_atomic_idempotent_and_preserves_trees(
         env=extra_environment,
         check=False,
     )
-    assert refused_child_execution.returncode == 0
-    assert "child setup was not re-executed" in refused_child_execution.stdout
+    assert refused_child_execution.returncode != 0
+    assert "resuming incomplete installation" in refused_child_execution.stdout
+    assert "partial downloads were preserved" in refused_child_execution.stdout
     assert not extra_sentinel.exists()
 
     setup_sentinel = tmp_path / "partial-setup-side-effect.txt"
@@ -2841,7 +2855,9 @@ def test_one_click_windows_installer_is_atomic_idempotent_and_preserves_trees(
     )
     assert failed_setup.returncode != 0
     assert "installer child setup failed" in failed_setup.stdout
-    assert not failure_destination.exists()
+    assert failure_destination.is_dir()
+    assert "partial downloads were preserved" in failed_setup.stdout
+    assert not (failure_destination / ".oracle-install-complete").exists()
     assert not setup_sentinel.exists(), failed_setup.stdout + failed_setup.stderr
 
 
@@ -2933,10 +2949,10 @@ def test_one_click_builders_publish_native_unsigned_artifacts_honestly() -> None
     assert "installer-release-final" in workflow
     assert "RELEASE-SHA256SUMS" in workflow
     assert "Refuse public artifact publication" in workflow
-    assert "ORACLE_DEPENDENCY_RELEASE_TAG" in workflow
-    assert "ORACLE_DEPENDENCY_ASSET_SHA256" in workflow
-    assert "-DependencyCache $env:ORACLE_RELEASE_DEPENDENCY_CACHE" in workflow
-    assert '--dependency-cache "$ORACLE_RELEASE_DEPENDENCY_CACHE"' in workflow
+    assert "ORACLE_DEPENDENCY_RELEASE_TAG" not in workflow
+    assert "ORACLE_DEPENDENCY_ASSET_SHA256" not in workflow
+    assert "ORACLE_RELEASE_DEPENDENCY_CACHE" not in workflow
+    assert "downloads every checksum-bound dependency and model shard" in workflow
     assert "github.ref_name }}\"" not in workflow
 
 
@@ -3244,6 +3260,34 @@ def test_second_review_optional_source_setups_use_validated_cache(
         assert "@cobusgreyling/" not in source
 
 
+def test_source_zip_materializes_internal_links_and_rejects_escapes(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "source.zip"
+    with zipfile.ZipFile(archive, "w") as output:
+        output.writestr("source-commit/CLAUDE.md", "authoritative\n")
+        link = zipfile.ZipInfo("source-commit/AGENTS.md")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        output.writestr(link, "CLAUDE.md")
+
+    extracted = lifecycle._extract_source_archive(archive, tmp_path / "safe")
+
+    alias = extracted / "AGENTS.md"
+    assert alias.read_text(encoding="utf-8") == "authoritative\n"
+    assert not alias.is_symlink()
+
+    escaping = tmp_path / "escaping.zip"
+    with zipfile.ZipFile(escaping, "w") as output:
+        output.writestr("outside.txt", "unsafe\n")
+        link = zipfile.ZipInfo("source-commit/AGENTS.md")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        output.writestr(link, "../outside.txt")
+    with pytest.raises(LifecycleError, match="escapes its source root"):
+        lifecycle._extract_source_archive(escaping, tmp_path / "rejected")
+
+
 def test_second_review_source_install_rejects_modified_existing_checkout(
     tmp_path: Path,
 ) -> None:
@@ -3434,6 +3478,11 @@ def test_second_review_install_resumes_after_completed_profile_under_set_u(
         "OPUS_MODEL=chat\nSONNET_MODEL=chat\nHAIKU_MODEL=chat\n",
     )
     put(root, "models/chat/model.gguf", b"model")
+    put(
+        root,
+        "bootstrap/download-models.sh",
+        "#!/usr/bin/env bash\nexit 0\n",
+    ).chmod(0o755)
     fake_python = put(
         fake_bin,
         "python3",
