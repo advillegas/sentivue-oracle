@@ -85,66 +85,39 @@ env/            uv-managed Python quant stack
 memory/         plain-text ledger + state (runtime, gitignored)
 ```
 
-## Getting it onto the Mac (privacy-friendly)
+## Install
 
-**Double-click installers** are published to the repo's [Releases page]
-(https://github.com/advillegas/sentivue-oracle/releases) only while the repository
-is private:
+The [Releases page](https://github.com/advillegas/sentivue-oracle/releases)
+offers exactly two downloads:
 
-- **Mac:** extract `SentiVue-Oracle-Installer-<ver>.command.zip`, then double-click
-  the executable `.command`; the Terminal installer validates and atomically
-  extracts the embedded source before entering setup. The release also includes
-  `SentiVue-Oracle-Source-Installer-<ver>.pkg`, built and structurally checked on
-  macOS for a default-path source installation.
-- **Windows:** `SentiVue-Oracle-Setup-<ver>.cmd` — double-click; a console wizard
-  prompts for the location and hardware-adaptive profile, then runs the same
-  ownership-scoped offline setup.
+- **Windows Installer** — `SentiVue-Oracle-Setup-<ver>.cmd`. Double-click it.
+- **Mac Installer** — `SentiVue-Oracle-Installer-<ver>.command.zip`. Unzip,
+  then double-click the `.command` file. (First launch: right-click -> Open,
+  because the installer is unsigned and not notarized.)
 
-Both are self-extracting (the full repo rides inside, built from an immutable Git
-revision and package allowlist). Each installer verifies its embedded payload before
-extracting into a unique same-volume staging directory, publishes only to a new
-destination, and preserves existing unowned, different-version, and locally modified
-trees. Re-running the identical installer is a non-overwriting resume. Plain
-`.tar.gz`/`.zip` archives, `RELEASE-SHA256SUMS`, and
-`RELEASE-PROVENANCE.json` sit alongside for scripted installs. These installers
-are currently unsigned; the macOS artifact is not notarized, so verify the final
-release checksums from a trusted channel before opening it.
+That is the whole install. The installer picks a model profile for your
+hardware, downloads everything it needs (checksum-bound dependencies, every
+model shard, engines, LeanCTX, and the local IDE), configures local serving,
+and finishes on its own. If it gets interrupted, run the same installer again
+and it resumes where it left off. Existing unowned, different-version, or
+locally modified trees are never overwritten.
 
-Build both formats locally with
+All other build products (`RELEASE-SHA256SUMS`, `RELEASE-PROVENANCE.json`,
+source archives, the source-only macOS `.pkg`) stay in the tag's workflow
+artifacts for verification and scripted installs; they are deliberately kept
+off the download page.
+
+Maintainers build both formats locally with
 `bootstrap\build-one-click-installers.ps1 -Version vX.Y.Z` on Windows or
-`bootstrap/build-one-click-installers.sh --version vX.Y.Z` on macOS. A version tag
-builds and exercises both formats on native GitHub runners, requires byte-identical
-base bundles, builds the macOS package, and publishes the checksummed assets to the
-private Releases page. Publication fails closed unless the repository Actions
-variables `ORACLE_DEPENDENCY_RELEASE_TAG`, `ORACLE_DEPENDENCY_ASSET_NAME`, and
-`ORACLE_DEPENDENCY_ASSET_SHA256` identify an immutable ZIP asset on a private
-dependency-export release. That ZIP has `manifest.json` at its root and contains
-the complete policy-bound non-model cache. Each native job downloads it with the
-GitHub token, checks the pinned archive digest, extracts it with traversal/link
-defenses, revalidates every dependency, and passes it to the installer builder.
-For a full-offline installer, supply a complete policy-bound non-model export with
-`-DependencyCache <path>` on Windows or `--dependency-cache <path>` on macOS. The
-builder validates every required and optional dependency against committed policy,
-emits a streamed ZIP sidecar next to both launchers, and binds its name, SHA-256,
-manifest, and file set into release provenance. Keep that sidecar beside the
-launcher. It is not base64-loaded into the Windows process, and model weights are
-never folded into it. The unsigned macOS `.pkg` carries the same hash-bound sidecar
-inside its Scripts payload, so package installation has the same offline inputs as
-the `.command` launcher.
-The broader offline release gate remains safe by default:
-`bootstrap/release.ps1 -Version vX.Y.Z` is preflight-only. The explicit
-`bootstrap/release.ps1 -Version vX.Y.Z -Publish` pushes only an immutable tag; the
-private-repository workflow then builds every platform artifact, creates a draft,
-verifies the complete asset set, and publishes it atomically. The broader release
-path validates and packages `incoming/dependency-cache/` automatically.
+`bootstrap/build-one-click-installers.sh --version vX.Y.Z` on macOS; a
+pre-exported dependency cache can be baked in with `-DependencyCache <path>`
+(`--dependency-cache <path>` on macOS) for fully offline installs.
+`bootstrap/release.ps1 -Version vX.Y.Z` is preflight-only; the explicit
+`bootstrap/release.ps1 -Version vX.Y.Z -Publish` pushes only an immutable tag.
+That tag builds and exercises both formats on native GitHub runners, requires
+byte-identical base bundles, then publishes only the two labeled installers.
 
-The source-only payload deliberately does not download dependencies or models
-implicitly. Exported online dependencies live under `incoming/dependency-cache/`;
-rebuild with that cache to produce a full-offline launcher plus sidecar. Python
-3.12 remains an explicit setup prerequisite. The macOS launcher uses the Apple
-Command Line Tools (`xcrun`/`clang`) for its create-only atomic directory publish;
-source verification and extraction do not require Python. Models remain a separate
-policy-bound import. Acquisition records are
+Acquisition records are
 untrusted evidence until their source identity, resolved revision, and digest are
 independently verified. Every dependency kind uses the same promotion
 boundary: an independent verifier supplies an authority JSON containing the artifact

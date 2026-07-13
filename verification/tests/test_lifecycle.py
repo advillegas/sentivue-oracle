@@ -2948,14 +2948,20 @@ def test_one_click_builders_publish_native_unsigned_artifacts_honestly() -> None
     assert "Publish immutable GitHub release assets" in workflow
     assert "installer-package-macos" in workflow
     assert "installer-release-final" in workflow
-    assert "RELEASE-SHA256SUMS" in workflow
     assert "Refuse public artifact publication" in workflow
     assert "ORACLE_DEPENDENCY_RELEASE_TAG" not in workflow
     assert "ORACLE_DEPENDENCY_ASSET_SHA256" not in workflow
     assert "ORACLE_RELEASE_DEPENDENCY_CACHE" not in workflow
-    assert "download every checksum-bound dependency and model shard" in workflow
     assert 'package_destination="$HOME/sentivue-oracle"' in workflow
     assert '"/Applications/SentiVue Oracle"' not in workflow
+    # The download page carries exactly the two double-click installers.
+    assert "shows exactly two files" in workflow
+    assert "release build is missing one of the two installers" in workflow
+    assert "unexpected asset staged for the download page" in workflow
+    assert 'label="Windows Installer  (double-click)"' in workflow
+    assert 'label="Mac Installer  (unzip, then double-click)"' in workflow
+    assert '"${local_path[$name]}#$label"' in workflow
+    assert "Download and double-click. That is the whole install." in workflow
     assert "github.ref_name }}\"" not in workflow
 
 

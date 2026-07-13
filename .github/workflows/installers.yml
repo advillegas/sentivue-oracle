@@ -263,13 +263,32 @@ jobs:
             echo "refusing installer publication from a public repository" >&2
             exit 1
           }
+          # The download page shows exactly two files: the Windows installer
+          # and the Mac installer. Every other build product stays in the
+          # workflow artifacts for provenance but is never published.
+          windows_installer="$(find release -maxdepth 1 -name 'SentiVue-Oracle-Setup-*.cmd' -print -quit)"
+          mac_installer="$(find release -maxdepth 1 -name 'SentiVue-Oracle-Installer-*.command.zip' -print -quit)"
+          [[ -n "$windows_installer" && -n "$mac_installer" ]] || {
+            echo "release build is missing one of the two installers" >&2
+            exit 1
+          }
+          keep="$(mktemp -d)"
+          mv "$windows_installer" "$mac_installer" "$keep/"
+          rm -rf release
+          mv "$keep" release
           if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
             gh release create "$tag" \
               --repo "$repo" \
               --verify-tag \
               --draft \
               --title "SentiVue Oracle $tag" \
-              --notes "One-click Windows (.cmd) and macOS (.command.zip) installers, plus an optional source-only macOS (.pkg). The one-click installers select a hardware profile, download every checksum-bound dependency and model shard, install the local IDE and engines, and resume interrupted downloads. These artifacts are currently unsigned; the macOS artifacts are not notarized. Verify RELEASE-SHA256SUMS before opening."
+              --notes "$(printf '%s\n' \
+                '## Download and double-click. That is the whole install.' \
+                '' \
+                '- **Windows:** download the .cmd file and double-click it.' \
+                '- **Mac:** download the .command.zip file, unzip it, and double-click the .command file. (First launch: right-click -> Open, because the installer is unsigned.)' \
+                '' \
+                'The installer picks a model profile for your hardware, downloads everything it needs (checksum-bound dependencies, every model shard, engines, IDE), and finishes setup on its own. If it gets interrupted, run the same installer again and it resumes.')"
           fi
 
           declare -A local_digest=()
@@ -304,7 +323,19 @@ jobs:
             exit 1
           fi
           for name in "${!local_path[@]}"; do
-            gh release upload "$tag" "${local_path[$name]}" --repo "$repo"
+            case "$name" in
+              SentiVue-Oracle-Setup-*.cmd)
+                label="Windows Installer  (double-click)"
+                ;;
+              SentiVue-Oracle-Installer-*.command.zip)
+                label="Mac Installer  (unzip, then double-click)"
+                ;;
+              *)
+                echo "unexpected asset staged for the download page: $name" >&2
+                exit 1
+                ;;
+            esac
+            gh release upload "$tag" "${local_path[$name]}#$label" --repo "$repo"
           done
 
           metadata="$(gh release view "$tag" --repo "$repo" --json isDraft,assets)"

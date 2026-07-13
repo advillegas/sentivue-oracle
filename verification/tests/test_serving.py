@@ -2470,7 +2470,7 @@ def test_review_doctors_are_offline_and_wrappers_verify_owned_service_identity()
 
 def test_review_readme_uses_real_profiles_and_no_unsupported_installer_wizard() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    installer_section = readme.split("## Getting it onto the Mac", 1)[1].split(
+    installer_section = readme.split("## Install", 1)[1].split(
         "## Quickstart", 1
     )[0]
 

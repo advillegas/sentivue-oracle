@@ -49,6 +49,18 @@ def isolate_runtime(
         directory = tmp_path / name.lower()
         directory.mkdir()
         monkeypatch.setattr(C, name, directory)
+    # The host's serving/tiers.env may remap every tier onto one model, which
+    # silently disables escalation/tiebreak paths; pin distinct tiers so these
+    # tests behave identically on every machine.
+    monkeypatch.setattr(
+        C,
+        "TIER_MODEL",
+        {
+            "opus": "kimi-k2-thinking",
+            "sonnet": "qwen3-coder-480b",
+            "haiku": "qwen3-coder-30b",
+        },
+    )
 
 
 def checked_task(task_id: str = "one", **values: object) -> C.Task:
