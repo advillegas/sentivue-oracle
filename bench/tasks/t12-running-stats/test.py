@@ -1,4 +1,3 @@
-import math
 import sys
 
 try:
@@ -34,9 +33,11 @@ assert abs(t.stdev - 2.0) < 1e-12
 # merge: two halves equal the whole
 a, b, whole = RunningStats(), RunningStats(), RunningStats()
 for x in [1.0, 2.0, 3.0]:
-    a.add(x); whole.add(x)
+    a.add(x)
+    whole.add(x)
 for x in [10.0, 20.0]:
-    b.add(x); whole.add(x)
+    b.add(x)
+    whole.add(x)
 m = a.merge(b)
 assert m.count == whole.count
 assert abs(m.mean - whole.mean) < 1e-9

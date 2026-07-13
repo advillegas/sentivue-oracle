@@ -4,14 +4,12 @@ import hashlib
 import http.client
 import inspect
 import json
-import os
 import plistlib
 import re
 import shlex
 import subprocess
 import sys
 import threading
-import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -2387,7 +2385,9 @@ def test_review_service_singleton_lock_is_atomic_and_owner_conditional(
     assert hasattr(serving, "release_service_lock")
     state = tmp_path / "state"
     record = PidRecord(4242, "/trusted/python", 100.0, "a" * 64)
-    inspector = lambda _pid: ("/trusted/python", 100.0, "a" * 64)
+
+    def inspector(_pid: int) -> tuple[str, float, str]:
+        return ("/trusted/python", 100.0, "a" * 64)
 
     owner = serving.acquire_service_lock(state, record, inspect=inspector)
     with pytest.raises(ServingError, match="already|active|owner"):

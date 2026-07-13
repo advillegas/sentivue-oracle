@@ -403,7 +403,7 @@ def test_line_policy_rejects_crlf_in_tracked_blob(tmp_path: Path) -> None:
         ["git", "-C", str(tmp_path), "config", "core.autocrlf", "false"],
         check=True,
     )
-    source = put(tmp_path, "src/example.txt", b"alpha\r\nbeta\r\n")
+    put(tmp_path, "src/example.txt", b"alpha\r\nbeta\r\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "src/example.txt"], check=True)
     add_line_policy(tmp_path)
 
@@ -636,6 +636,16 @@ def test_yaml_gate_rejects_malformed_flow_values(
 ) -> None:
     put(tmp_path, "config/settings.yaml", invalid)
     assert check_config_formats(tmp_path).status == FAIL
+
+
+def test_yaml_gate_treats_block_scalar_contents_as_opaque(tmp_path: Path) -> None:
+    put(
+        tmp_path,
+        "config/workflow.yml",
+        "name: fixture\nsteps:\n  - run: |\n      echo \"shell-owned quote\n",
+    )
+
+    assert check_config_formats(tmp_path).status == PASS
 
 
 def test_path_safety_gate_uses_argv_and_generated_config(tmp_path: Path) -> None:

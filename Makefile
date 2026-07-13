@@ -12,7 +12,7 @@ PY           := uv run --project env python
 
 .PHONY: help install models render serve stop status verify doctor harden \
         claude opencode mission report env skills ecc supabase-up supabase-down \
-        dist uninstall clean
+        dist installers uninstall clean
 
 help:
 	@echo "SentiVue Oracle    (guided setup: ./install)"
@@ -26,6 +26,7 @@ help:
 	@echo "  make doctor         full diagnostic with suggested fixes"
 	@echo "  make harden         install optional pf firewall profile (offline enforcement)"
 	@echo "  make dist VERSION=vX.Y.Z   build immutable, checksummed source archives"
+	@echo "  make installers VERSION=vX.Y.Z   build both one-click installer formats"
 	@echo "  make uninstall      ownership-scoped dry run (add APPLY=1 to execute)"
 	@echo "  make uninstall APPLY=1 PURGE=1 CONFIRM_PURGE=1  also remove runtime roots"
 	@echo "  make claude         interactive session (Claude Code engine)"
@@ -62,6 +63,10 @@ doctor:
 dist:
 	@test -n "$(VERSION)" || { echo "VERSION=vX.Y.Z is required"; exit 2; }
 	bash bootstrap/package.sh --version "$(VERSION)"
+
+installers:
+	@test -n "$(VERSION)" || { echo "VERSION=vX.Y.Z is required"; exit 2; }
+	bash bootstrap/build-one-click-installers.sh --version "$(VERSION)"
 
 uninstall:
 	bash bootstrap/uninstall.sh $(if $(filter 1 true,$(APPLY)),--apply,) $(if $(filter 1 true,$(PURGE)),--purge,) $(if $(filter 1 true,$(CONFIRM_PURGE)),--confirm-purge,)

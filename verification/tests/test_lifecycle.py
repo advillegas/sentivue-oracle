@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tarfile
 import time
 import zipfile
@@ -16,7 +18,6 @@ import pytest
 
 import verification.lifecycle as lifecycle
 from verification.lifecycle import (
-    ArtifactRecord,
     LifecycleError,
     atomic_write_text,
     begin_install_phase,
@@ -48,6 +49,77 @@ def put(root: Path, relative: str, content: str | bytes) -> Path:
     data = content if isinstance(content, bytes) else content.encode("utf-8")
     path.write_bytes(data)
     return path
+
+
+def one_click_payloads(
+    extra_files: dict[str, bytes] | None = None,
+) -> tuple[bytes, bytes, dict[str, bytes]]:
+    revision = "a" * 40
+    source_files = {
+        "README.md": b"fixture\n",
+        "install": b"#!/bin/bash\nexit 0\n",
+        "bin/oracle.ps1": b"exit 0\n",
+        "bootstrap/build-installers.ps1": b"# protected fixture\n",
+        "serving/profiles.conf": (
+            b"full|1|fixture|fixture|fixture|fixture|0 GB\n"
+            b"micro|0|fixture|fixture|fixture|fixture|0 GB\n"
+        ),
+        "serving/tiers.env": (
+            b"OPUS_MODEL=fixture\nSONNET_MODEL=fixture\nHAIKU_MODEL=fixture\n"
+        ),
+        "verification/lifecycle.py": b"# lifecycle fixture\n",
+    }
+    source_files.update(extra_files or {})
+    records = [
+        {
+            "path": relative,
+            "mode": "100755" if relative == "install" else "100644",
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+        }
+        for relative, data in sorted(source_files.items())
+    ]
+    files = dict(source_files)
+    files["ARTIFACTS.json"] = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_revision": revision,
+                "requirements": [],
+                "note": "fixture",
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+    files["SOURCE-PROVENANCE.json"] = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_revision": revision,
+                "files": records,
+            },
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+    tar_buffer = io.BytesIO()
+    with tarfile.open(fileobj=tar_buffer, mode="w:gz") as archive:
+        for relative, data in sorted(files.items()):
+            info = tarfile.TarInfo(f"sentivue-oracle/{relative}")
+            info.size = len(data)
+            info.mode = 0o755 if relative == "install" else 0o644
+            archive.addfile(info, io.BytesIO(data))
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for relative, data in sorted(files.items()):
+            info = zipfile.ZipInfo(f"sentivue-oracle/{relative}")
+            info.create_system = 3
+            mode = 0o755 if relative == "install" else 0o644
+            info.external_attr = (mode | 0o100000) << 16
+            archive.writestr(info, data)
+    return tar_buffer.getvalue(), zip_buffer.getvalue(), files
 
 
 def init_repository(root: Path) -> str:
@@ -182,9 +254,7 @@ def test_package_uses_immutable_revision_allowlist_and_hard_exclusions(
             "/data/",
             "/.git/",
         )
-        assert not any(
-            blocked in name for name in names for blocked in blocked_parts
-        )
+        assert not any(blocked in name for name in names for blocked in blocked_parts)
         if archive.suffix == ".zip":
             with zipfile.ZipFile(archive) as zipped:
                 assert (
@@ -193,13 +263,199 @@ def test_package_uses_immutable_revision_allowlist_and_hard_exclusions(
                 )
         else:
             with tarfile.open(archive, "r:gz") as tarred:
-                stream = tarred.extractfile(
-                    "sentivue-oracle/src/runtime source.py"
-                )
+                stream = tarred.extractfile("sentivue-oracle/src/runtime source.py")
                 assert stream is not None
                 assert stream.read() == b"VALUE = 'committed'\n"
 
     verify_release_bundle(output)
+
+
+def test_full_offline_installer_payload_includes_only_validated_dependency_export(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    dependency = put(tmp_path, "downloads/tool.bin", b"policy-bound dependency")
+    digest = hashlib.sha256(dependency.read_bytes()).hexdigest()
+    put(
+        root,
+        "VERSIONS.lock",
+        f"TOOL_VERSION=1.2.3\nTOOL_SHA256={digest}\n",
+    )
+    put(root, "README.md", "fixture\n")
+    put(root, "serving/models.manifest", "# fixture\n")
+    put(
+        root,
+        "verification/policy.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "package_allowlist": {
+                    "roots": ["serving", "verification"],
+                    "files": ["README.md", "VERSIONS.lock"],
+                    "source_assets": [],
+                },
+                "dependency_inputs": [
+                    {
+                        "id": "tool",
+                        "kind": "native",
+                        "version_key": "TOOL_VERSION",
+                        "allow_dynamic": False,
+                        "optional": False,
+                        "platforms": ["windows", "macos"],
+                        "source": {
+                            "identity": dependency.as_uri(),
+                            "digest_key": "TOOL_SHA256",
+                        },
+                    }
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+    )
+    cache = tmp_path / "validated dependency export"
+    record = record_cached_artifact(
+        cache,
+        artifact_id="tool",
+        source_file=dependency,
+        source_url=dependency.as_uri(),
+        requested_version="1.2.3",
+        resolved_version="1.2.3",
+        trust="policy-bound",
+    )
+
+    entries, artifacts = lifecycle._validated_dependency_cache_entries(
+        root,
+        cache,
+    )
+
+    by_path = {entry.path: entry.data for entry in entries}
+    embedded_path = f"incoming/dependency-cache/{record.cache_path}"
+    assert by_path[embedded_path] == dependency.read_bytes()
+    assert "incoming/dependency-cache/manifest.json" in by_path
+    assert artifacts == {
+        "artifact_ids": ["tool"],
+        "embedded": True,
+        "manifest_path": "incoming/dependency-cache/manifest.json",
+        "manifest_sha256": hashlib.sha256(
+            by_path["incoming/dependency-cache/manifest.json"]
+        ).hexdigest(),
+        "models_embedded": False,
+    }
+    sidecar = tmp_path / "dependencies.zip"
+    lifecycle._write_zip(sidecar, entries, 1_700_000_000)
+    with zipfile.ZipFile(sidecar) as archive:
+        assert archive.read(f"sentivue-oracle/{embedded_path}") == dependency.read_bytes()
+    sidecar_installer = lifecycle._windows_installer_text(
+        one_click_payloads()[1],
+        hashlib.sha256(one_click_payloads()[1]).hexdigest(),
+        dependency_bundle_name=sidecar.name,
+        dependency_bundle_sha256=hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+    ).encode("ascii")
+    assert dependency.read_bytes() not in sidecar_installer
+    assert b"$dependencyStream = [IO.File]::Open(" in sidecar_installer
+    assert b"[Convert]::FromBase64String($encoded)" in sidecar_installer
+
+    (cache / record.cache_path).write_bytes(b"tampered")
+    with pytest.raises(LifecycleError, match="full-offline dependency export"):
+        lifecycle._validated_dependency_cache_entries(
+            root,
+            cache,
+        )
+
+
+def test_final_release_manifest_binds_base_bundle_and_macos_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    add_package_policy(root, ["bootstrap", "src"])
+    put(root, "README.md", "fixture\n")
+    put(root, "src/main.py", "VALUE = 1\n")
+    immutable_package_builder = put(
+        root,
+        "bootstrap/build-macos-package.sh",
+        "#!/bin/bash\n# immutable package builder\n",
+    )
+    revision = init_repository(root)
+    base = build_source_archives(root, revision, tmp_path / "base", "v1.2.3")
+    command_installer = put(
+        base.output_dir,
+        "SentiVue-Oracle-Installer-v1.2.3.command",
+        b"command installer",
+    )
+    monkeypatch.setattr(lifecycle, "verify_release_bundle", lambda *_a: base)
+    base_payload = json.loads(base.provenance.read_text(encoding="utf-8"))
+    package_dir = tmp_path / "package"
+    package = put(
+        package_dir,
+        "SentiVue-Oracle-Source-Installer-v1.2.3.pkg",
+        b"package bytes",
+    )
+    package_provenance = put(
+        package_dir,
+        f"{package.name}.provenance.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "version": "v1.2.3",
+                "source_revision": revision,
+                "artifact": package.name,
+                "sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
+                "base_provenance_sha256": hashlib.sha256(
+                    base.provenance.read_bytes()
+                ).hexdigest(),
+                "base_checksums_sha256": hashlib.sha256(
+                    base.checksums.read_bytes()
+                ).hexdigest(),
+                "base_builder_sha256": base_payload["builder"]["sha256"],
+                "package_builder_sha256": hashlib.sha256(
+                    immutable_package_builder.read_bytes()
+                ).hexdigest(),
+                "embedded_installer": command_installer.name,
+                "embedded_installer_sha256": hashlib.sha256(
+                    command_installer.read_bytes()
+                ).hexdigest(),
+                "dependency_bundle": "-",
+                "dependency_bundle_sha256": "-",
+                "code_signing": "unsigned",
+                "notarization": "not-notarized",
+            }
+        )
+        + "\n",
+    )
+    put(
+        package_dir,
+        f"{package.name}.sha256",
+        f"{hashlib.sha256(package.read_bytes()).hexdigest()}  {package.name}\n"
+        f"{hashlib.sha256(package_provenance.read_bytes()).hexdigest()}  "
+        f"{package_provenance.name}\n",
+    )
+
+    checksums, provenance = lifecycle.finalize_installer_release(
+        base.output_dir,
+        package_dir,
+        tmp_path / "final",
+    )
+
+    final_payload = json.loads(provenance.read_text(encoding="utf-8"))
+    final_names = {item["name"] for item in final_payload["artifacts"]}
+    assert package.name in final_names
+    assert "PROVENANCE.json" in final_names
+    assert checksums.name == "RELEASE-SHA256SUMS"
+    assert hashlib.sha256(package_provenance.read_bytes()).hexdigest() == (
+        final_payload["package_provenance_sha256"]
+    )
+
+    package.write_bytes(b"substituted")
+    with pytest.raises(LifecycleError, match="package provenance"):
+        lifecycle.finalize_installer_release(
+            base.output_dir,
+            package_dir,
+            tmp_path / "rejected",
+        )
 
 
 def test_package_rejects_tracked_source_outside_allowlist(tmp_path: Path) -> None:
@@ -276,6 +532,74 @@ def test_release_bundle_checksums_and_provenance_detect_tampering(
         verify_release_bundle(output)
 
 
+@pytest.mark.parametrize(
+    "entry",
+    [
+        "{digest}  asset.zip  ignored\n",
+        "{digest} *asset.zip\n",
+        "{digest}  asset.zip\r\n",
+        "{digest}  asset.zip\n\n",
+        "{upper}  asset.zip\n",
+        "{digest}  ../asset.zip\n",
+    ],
+)
+def test_checksum_manifest_parser_rejects_noncanonical_entries(
+    tmp_path: Path,
+    entry: str,
+) -> None:
+    digest = hashlib.sha256(b"fixture").hexdigest()
+    manifest = put(
+        tmp_path,
+        "SHA256SUMS",
+        entry.format(digest=digest, upper=digest.upper()),
+    )
+
+    with pytest.raises(LifecycleError, match="checksum"):
+        lifecycle._read_checksum_manifest(manifest)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["source-top-level", "artifact-top-level", "file-record"],
+)
+def test_installer_payload_rejects_unknown_manifest_fields(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    root = tmp_path / "repo"
+    root.mkdir()
+    add_package_policy(root, ["src"])
+    put(root, "README.md", "fixture\n")
+    put(root, "src/main.py", "VALUE = 1\n")
+    revision = init_repository(root)
+    bundle = build_source_archives(root, revision, tmp_path / "out", "v1.0.0")
+    source_zip = next(path for path in bundle.archives if path.suffix == ".zip")
+    with zipfile.ZipFile(source_zip) as archive:
+        files = {info.filename: archive.read(info) for info in archive.infolist()}
+    prefix = f"{lifecycle.PRODUCT_PREFIX}/"
+    source_name = prefix + "SOURCE-PROVENANCE.json"
+    artifacts_name = prefix + "ARTIFACTS.json"
+    if mutation == "source-top-level":
+        payload = json.loads(files[source_name])
+        payload["unexpected"] = True
+        files[source_name] = lifecycle._json_bytes(payload)
+    elif mutation == "artifact-top-level":
+        payload = json.loads(files[artifacts_name])
+        payload["unexpected"] = True
+        files[artifacts_name] = lifecycle._json_bytes(payload)
+    else:
+        payload = json.loads(files[source_name])
+        payload["files"][0]["unexpected"] = True
+        files[source_name] = lifecycle._json_bytes(payload)
+    rebuilt = io.BytesIO()
+    with zipfile.ZipFile(rebuilt, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+
+    with pytest.raises(LifecycleError, match="manifest|provenance"):
+        lifecycle._installer_payload_files(rebuilt.getvalue(), ".cmd")
+
+
 def test_release_preflight_failure_runs_no_mutating_command(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -284,7 +608,9 @@ def test_release_preflight_failure_runs_no_mutating_command(
     def fail_preflight(*_args: object, **_kwargs: object) -> None:
         raise LifecycleError("fixture preflight failed")
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(argv)
         return subprocess.CompletedProcess(argv, 0, "", "")
 
@@ -313,14 +639,48 @@ def test_release_cli_defaults_to_preflight_and_requires_explicit_publish() -> No
     assert parser.parse_args([*common, "--publish"]).publish is True
 
 
+def test_dependency_validation_cli_can_exclude_separate_model_imports(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def validate(*_args: object, **kwargs: object) -> list[str]:
+        captured.update(kwargs)
+        return []
+
+    monkeypatch.setattr(lifecycle, "validate_dependency_inputs", validate)
+    args = lifecycle.build_parser().parse_args(
+        [
+            "validate-dependencies",
+            "--root",
+            str(tmp_path),
+            "--exclude-models",
+        ]
+    )
+
+    assert args.handler(args) == 0
+    assert captured["include_models"] is False
+
+
 def test_operator_targets_preserve_safe_lifecycle_defaults() -> None:
     makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    windows_installer = (
+        REPO_ROOT / "bootstrap" / "build-one-click-installers.ps1"
+    ).read_text(encoding="ascii")
+    macos_installer = (
+        REPO_ROOT / "bootstrap" / "build-one-click-installers.sh"
+    ).read_text(encoding="ascii")
 
     assert 'bootstrap/package.sh --version "$(VERSION)"' in makefile
+    assert 'bootstrap/build-one-click-installers.sh --version "$(VERSION)"' in makefile
     assert "$(CONFIRM_PURGE)" in makefile
     assert "--confirm-purge" in makefile
     assert "release.ps1 -Version vX.Y.Z -Publish" in readme
+    assert "--dependency-cache" in windows_installer
+    assert "--dependency-cache" in macos_installer
+    assert "-DependencyCache <path>" in readme
 
 
 def test_existing_release_version_is_immutable(
@@ -367,8 +727,11 @@ def test_existing_release_version_is_immutable(
     commands: list[list[str]] = []
 
     monkeypatch.setattr(lifecycle, "preflight_release", lambda *_a, **_k: preflight)
+    monkeypatch.setattr(lifecycle, "verify_release_bundle", lambda *_a, **_k: preflight)
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(argv)
         if argv[:2] == ["git", "rev-parse"]:
             return subprocess.CompletedProcess(argv, 0, "c" * 40 + "\n", "")
@@ -387,7 +750,7 @@ def test_existing_release_version_is_immutable(
     )
 
 
-def test_release_publication_is_create_only_after_verified_preflight(
+def test_release_publication_pushes_only_create_only_tag_after_preflight(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     output = tmp_path / "out"
@@ -425,8 +788,11 @@ def test_release_publication_is_create_only_after_verified_preflight(
     )
     commands: list[list[str]] = []
     monkeypatch.setattr(lifecycle, "preflight_release", lambda *_a, **_k: preflight)
+    monkeypatch.setattr(lifecycle, "verify_release_bundle", lambda *_a, **_k: preflight)
 
-    def fake_run(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+    def fake_run(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
         commands.append(argv)
         if (
             argv[:2] == ["git", "rev-parse"]
@@ -443,7 +809,7 @@ def test_release_publication_is_create_only_after_verified_preflight(
     rendered = [" ".join(command) for command in commands]
     assert any(command.startswith("git tag v9.9.9 ") for command in rendered)
     assert any(command == "git push origin refs/tags/v9.9.9" for command in rendered)
-    assert any(command.startswith("gh release create v9.9.9 ") for command in rendered)
+    assert not any(command.startswith("gh release ") for command in rendered)
     assert not any("--force" in command or "delete" in command for command in rendered)
 
 
@@ -522,8 +888,12 @@ def test_exact_pin_validation_rejects_ranges_latest_and_unresolved_reproducible_
     assert validate_dependency_inputs(tmp_path, reproducible=False) == []
 
     errors = validate_dependency_inputs(tmp_path, reproducible=True)
-    assert any("continue-vsix" in error and "resolved artifact" in error for error in errors)
-    assert any("model:chat" in error and "resolved artifact" in error for error in errors)
+    assert any(
+        "continue-vsix" in error and "resolved artifact" in error for error in errors
+    )
+    assert any(
+        "model:chat" in error and "resolved artifact" in error for error in errors
+    )
 
     versions = tmp_path / "VERSIONS.lock"
     versions.write_text(
@@ -741,7 +1111,9 @@ def test_reproducible_inputs_accept_resolved_hashed_artifacts(
             artifact_id=artifact_id,
             source_file=source,
             source_url=f"https://example.invalid/{artifact_id}",
-            requested_version="dynamic" if artifact_id in {"continue-vsix", "model:chat"} else resolved,
+            requested_version="dynamic"
+            if artifact_id in {"continue-vsix", "model:chat"}
+            else resolved,
             resolved_version=resolved,
             trust="policy-bound",
         )
@@ -768,12 +1140,15 @@ def test_reproducible_inputs_accept_resolved_hashed_artifacts(
         ],
     )
 
-    assert validate_dependency_inputs(
-        tmp_path,
-        artifact_manifest=cache / "manifest.json",
-        cache_root=cache,
-        reproducible=True,
-    ) == []
+    assert (
+        validate_dependency_inputs(
+            tmp_path,
+            artifact_manifest=cache / "manifest.json",
+            cache_root=cache,
+            reproducible=True,
+        )
+        == []
+    )
 
 
 def test_install_state_hashes_inputs_and_invalidates_only_stale_phases(
@@ -1174,26 +1549,18 @@ def test_generated_model_configs_are_atomic_owned_and_preserve_user_files(
     assert (root / "state/generated/claude-code/settings.json").is_file()
     assert (root / "state/generated/opencode/opencode.json").is_file()
     assert (root / "serving/tiers.env").read_text(encoding="utf-8") == (
-        "OPUS_MODEL=chat-model\n"
-        "SONNET_MODEL=chat-model\n"
-        "HAIKU_MODEL=chat-model\n"
+        "OPUS_MODEL=chat-model\nSONNET_MODEL=chat-model\nHAIKU_MODEL=chat-model\n"
     )
     generated_opencode = json.loads(
-        (root / "state/generated/opencode/opencode.json").read_text(
-            encoding="utf-8"
-        )
+        (root / "state/generated/opencode/opencode.json").read_text(encoding="utf-8")
     )
-    assert set(
-        generated_opencode["provider"]["oracle"]["models"]
-    ) == {"chat-model"}
+    assert set(generated_opencode["provider"]["oracle"]["models"]) == {"chat-model"}
     for path, digest in template_hashes.items():
         assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
     for path in written:
         assert not path.read_bytes().startswith(b"\xef\xbb\xbf")
         assert not list(path.parent.glob(f".{path.name}.*.tmp"))
-    state = json.loads(
-        (root / ".install-state/state.json").read_text(encoding="utf-8")
-    )
+    state = json.loads((root / ".install-state/state.json").read_text(encoding="utf-8"))
     owned = {(item["scope"], item["path"]) for item in state["owned_paths"]}
     assert ("install", "state/generated/continue/config.yaml") in owned
     assert ("install", "state/generated/kilo/kilo.jsonc") in owned
@@ -1240,7 +1607,9 @@ def test_generated_configs_refuse_symbolic_link_parent(
     assert not (root / "state/generated/continue/config.yaml").exists()
 
 
-def test_lifecycle_scripts_have_cross_platform_twins_and_protected_builder_is_unchanged() -> None:
+def test_lifecycle_scripts_have_cross_platform_twins_and_protected_builder_is_unchanged() -> (
+    None
+):
     for name in ("package", "release", "uninstall", "export-dependencies"):
         assert (REPO_ROOT / "bootstrap" / f"{name}.ps1").is_file()
         assert (REPO_ROOT / "bootstrap" / f"{name}.sh").is_file()
@@ -1262,17 +1631,17 @@ def test_lifecycle_scripts_have_cross_platform_twins_and_protected_builder_is_un
     assert protected.stdout == ""
 
 
-def test_install_consumers_use_export_cache_instead_of_dynamic_network_resolution() -> None:
-    windows_serving = (
-        REPO_ROOT / "serving/serve-windows.ps1"
-    ).read_text(encoding="utf-8")
-    mac_install = (REPO_ROOT / "bootstrap/install.sh").read_text(encoding="utf-8")
-    ide_powershell = (
-        REPO_ROOT / "connectors/ide/setup-ide.ps1"
-    ).read_text(encoding="utf-8")
-    ide_bash = (REPO_ROOT / "connectors/ide/setup-ide.sh").read_text(
+def test_install_consumers_use_export_cache_instead_of_dynamic_network_resolution() -> (
+    None
+):
+    windows_serving = (REPO_ROOT / "serving/serve-windows.ps1").read_text(
         encoding="utf-8"
     )
+    mac_install = (REPO_ROOT / "bootstrap/install.sh").read_text(encoding="utf-8")
+    ide_powershell = (REPO_ROOT / "connectors/ide/setup-ide.ps1").read_text(
+        encoding="utf-8"
+    )
+    ide_bash = (REPO_ROOT / "connectors/ide/setup-ide.sh").read_text(encoding="utf-8")
     windows_cli = (REPO_ROOT / "bin/oracle.ps1").read_text(encoding="utf-8")
 
     assert "Invoke-WebRequest" not in windows_serving
@@ -1334,12 +1703,12 @@ def test_doctors_report_dependency_cache_and_install_state_health() -> None:
         assert ".install-state" in source
 
 
-def test_platform_generated_config_writers_use_same_directory_atomic_replacement() -> None:
+def test_platform_generated_config_writers_use_same_directory_atomic_replacement() -> (
+    None
+):
     render = (REPO_ROOT / "bootstrap/render-config.sh").read_text(encoding="utf-8")
     service = (REPO_ROOT / "serving/service.sh").read_text(encoding="utf-8")
-    windows = (REPO_ROOT / "serving/serve-windows.ps1").read_text(
-        encoding="utf-8"
-    )
+    windows = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
     shared = (REPO_ROOT / "verification/serving.py").read_text(encoding="utf-8")
 
     assert "serving/service.sh" in render
@@ -1354,9 +1723,9 @@ def test_model_downloaders_resolve_revision_and_record_local_hashes() -> None:
     bash_source = (REPO_ROOT / "bootstrap/download-models.sh").read_text(
         encoding="utf-8"
     )
-    powershell_source = (
-        REPO_ROOT / "bootstrap/download-models.ps1"
-    ).read_text(encoding="utf-8")
+    powershell_source = (REPO_ROOT / "bootstrap/download-models.ps1").read_text(
+        encoding="utf-8"
+    )
 
     assert "resolved_revision" in bash_source
     assert '--revision "$resolved_revision"' in bash_source
@@ -1365,9 +1734,7 @@ def test_model_downloaders_resolve_revision_and_record_local_hashes() -> None:
     assert "record-model" in powershell_source
     assert "tree/main" not in powershell_source
     assert "resolve/main" not in powershell_source
-    render_source = (REPO_ROOT / "verification/serving.py").read_text(
-        encoding="utf-8"
-    )
+    render_source = (REPO_ROOT / "verification/serving.py").read_text(encoding="utf-8")
     assert "def parse_manifest(" in render_source
     assert "validate_policy_bound_models" in render_source
 
@@ -1385,8 +1752,7 @@ def test_review_trust_rejects_self_asserted_hash_url_and_content(
     put(
         root,
         "VERSIONS.lock",
-        "TOOL_VERSION=1.2.3\n"
-        f"TOOL_SHA256={trusted_digest}\n",
+        f"TOOL_VERSION=1.2.3\nTOOL_SHA256={trusted_digest}\n",
     )
     put(root, "serving/models.manifest", "# fixture\n")
     put(
@@ -1439,8 +1805,7 @@ def test_review_trust_accepts_only_policy_bound_bytes(tmp_path: Path) -> None:
     put(
         root,
         "VERSIONS.lock",
-        "TOOL_VERSION=1.2.3\n"
-        f"TOOL_SHA256={trusted_digest}\n",
+        f"TOOL_VERSION=1.2.3\nTOOL_SHA256={trusted_digest}\n",
     )
     put(root, "serving/models.manifest", "# fixture\n")
     put(
@@ -1560,7 +1925,9 @@ def test_review_reproducible_models_reject_dynamic_revision_even_if_self_recorde
         reproducible=True,
     )
 
-    assert any("model:chat" in error and "trusted revision" in error for error in errors)
+    assert any(
+        "model:chat" in error and "trusted revision" in error for error in errors
+    )
 
 
 def test_review_offline_install_has_no_implicit_network_resolution() -> None:
@@ -1583,7 +1950,7 @@ def test_review_offline_install_has_no_implicit_network_resolution() -> None:
         "git clone",
         "xcode-select --install",
         "uv run",
-        "opencode\" models",
+        'opencode" models',
     )
     for relative, source in install_sources.items():
         for needle in forbidden:
@@ -1730,7 +2097,7 @@ def test_review_windows_service_ownership_is_narrowly_registered(
     serving = (REPO_ROOT / "serving/serve-windows.ps1").read_text(encoding="utf-8")
     assert "state own-service --root $Root" in serving
     assert '--service-kind "windows-scheduled-task"' in serving
-    assert '--identifier $TaskName' in serving
+    assert "--identifier $TaskName" in serving
 
 
 def test_review_generated_engine_configs_are_selected_by_launchers() -> None:
@@ -1746,22 +2113,26 @@ def test_review_generated_engine_configs_are_selected_by_launchers() -> None:
         )
     }
 
-    assert "state/generated/claude-code/settings.json" in sources[
-        "engines/claude-code/launch.sh"
-    ]
+    assert (
+        "state/generated/claude-code/settings.json"
+        in sources["engines/claude-code/launch.sh"]
+    )
     assert "--settings" in sources["engines/claude-code/launch.sh"]
-    assert "state\\generated\\claude-code\\settings.json" in sources[
-        "engines/claude-code/launch.ps1"
-    ]
+    assert (
+        "state\\generated\\claude-code\\settings.json"
+        in sources["engines/claude-code/launch.ps1"]
+    )
     assert "--settings" in sources["engines/claude-code/launch.ps1"]
     assert "OPENCODE_CONFIG" in sources["engines/opencode/launch.sh"]
-    assert "state/generated/opencode/opencode.json" in sources[
-        "engines/opencode/launch.sh"
-    ]
+    assert (
+        "state/generated/opencode/opencode.json"
+        in sources["engines/opencode/launch.sh"]
+    )
     assert "OPENCODE_CONFIG" in sources["engines/opencode/launch.ps1"]
-    assert "state\\generated\\opencode\\opencode.json" in sources[
-        "engines/opencode/launch.ps1"
-    ]
+    assert (
+        "state\\generated\\opencode\\opencode.json"
+        in sources["engines/opencode/launch.ps1"]
+    )
     for relative in ("engines/kilo/launch.sh", "engines/kilo/launch.ps1"):
         assert "KILO_CONFIG" in sources[relative]
         assert "state/generated/kilo/kilo.jsonc" in sources[relative].replace("\\", "/")
@@ -1822,7 +2193,7 @@ def test_review_installers_check_native_failures_and_replace_stale_tools() -> No
     assert "function Invoke-NativeChecked" in windows
     assert 'Invoke-NativeChecked "npm"' in windows
     assert 'Invoke-NativeChecked "sync-skills"' in windows
-    assert 'state own-tree' in windows
+    assert "state own-tree" in windows
     assert "if (-not (Test-Path $swapExe))" not in serving
     assert "if (-not (Test-Path $serverExe))" not in serving
     assert "state own-tree" in mac
@@ -1831,10 +2202,11 @@ def test_review_installers_check_native_failures_and_replace_stale_tools() -> No
 def test_review_protected_installer_transform_is_atomic_utf8_and_fail_closed(
     tmp_path: Path,
 ) -> None:
+    tar_payload, zip_payload, _files = one_click_payloads()
     mac = put(
         tmp_path,
         "SentiVue-Oracle-Installer-v1.2.3.command",
-        b"#!/bin/bash\nbash install || true\n__PAYLOAD_BELOW__\nPAYLOAD",
+        b"#!/bin/bash\nbash install || true\n__PAYLOAD_BELOW__\n" + tar_payload,
     )
     windows_script = """@echo off
 #==PSPAYLOAD==#
@@ -1846,8 +2218,8 @@ Set-Content -Path (Join-Path $dest "serving\\tiers.env") -Value @("OPUS_MODEL=$(
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\\download-models.ps1")
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bin\\oracle.ps1") setup
 #==B64PAYLOAD==#
-UEFZTE9BRA==
-"""
+__PAYLOAD__
+""".replace("__PAYLOAD__", base64.b64encode(zip_payload).decode("ascii"))
     windows = put(
         tmp_path,
         "SentiVue-Oracle-Setup-v1.2.3.cmd",
@@ -1866,12 +2238,352 @@ UEFZTE9BRA==
     assert "New-Object Text.UTF8Encoding($false)" in hardened
     assert "Move-Item -LiteralPath $temporary" in hardened
     assert "download-models.ps1" not in hardened
-    assert "Model acquisition is a separate explicit operation" in hardened
-    assert hardened.count("if ($LASTEXITCODE -ne 0) { throw") == 2
+    assert "Models remain a separate explicit import" in hardened
+    assert "embedded payload SHA-256 mismatch" in hardened
+    assert "archive member has a traversal component" in hardened
+    assert "existing unowned, different-version" in hardened
+    assert "ORACLE_INSTALLER_SKIP_SETUP" in hardened
+    assert hardened.count("if ($LASTEXITCODE -ne 0)") == 2
+    assert "ownership-scoped uninstaller failed" in hardened
+    assert mac_record["payload_sha256"] == hashlib.sha256(tar_payload).hexdigest()
+    assert windows_record["payload_sha256"] == hashlib.sha256(zip_payload).hexdigest()
+    mac_header = mac.read_bytes().split(b"\n__PAYLOAD_BELOW__\n", 1)[0]
+    assert b"tar -tzf" in mac_header
+    assert b"tar -tvzf" in mac_header
+    assert b"mktemp -d" in mac_header
+    assert b"existing unowned, different-version" in mac_header
+    assert b"Python 3.12 or newer is required for safe" not in mac_header
+    assert b"renamex_np" in mac_header
+    assert b"xcrun --find clang" in mac_header
+    assert b"rollback_new_install" in mac_header
+    records_match = re.search(rb'SOURCE_RECORDS_B64="([A-Za-z0-9+/=]+)"', mac_header)
+    assert records_match is not None
+    source_records = base64.b64decode(records_match.group(1), validate=True)
+    assert source_records.endswith(b"\n")
+    assert base64.b64encode(b"verification/lifecycle.py") in source_records
 
     malformed = put(tmp_path, "malformed.cmd", b"@echo off\n")
     with pytest.raises(LifecycleError, match="protected installer"):
         lifecycle._harden_built_installer(malformed)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows one-click behavior")
+def test_one_click_windows_installer_is_atomic_idempotent_and_preserves_trees(
+    tmp_path: Path,
+) -> None:
+    _tar_payload, payload, _files = one_click_payloads(
+        {"README.md": b"original\n"}
+    )
+    installer_dir = tmp_path / "installer artifacts with spaces"
+    installer_dir.mkdir()
+    installer = installer_dir / "SentiVue-Oracle-Setup-v1.2.3.cmd"
+    installer.write_text(
+        lifecycle._windows_installer_text(payload, hashlib.sha256(payload).hexdigest()),
+        encoding="ascii",
+    )
+
+    destination = tmp_path / "installed tree with spaces"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "ORACLE_INSTALLER_DEST": str(destination),
+            "ORACLE_INSTALLER_PROFILE": "micro",
+            "ORACLE_INSTALLER_SKIP_SETUP": "1",
+        }
+    )
+    first = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert (destination / "README.md").read_text(encoding="utf-8") == "original\n"
+    marker = destination / ".oracle-installer-payload.sha256"
+    assert (
+        marker.read_text(encoding="utf-8").strip()
+        == hashlib.sha256(payload).hexdigest()
+    )
+    assert not list(tmp_path.glob(".sentivue-oracle-install-*"))
+
+    second = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert "existing files were preserved" in second.stdout
+    assert "child setup was not re-executed" in second.stdout
+    (destination / "README.md").write_text("locally modified\n", encoding="utf-8")
+    modified = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+    assert modified.returncode != 0
+    assert "immutable source file" in modified.stdout
+    assert (destination / "README.md").read_text(encoding="utf-8") == (
+        "locally modified\n"
+    )
+
+    unowned = tmp_path / "unowned destination"
+    unowned.mkdir()
+    sentinel = put(unowned, "keep.txt", "preserve\n")
+    refused_environment = dict(environment)
+    refused_environment["ORACLE_INSTALLER_DEST"] = str(unowned)
+    refused = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=refused_environment,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "was preserved" in refused.stdout
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+
+    tampered = installer_dir / "tampered.cmd"
+    tampered_text = installer.read_text(encoding="ascii")
+    separator = "#==B64PAYLOAD==#\n"
+    header, encoded = tampered_text.split(separator, 1)
+    replacement = "A" if encoded[0] != "A" else "B"
+    tampered.write_text(
+        header + separator + replacement + encoded[1:],
+        encoding="ascii",
+    )
+    tampered_destination = tmp_path / "tampered destination"
+    tampered_environment = dict(environment)
+    tampered_environment["ORACLE_INSTALLER_DEST"] = str(tampered_destination)
+    rejected = subprocess.run(
+        ["cmd", "/d", "/c", str(tampered)],
+        text=True,
+        capture_output=True,
+        env=tampered_environment,
+        check=False,
+    )
+    assert rejected.returncode != 0
+    assert "SHA-256 mismatch" in rejected.stdout
+    assert not tampered_destination.exists()
+
+    traversal_buffer = io.BytesIO()
+    with zipfile.ZipFile(traversal_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("sentivue-oracle/../../escaped.txt", "unsafe\n")
+    traversal_payload = traversal_buffer.getvalue()
+    with pytest.raises(LifecycleError, match="unsafe traversal|payload"):
+        lifecycle._windows_installer_text(
+            traversal_payload, hashlib.sha256(traversal_payload).hexdigest()
+        )
+    assert not (tmp_path / "escaped.txt").exists()
+
+    rollback_destination = tmp_path / "profile rollback destination"
+    rollback_environment = dict(environment)
+    rollback_environment["ORACLE_INSTALLER_DEST"] = str(rollback_destination)
+    rollback_environment["ORACLE_INSTALLER_PROFILE"] = "does-not-exist"
+    rolled_back = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=rollback_environment,
+        check=False,
+    )
+    assert rolled_back.returncode != 0
+    assert "unknown model profile" in rolled_back.stdout
+    assert not rollback_destination.exists()
+
+    forged = tmp_path / "forged owned tree"
+    put(
+        forged,
+        ".oracle-installer-payload.sha256",
+        hashlib.sha256(payload).hexdigest() + "\n",
+    )
+    sentinel = tmp_path / "forged-child-ran.txt"
+    put(
+        forged,
+        "bin/oracle.ps1",
+        f"[IO.File]::WriteAllText('{sentinel}', 'unsafe')\nexit 0\n",
+    )
+    put(forged, "incoming/dependency-cache/manifest.json", "{}\n")
+    forged_environment = dict(environment)
+    forged_environment.pop("ORACLE_INSTALLER_SKIP_SETUP")
+    forged_environment["ORACLE_INSTALLER_DEST"] = str(forged)
+    forged_run = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=forged_environment,
+        check=False,
+    )
+    assert forged_run.returncode != 0
+    assert "immutable source file" in forged_run.stdout
+    assert not sentinel.exists()
+
+    extra_tree = tmp_path / "tree with unmanifested executable"
+    extra_environment = dict(environment)
+    extra_environment["ORACLE_INSTALLER_DEST"] = str(extra_tree)
+    installed_extra_tree = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=extra_environment,
+        check=False,
+    )
+    assert installed_extra_tree.returncode == 0
+    extra_sentinel = tmp_path / "unmanifested-python-ran.txt"
+    put(
+        extra_tree,
+        ".tools/bin/python.cmd",
+        f'@echo off\r\necho unsafe>"{extra_sentinel}"\r\nexit /b 0\r\n',
+    )
+    extra_environment.pop("ORACLE_INSTALLER_SKIP_SETUP")
+    refused_child_execution = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=extra_environment,
+        check=False,
+    )
+    assert refused_child_execution.returncode == 0
+    assert "child setup was not re-executed" in refused_child_execution.stdout
+    assert not extra_sentinel.exists()
+
+    setup_sentinel = tmp_path / "partial-setup-side-effect.txt"
+    escaped_sentinel = str(setup_sentinel).replace("'", "''")
+    _tar_failure, failure_payload, _failure_files = one_click_payloads(
+        {
+            "bin/oracle.ps1": (
+                f"[IO.File]::WriteAllText('{escaped_sentinel}', 'partial')\nexit 19\n"
+            ).encode("ascii"),
+            "bootstrap/uninstall.ps1": (
+                "param([switch]$Apply,[string]$Root,[string]$HomePath)\n"
+                f"Remove-Item -LiteralPath '{escaped_sentinel}' -Force -ErrorAction SilentlyContinue\n"
+                "exit 0\n"
+            ).encode("ascii"),
+            "incoming/dependency-cache/manifest.json": b'{"schema_version":1,"artifacts":[]}\n',
+        }
+    )
+    failure_installer = installer_dir / "setup-failure.cmd"
+    failure_installer.write_text(
+        lifecycle._windows_installer_text(
+            failure_payload,
+            hashlib.sha256(failure_payload).hexdigest(),
+        ),
+        encoding="ascii",
+    )
+    failure_destination = tmp_path / "setup failure destination"
+    failure_environment = dict(environment)
+    failure_environment.pop("ORACLE_INSTALLER_SKIP_SETUP")
+    failure_environment["ORACLE_INSTALLER_DEST"] = str(failure_destination)
+    failed_setup = subprocess.run(
+        ["cmd", "/d", "/c", str(failure_installer)],
+        text=True,
+        capture_output=True,
+        env=failure_environment,
+        check=False,
+    )
+    assert failed_setup.returncode != 0
+    assert "installer child setup failed" in failed_setup.stdout
+    assert not failure_destination.exists()
+    assert not setup_sentinel.exists(), failed_setup.stdout + failed_setup.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows one-click behavior")
+@pytest.mark.parametrize(
+    "profiles",
+    [
+        (
+            b"full|2|fixture|fixture|fixture|fixture|0 GB\n"
+            b"full|1|fixture|fixture|fixture|fixture|0 GB\n"
+        ),
+        b"full|invalid|fixture|fixture|fixture|fixture|0 GB\n",
+        b"full|1|fixture|outside|fixture|fixture|0 GB\n",
+        b"full|1|fixture,fixture|fixture|fixture|fixture|0 GB\n",
+    ],
+)
+def test_windows_installer_rejects_malformed_or_ambiguous_profiles(
+    tmp_path: Path,
+    profiles: bytes,
+) -> None:
+    _tar_payload, payload, files = one_click_payloads(
+        {"serving/profiles.conf": profiles}
+    )
+    installer = put(
+        tmp_path,
+        "malformed-profile.cmd",
+        lifecycle._windows_installer_text(
+            payload,
+            hashlib.sha256(payload).hexdigest(),
+            lifecycle._installer_source_manifest(files),
+        ).encode("ascii"),
+    )
+    destination = tmp_path / "must not publish"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "ORACLE_INSTALLER_DEST": str(destination),
+            "ORACLE_INSTALLER_PROFILE": "full",
+            "ORACLE_INSTALLER_SKIP_SETUP": "1",
+        }
+    )
+
+    result = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "serving profile" in result.stdout
+    assert not destination.exists()
+
+
+def test_one_click_builders_publish_native_unsigned_artifacts_honestly() -> None:
+    windows = (REPO_ROOT / "bootstrap/build-one-click-installers.ps1").read_text(
+        encoding="ascii"
+    )
+    mac = (REPO_ROOT / "bootstrap/build-one-click-installers.sh").read_text(
+        encoding="utf-8"
+    )
+    package = (REPO_ROOT / "bootstrap/build-macos-package.sh").read_text(
+        encoding="utf-8"
+    )
+    workflow = (REPO_ROOT / ".github/workflows/installers.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"installers",' in windows
+    assert '"--revision", $Revision' in windows
+    assert "ARGS=(installers " in mac
+    assert '"$ROOT/verification/lifecycle.py" "${ARGS[@]}"' in mac
+    assert 'ORACLE_PYTHON="$PYTHON_BIN"' in mac
+    assert "build-macos-package.sh" in mac
+    assert "pkgbuild" in package
+    assert "--nopayload" in package
+    assert "ORACLE_INSTALLER_SKIP_SETUP=1" in package
+    assert "checked-out package builder differs from immutable source" in package
+    assert "base dependency sidecar is missing or invalid" in package
+    assert 'if [[ "$DEPENDENCY_BUNDLE_NAME" != "-" ]]' in package
+    assert '"code_signing": "unsigned"' in package
+    assert '"notarization": "not-notarized"' in package
+    assert "windows-latest" in workflow
+    assert "macos-latest" in workflow
+    assert "Require byte-identical cross-platform output" in workflow
+    assert "Publish immutable GitHub release assets" in workflow
+    assert "installer-package-macos" in workflow
+    assert "installer-release-final" in workflow
+    assert "RELEASE-SHA256SUMS" in workflow
+    assert "Refuse public artifact publication" in workflow
+    assert "ORACLE_DEPENDENCY_RELEASE_TAG" in workflow
+    assert "ORACLE_DEPENDENCY_ASSET_SHA256" in workflow
+    assert "-DependencyCache $env:ORACLE_RELEASE_DEPENDENCY_CACHE" in workflow
+    assert '--dependency-cache "$ORACLE_RELEASE_DEPENDENCY_CACHE"' in workflow
+    assert "github.ref_name }}\"" not in workflow
 
 
 def test_review_source_provenance_discloses_protected_builder_transform(
@@ -1886,15 +2598,15 @@ def test_review_source_provenance_discloses_protected_builder_transform(
 
     bundle = build_source_archives(root, revision, tmp_path / "out", "v1.2.3")
     with tarfile.open(bundle.archives[0], "r:gz") as archive:
-        member = archive.extractfile(
-            "sentivue-oracle/SOURCE-PROVENANCE.json"
-        )
+        member = archive.extractfile("sentivue-oracle/SOURCE-PROVENANCE.json")
         assert member is not None
         provenance = json.loads(member.read().decode("utf-8"))
 
     disclosure = provenance["protected_builder_transform"]
     assert disclosure["id"] == lifecycle.INSTALLER_HARDENING_TRANSFORM
-    assert disclosure["source_sha256"] == hashlib.sha256(builder.read_bytes()).hexdigest()
+    assert (
+        disclosure["source_sha256"] == hashlib.sha256(builder.read_bytes()).hexdigest()
+    )
     assert disclosure["required_after_protected_builder"] is True
     assert "applied_after_protected_builder" not in disclosure
 
@@ -2015,10 +2727,7 @@ def promote_fixture_models(
             ],
         }
     serialized = (
-        json.dumps(
-            {"schema_version": 1, "models": authorities}, sort_keys=True
-        )
-        + "\n"
+        json.dumps({"schema_version": 1, "models": authorities}, sort_keys=True) + "\n"
     )
     put(
         root,
@@ -2149,9 +2858,9 @@ def test_second_review_renderers_resolve_only_validated_model_paths() -> None:
     shared = (REPO_ROOT / "verification/serving.py").read_text(encoding="utf-8")
 
     assert "serving/service.sh" in posix
-    assert "find \"models/$1\"" not in posix
+    assert 'find "models/$1"' not in posix
     assert "verification\\serving.py" in windows
-    assert "Get-ChildItem $modelDir -Filter \"*.gguf\"" not in windows
+    assert 'Get-ChildItem $modelDir -Filter "*.gguf"' not in windows
     assert "validate_policy_bound_models" in shared
     assert "snapshots[name].paths" in shared
 
@@ -2243,16 +2952,19 @@ def test_second_review_source_install_rejects_modified_existing_checkout(
         expected_version=revision,
         expected_requested_version=revision,
     )
-    assert lifecycle.validate_source_install(
-        root,
-        cache / "manifest.json",
-        cache,
-        "source-test",
-        destination,
-        trusted_root=root,
-        expected_version=revision,
-        expected_requested_version=revision,
-    ) == []
+    assert (
+        lifecycle.validate_source_install(
+            root,
+            cache / "manifest.json",
+            cache,
+            "source-test",
+            destination,
+            trusted_root=root,
+            expected_version=revision,
+            expected_requested_version=revision,
+        )
+        == []
+    )
 
     (destination / "tool.txt").write_text("locally changed\n", encoding="utf-8")
     assert any(
@@ -2509,10 +3221,8 @@ def test_second_review_state_mutations_check_lexical_root_before_resolution(
 def test_second_review_transformed_installer_writer_checks_reparse_paths(
     tmp_path: Path,
 ) -> None:
-    windows = put(
-        tmp_path,
-        "installer.cmd",
-        b"""@echo off
+    _tar_payload, zip_payload, _files = one_click_payloads()
+    old_installer = """@echo off
 #==PSPAYLOAD==#
 $ErrorActionPreference = "Stop"
 if ($sel.Name -eq "full") { Remove-Item (Join-Path $dest "serving\\models.profile") -ErrorAction SilentlyContinue }
@@ -2522,8 +3232,12 @@ Set-Content -Path (Join-Path $dest "serving\\tiers.env") -Value @("OPUS_MODEL=$(
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bootstrap\\download-models.ps1")
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $dest "bin\\oracle.ps1") setup
 #==B64PAYLOAD==#
-UEFZTE9BRA==
-""",
+__PAYLOAD__
+""".replace("__PAYLOAD__", base64.b64encode(zip_payload).decode("ascii"))
+    windows = put(
+        tmp_path,
+        "installer.cmd",
+        old_installer,
     )
     lifecycle._harden_built_installer(windows)
     hardened = windows.read_text(encoding="ascii")
@@ -2601,7 +3315,9 @@ def test_second_review_preflight_rebuilds_before_reusing_local_metadata(
         _version: str,
         destination: Path,
         _revision: str,
+        dependency_cache: Path | None = None,
     ) -> lifecycle.ReleaseBundle:
+        assert dependency_cache == root / "incoming" / "dependency-cache"
         builds.append(destination)
         archives = [
             put(destination, "source.zip", b"authoritative"),
@@ -2675,7 +3391,7 @@ def test_review_publication_resumes_tag_only_and_pushed_tag_states(
     assert not any(command[:2] == ["git", "tag"] for command in commands)
     pushes = [command for command in commands if command[:2] == ["git", "push"]]
     assert bool(pushes) is (not remote_tag_exists)
-    assert any(command[:3] == ["gh", "release", "create"] for command in commands)
+    assert not any(command[:2] == ["gh", "release"] for command in commands)
     assert not any(
         "--force" in command or "--clobber" in command or "delete" in command
         for command in commands
@@ -2714,8 +3430,13 @@ def test_review_release_preflight_reuses_complete_verified_bundle(
     rebuilt: list[Path] = []
 
     def rebuild(
-        _root: Path, _version: str, destination: Path, _revision: str
+        _root: Path,
+        _version: str,
+        destination: Path,
+        _revision: str,
+        dependency_cache: Path | None = None,
     ) -> lifecycle.ReleaseBundle:
+        assert dependency_cache == root / "incoming" / "dependency-cache"
         rebuilt.append(destination)
         expected_archives = [
             put(destination, path.name, path.read_bytes()) for path in artifacts
@@ -2725,9 +3446,7 @@ def test_review_release_preflight_reuses_complete_verified_bundle(
             revision=revision,
             output_dir=destination,
             archives=expected_archives,
-            checksums=put(
-                destination, "SHA256SUMS", bundle.checksums.read_bytes()
-            ),
+            checksums=put(destination, "SHA256SUMS", bundle.checksums.read_bytes()),
             provenance=put(
                 destination, "PROVENANCE.json", bundle.provenance.read_bytes()
             ),
@@ -2753,9 +3472,7 @@ def test_review_release_rejects_dirty_dependency_authority(
     put(root, "serving/models.manifest", "# fixture\n")
     put(root, "env/uv.lock", "version = 1\nrevision = 3\n")
     revision = init_repository(root)
-    (root / "VERSIONS.lock").write_text(
-        "TOOL_VERSION=attacker\n", encoding="utf-8"
-    )
+    (root / "VERSIONS.lock").write_text("TOOL_VERSION=attacker\n", encoding="utf-8")
 
     with pytest.raises(LifecycleError, match="differs from immutable revision"):
         lifecycle._require_release_inputs_match_revision(root, revision)
@@ -2857,9 +3574,7 @@ def test_third_review_source_install_confines_lexical_paths_and_supports_spaces(
     )
     destination = trusted / "component with spaces"
 
-    installed = install_fixture_source(
-        root, trusted, cache, destination, revision
-    )
+    installed = install_fixture_source(root, trusted, cache, destination, revision)
 
     assert installed == destination
     assert (destination / "tool.txt").read_bytes() == b"version one\n"
@@ -2885,9 +3600,7 @@ def test_third_review_source_install_rejects_symlink_ancestor(
         pytest.skip(f"directory symlinks unavailable: {exc}")
 
     with pytest.raises(LifecycleError, match="reparse|symbolic"):
-        install_fixture_source(
-            root, trusted, cache, linked / "component", revision
-        )
+        install_fixture_source(root, trusted, cache, linked / "component", revision)
     assert list(outside.iterdir()) == []
 
 
@@ -2929,24 +3642,16 @@ def test_third_review_source_install_preserves_unowned_and_modified_trees(
     unowned = trusted / "unowned"
     put(unowned, "user.txt", b"user data")
     with pytest.raises(LifecycleError, match="unowned"):
-        install_fixture_source(
-            root, trusted, cache, unowned, first_revision
-        )
+        install_fixture_source(root, trusted, cache, unowned, first_revision)
     assert (unowned / "user.txt").read_bytes() == b"user data"
 
     destination = trusted / "owned"
-    install_fixture_source(
-        root, trusted, cache, destination, first_revision
-    )
+    install_fixture_source(root, trusted, cache, destination, first_revision)
     (destination / "tool.txt").write_bytes(b"locally modified\n")
     second_revision = "b" * 40
-    source_install_fixture(
-        tmp_path, revision=second_revision, content=b"version two\n"
-    )
+    source_install_fixture(tmp_path, revision=second_revision, content=b"version two\n")
     with pytest.raises(LifecycleError, match="modified"):
-        install_fixture_source(
-            root, trusted, cache, destination, second_revision
-        )
+        install_fixture_source(root, trusted, cache, destination, second_revision)
     assert (destination / "tool.txt").read_bytes() == b"locally modified\n"
 
 
@@ -2959,23 +3664,15 @@ def test_third_review_source_install_upgrades_idempotently_and_rolls_back(
         tmp_path, revision=first_revision, content=b"version one\n"
     )
     destination = trusted / "component with spaces"
-    install_fixture_source(
-        root, trusted, cache, destination, first_revision
-    )
+    install_fixture_source(root, trusted, cache, destination, first_revision)
 
     second_revision = "b" * 40
-    source_install_fixture(
-        tmp_path, revision=second_revision, content=b"version two\n"
-    )
-    install_fixture_source(
-        root, trusted, cache, destination, second_revision
-    )
+    source_install_fixture(tmp_path, revision=second_revision, content=b"version two\n")
+    install_fixture_source(root, trusted, cache, destination, second_revision)
     assert (destination / "tool.txt").read_bytes() == b"version two\n"
     receipt_before = (destination / lifecycle.SOURCE_RECEIPT).read_bytes()
     tool_mtime = (destination / "tool.txt").stat().st_mtime_ns
-    install_fixture_source(
-        root, trusted, cache, destination, second_revision
-    )
+    install_fixture_source(root, trusted, cache, destination, second_revision)
     assert (destination / lifecycle.SOURCE_RECEIPT).read_bytes() == receipt_before
     assert (destination / "tool.txt").stat().st_mtime_ns == tool_mtime
 
@@ -2995,9 +3692,7 @@ def test_third_review_source_install_upgrades_idempotently_and_rolls_back(
 
     monkeypatch.setattr(lifecycle.os, "replace", fail_new_tree_once)
     with pytest.raises(OSError, match="simulated replacement"):
-        install_fixture_source(
-            root, trusted, cache, destination, third_revision
-        )
+        install_fixture_source(root, trusted, cache, destination, third_revision)
     assert (destination / "tool.txt").read_bytes() == b"version two\n"
     lifecycle.preflight_source_install(
         root,
@@ -3020,13 +3715,9 @@ def test_final_task2_failed_upgrade_cleans_only_restored_empty_backup(
         tmp_path, revision=first_revision, content=b"version one\n"
     )
     destination = trusted / "component"
-    install_fixture_source(
-        root, trusted, cache, destination, first_revision
-    )
+    install_fixture_source(root, trusted, cache, destination, first_revision)
     second_revision = "b" * 40
-    source_install_fixture(
-        tmp_path, revision=second_revision, content=b"version two\n"
-    )
+    source_install_fixture(tmp_path, revision=second_revision, content=b"version two\n")
     original_replace = lifecycle.os.replace
     failed = False
 
@@ -3039,9 +3730,7 @@ def test_final_task2_failed_upgrade_cleans_only_restored_empty_backup(
 
     monkeypatch.setattr(lifecycle.os, "replace", fail_upgrade_once)
     with pytest.raises(OSError, match="simulated upgrade failure"):
-        install_fixture_source(
-            root, trusted, cache, destination, second_revision
-        )
+        install_fixture_source(root, trusted, cache, destination, second_revision)
 
     assert (destination / "tool.txt").read_bytes() == b"version one\n"
     backup_pattern = f".{destination.name}.backup-*"
@@ -3060,15 +3749,11 @@ def test_final_task2_failed_upgrade_cleans_only_restored_empty_backup(
         fail_upgrade_and_rollback,
     )
     with pytest.raises(OSError, match="simulated rollback failure"):
-        install_fixture_source(
-            root, trusted, cache, destination, second_revision
-        )
+        install_fixture_source(root, trusted, cache, destination, second_revision)
 
     backups = list(destination.parent.glob(backup_pattern))
     assert len(backups) == 1
-    assert (
-        backups[0] / "previous" / "tool.txt"
-    ).read_bytes() == b"version one\n"
+    assert (backups[0] / "previous" / "tool.txt").read_bytes() == b"version one\n"
     assert not destination.exists()
 
 
@@ -3236,9 +3921,7 @@ def test_third_review_promotion_rejects_incomplete_expected_authority(
     put(
         root,
         "VERSIONS.lock",
-        "TOOL_VERSION=unresolved\n"
-        "TOOL_RESOLVED=unresolved\n"
-        "TOOL_SHA256=unresolved\n",
+        "TOOL_VERSION=unresolved\nTOOL_RESOLVED=unresolved\nTOOL_SHA256=unresolved\n",
     )
     put(
         root,
@@ -3298,13 +3981,9 @@ def test_third_review_release_rebuild_is_time_deterministic(
     put(root, "README.md", "fixture\n")
     put(root, "src/main.py", "VALUE = 1\n")
     revision = init_repository(root)
-    first = build_source_archives(
-        root, revision, tmp_path / "first output", "v1.2.3"
-    )
+    first = build_source_archives(root, revision, tmp_path / "first output", "v1.2.3")
     time.sleep(0.02)
-    second = build_source_archives(
-        root, revision, tmp_path / "second output", "v1.2.3"
-    )
+    second = build_source_archives(root, revision, tmp_path / "second output", "v1.2.3")
 
     first_files = {
         path.name: path.read_bytes()
@@ -3338,9 +4017,10 @@ def test_third_review_installer_synthetic_commit_uses_source_epoch(
 ) -> None:
     root = tmp_path / "repository"
     root.mkdir()
-    add_package_policy(root, ["bootstrap"])
+    add_package_policy(root, ["bootstrap", "verification"])
     put(root, "README.md", "fixture\n")
     put(root, "bootstrap/build-installers.ps1", "# protected fixture\n")
+    put(root, "verification/lifecycle.py", "# lifecycle fixture\n")
     revision = init_repository(root)
     output = tmp_path / "output"
     output.mkdir()
@@ -3359,8 +4039,16 @@ def test_third_review_installer_synthetic_commit_uses_source_epoch(
         invocations.append((list(argv), env))
         if argv[0] == "fixture-powershell":
             built = Path(argv[argv.index("-OutDir") + 1])
-            put(built, "SentiVue-Oracle-Installer-v1.2.3.command", b"mac")
-            put(built, "SentiVue-Oracle-Setup-v1.2.3.cmd", b"windows")
+            put(
+                built,
+                "SentiVue-Oracle-Installer-v1.2.3.command",
+                b"#!/bin/bash\nbash install || true\n__PAYLOAD_BELOW__\nold",
+            )
+            put(
+                built,
+                "SentiVue-Oracle-Setup-v1.2.3.cmd",
+                b"@echo off\r\n#==B64PAYLOAD==#\r\nb2xk\r\n",
+            )
             return subprocess.CompletedProcess(argv, 0, "", "")
         return original_checked(
             argv, cwd=cwd, text=text, input_data=input_data, env=env
@@ -3371,7 +4059,7 @@ def test_third_review_installer_synthetic_commit_uses_source_epoch(
     monkeypatch.setattr(
         lifecycle,
         "_harden_built_installer",
-        lambda path: {
+        lambda path, **_kwargs: {
             "id": lifecycle.INSTALLER_HARDENING_TRANSFORM,
             "artifact": path.name,
             "changes": ["fixture"],
@@ -3395,6 +4083,7 @@ def test_third_review_installer_synthetic_commit_uses_source_epoch(
 def test_third_review_transform_provenance_names_reparse_containment(
     tmp_path: Path,
 ) -> None:
+    _tar_payload, zip_payload, _files = one_click_payloads()
     windows = put(
         tmp_path,
         "installer.cmd",
@@ -3410,6 +4099,13 @@ Set-Content -Path (Join-Path $dest "serving\\tiers.env") -Value @("OPUS_MODEL=$(
 #==B64PAYLOAD==#
 UEFZTE9BRA==
 """,
+    )
+    windows.write_text(
+        windows.read_text(encoding="ascii").replace(
+            "UEFZTE9BRA==",
+            base64.b64encode(zip_payload).decode("ascii"),
+        ),
+        encoding="ascii",
     )
 
     transform = lifecycle._harden_built_installer(windows)
@@ -3440,7 +4136,9 @@ def test_third_review_source_callers_preflight_inside_explicit_trusted_root(
     assert source.index("preflight-source") < source.index("install-source")
 
 
-def test_final_review_engine_sync_uses_declared_profile_tiers_and_active_models() -> None:
+def test_final_review_engine_sync_uses_declared_profile_tiers_and_active_models() -> (
+    None
+):
     profile = lifecycle.resolve_sync_profile(
         (
             "full | 448 | huge,other,fast,embed | other | huge | fast | ~700 GB\n"
@@ -3488,6 +4186,8 @@ def test_final_review_model_authority_binds_layer_metadata(tmp_path: Path) -> No
 
     assert authority["layer_mib"] == [5, 6, 7]
     assert authority["kv_mib_per_token"] == 0.125
-    assert lifecycle._model_authority_digest(authority) != lifecycle._model_authority_digest(
+    assert lifecycle._model_authority_digest(
+        authority
+    ) != lifecycle._model_authority_digest(
         {key: value for key, value in authority.items() if key != "layer_mib"}
     )

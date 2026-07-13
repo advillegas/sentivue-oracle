@@ -1163,13 +1163,13 @@ def _parse_yaml_subset(text: str) -> None:
         if not raw.strip() or raw.lstrip().startswith("#"):
             continue
         indent = len(raw) - len(raw.lstrip(" "))
-        content = _yaml_content_without_comment(raw[indent:])
-        if not content:
-            continue
         if block_parent is not None:
             if indent > block_parent:
                 continue
             block_parent = None
+        content = _yaml_content_without_comment(raw[indent:])
+        if not content:
+            continue
         if content in {"---", "..."}:
             continue
         if not seen_content:

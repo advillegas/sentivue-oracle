@@ -1,0 +1,420 @@
+name: one-click-installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version (vX.Y.Z)
+        required: true
+        default: v0.2.0
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: one-click-installers-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  private-repository:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse public artifact publication
+        env:
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        shell: bash
+        run: |
+          [[ "$REPOSITORY_VISIBILITY" == "private" ]] || {
+            echo "Installer builds and releases are disabled unless the repository is private." >&2
+            exit 1
+          }
+
+  windows:
+    needs: private-repository
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve version
+        env:
+          ORACLE_REF_TYPE: ${{ github.ref_type }}
+          ORACLE_REF_NAME: ${{ github.ref_name }}
+          ORACLE_INPUT_VERSION: ${{ inputs.version }}
+        shell: powershell
+        run: |
+          $version = if ($env:ORACLE_REF_TYPE -eq "tag") {
+            $env:ORACLE_REF_NAME
+          } else {
+            $env:ORACLE_INPUT_VERSION
+          }
+          if ($version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$') {
+            throw "invalid release version: $version"
+          }
+          "ORACLE_RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Fetch policy-bound full-offline dependency export
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORACLE_DEPENDENCY_RELEASE_TAG: ${{ vars.ORACLE_DEPENDENCY_RELEASE_TAG }}
+          ORACLE_DEPENDENCY_ASSET_NAME: ${{ vars.ORACLE_DEPENDENCY_ASSET_NAME }}
+          ORACLE_DEPENDENCY_ASSET_SHA256: ${{ vars.ORACLE_DEPENDENCY_ASSET_SHA256 }}
+          ORACLE_REPOSITORY: ${{ github.repository }}
+        shell: powershell
+        run: |
+          if (
+            $env:ORACLE_DEPENDENCY_RELEASE_TAG -notmatch '^dependencies-v[0-9A-Za-z.-]+$' -or
+            $env:ORACLE_DEPENDENCY_ASSET_NAME -notmatch '^SentiVue-Oracle-Dependency-Export-[0-9A-Za-z.-]+\.zip$' -or
+            $env:ORACLE_DEPENDENCY_ASSET_SHA256 -notmatch '^[0-9a-f]{64}$'
+          ) {
+            throw "full-offline dependency release variables are missing or invalid"
+          }
+          $download = Join-Path $env:RUNNER_TEMP "dependency-export-download"
+          $cache = Join-Path $env:RUNNER_TEMP "dependency-cache"
+          New-Item -ItemType Directory -Force -Path $download | Out-Null
+          gh release download $env:ORACLE_DEPENDENCY_RELEASE_TAG `
+            --repo $env:ORACLE_REPOSITORY `
+            --pattern $env:ORACLE_DEPENDENCY_ASSET_NAME `
+            --dir $download
+          $archive = Join-Path $download $env:ORACLE_DEPENDENCY_ASSET_NAME
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:ORACLE_DEPENDENCY_ASSET_SHA256) {
+            throw "full-offline dependency export digest mismatch"
+          }
+          python -c "import sys; from pathlib import Path; from verification.lifecycle import _extract_source_archive; _extract_source_archive(Path(sys.argv[1]), Path(sys.argv[2]))" $archive $cache
+          python verification/lifecycle.py validate-dependencies `
+            --root . --manifest "$cache\manifest.json" --cache $cache `
+            --reproducible --exclude-models --include-optional
+          "ORACLE_RELEASE_DEPENDENCY_CACHE=$cache" >> $env:GITHUB_ENV
+      - name: Build both immutable installers
+        shell: powershell
+        run: |
+          .\bootstrap\build-one-click-installers.ps1 `
+            -Version $env:ORACLE_RELEASE_VERSION `
+            -Revision $env:GITHUB_SHA `
+            -DependencyCache $env:ORACLE_RELEASE_DEPENDENCY_CACHE `
+            -OutDir "$env:RUNNER_TEMP\installer bundle"
+      - name: Exercise Windows clean install and rerun
+        shell: powershell
+        run: |
+          $installer = Get-ChildItem "$env:RUNNER_TEMP\installer bundle\*.cmd" |
+            Select-Object -ExpandProperty FullName -First 1
+          $env:ORACLE_INSTALLER_DEST = "$env:RUNNER_TEMP\installed tree with spaces"
+          $env:ORACLE_INSTALLER_PROFILE = "micro"
+          $env:ORACLE_INSTALLER_SKIP_SETUP = "1"
+          foreach ($pass in 1..2) {
+            $process = Start-Process cmd.exe `
+              -ArgumentList @("/d", "/c", "`"$installer`"") `
+              -Wait -PassThru -NoNewWindow
+            if ($process.ExitCode -ne 0) {
+              throw "Windows installer pass $pass failed: $($process.ExitCode)"
+            }
+          }
+          if (-not (Test-Path "$env:ORACLE_INSTALLER_DEST\ARTIFACTS.json")) {
+            throw "Windows installer did not publish the source tree"
+          }
+          Set-Content -LiteralPath "$env:ORACLE_INSTALLER_DEST\README.md" `
+            -Value "local modification"
+          $modified = Start-Process cmd.exe `
+            -ArgumentList @("/d", "/c", "`"$installer`"") `
+            -Wait -PassThru -NoNewWindow
+          if ($modified.ExitCode -eq 0) {
+            throw "Windows installer accepted a modified existing tree"
+          }
+          if ((Get-Content -LiteralPath "$env:ORACLE_INSTALLER_DEST\README.md" -Raw) -notmatch "local modification") {
+            throw "Windows installer overwrote a modified existing tree"
+          }
+          $outside = "$env:RUNNER_TEMP\outside junction target"
+          $junction = "$env:RUNNER_TEMP\junction destination"
+          New-Item -ItemType Directory -Force -Path $outside | Out-Null
+          cmd /d /c "mklink /J `"$junction`" `"$outside`""
+          $env:ORACLE_INSTALLER_DEST = $junction
+          $reparse = Start-Process cmd.exe `
+            -ArgumentList @("/d", "/c", "`"$installer`"") `
+            -Wait -PassThru -NoNewWindow
+          if ($reparse.ExitCode -eq 0 -or (Get-ChildItem -LiteralPath $outside -Force)) {
+            throw "Windows installer did not reject a reparse destination"
+          }
+          $tampered = "$env:RUNNER_TEMP\tampered installer bundle"
+          Copy-Item -LiteralPath "$env:RUNNER_TEMP\installer bundle" `
+            -Destination $tampered -Recurse
+          $tamperedInstaller = Get-ChildItem "$tampered\*.cmd" |
+            Select-Object -ExpandProperty FullName -First 1
+          $dependency = Get-ChildItem "$tampered\SentiVue-Oracle-Dependencies-*.zip" |
+            Select-Object -ExpandProperty FullName -First 1
+          [IO.File]::AppendAllText($dependency, "tampered")
+          $env:ORACLE_INSTALLER_DEST = "$env:RUNNER_TEMP\tampered dependency destination"
+          $tamperResult = Start-Process cmd.exe `
+            -ArgumentList @("/d", "/c", "`"$tamperedInstaller`"") `
+            -Wait -PassThru -NoNewWindow
+          if ($tamperResult.ExitCode -eq 0 -or (Test-Path $env:ORACLE_INSTALLER_DEST)) {
+            throw "Windows installer accepted a tampered dependency sidecar"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-bundle-windows
+          path: ${{ runner.temp }}/installer bundle/*
+          if-no-files-found: error
+
+  macos:
+    needs: private-repository
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve version
+        env:
+          ORACLE_REF_TYPE: ${{ github.ref_type }}
+          ORACLE_REF_NAME: ${{ github.ref_name }}
+          ORACLE_INPUT_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          if [[ "$ORACLE_REF_TYPE" == "tag" ]]; then
+            version="$ORACLE_REF_NAME"
+          else
+            version="$ORACLE_INPUT_VERSION"
+          fi
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid release version: $version" >&2
+            exit 1
+          }
+          printf 'ORACLE_RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+      - name: Fetch policy-bound full-offline dependency export
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORACLE_DEPENDENCY_RELEASE_TAG: ${{ vars.ORACLE_DEPENDENCY_RELEASE_TAG }}
+          ORACLE_DEPENDENCY_ASSET_NAME: ${{ vars.ORACLE_DEPENDENCY_ASSET_NAME }}
+          ORACLE_DEPENDENCY_ASSET_SHA256: ${{ vars.ORACLE_DEPENDENCY_ASSET_SHA256 }}
+          ORACLE_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$ORACLE_DEPENDENCY_RELEASE_TAG" =~ ^dependencies-v[0-9A-Za-z.-]+$ ]]
+          [[ "$ORACLE_DEPENDENCY_ASSET_NAME" =~ ^SentiVue-Oracle-Dependency-Export-[0-9A-Za-z.-]+\.zip$ ]]
+          [[ "$ORACLE_DEPENDENCY_ASSET_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          download="$RUNNER_TEMP/dependency-export-download"
+          cache="$RUNNER_TEMP/dependency-cache"
+          mkdir -p "$download"
+          gh release download "$ORACLE_DEPENDENCY_RELEASE_TAG" \
+            --repo "$ORACLE_REPOSITORY" \
+            --pattern "$ORACLE_DEPENDENCY_ASSET_NAME" \
+            --dir "$download"
+          archive="$download/$ORACLE_DEPENDENCY_ASSET_NAME"
+          [[ "$(shasum -a 256 "$archive" | awk '{print $1}')" == \
+              "$ORACLE_DEPENDENCY_ASSET_SHA256" ]]
+          python -c 'import sys; from pathlib import Path; from verification.lifecycle import _extract_source_archive; _extract_source_archive(Path(sys.argv[1]), Path(sys.argv[2]))' \
+            "$archive" "$cache"
+          python verification/lifecycle.py validate-dependencies \
+            --root . --manifest "$cache/manifest.json" --cache "$cache" \
+            --reproducible --exclude-models --include-optional
+          printf 'ORACLE_RELEASE_DEPENDENCY_CACHE=%s\n' "$cache" >> "$GITHUB_ENV"
+      - name: Build both immutable installers
+        shell: bash
+        run: |
+          bash bootstrap/build-one-click-installers.sh \
+            --version "$ORACLE_RELEASE_VERSION" \
+            --revision "$GITHUB_SHA" \
+            --dependency-cache "$ORACLE_RELEASE_DEPENDENCY_CACHE" \
+            --output "$RUNNER_TEMP/installer bundle"
+      - name: Exercise macOS clean install and rerun
+        shell: bash
+        run: |
+          archive="$(find "$RUNNER_TEMP/installer bundle" -maxdepth 1 -name '*.command.zip' -print -quit)"
+          mkdir "$RUNNER_TEMP/downloaded installer"
+          ditto -x -k "$archive" "$RUNNER_TEMP/downloaded installer"
+          installer="$(find "$RUNNER_TEMP/downloaded installer" -maxdepth 1 -name '*.command' -print -quit)"
+          test -x "$installer"
+          export ORACLE_INSTALLER_DEST="$RUNNER_TEMP/installed tree with spaces"
+          export ORACLE_INSTALLER_SKIP_SETUP=1
+          "$installer"
+          "$installer"
+          test -f "$ORACLE_INSTALLER_DEST/ARTIFACTS.json"
+          printf 'local modification\n' > "$ORACLE_INSTALLER_DEST/README.md"
+          if "$installer"; then
+            echo "macOS installer accepted a modified existing tree" >&2
+            exit 1
+          fi
+          grep -q "local modification" "$ORACLE_INSTALLER_DEST/README.md"
+          outside="$RUNNER_TEMP/outside symlink target"
+          linked="$RUNNER_TEMP/symlink destination"
+          mkdir "$outside"
+          ln -s "$outside" "$linked"
+          export ORACLE_INSTALLER_DEST="$linked"
+          if "$installer" || find "$outside" -mindepth 1 -print -quit | grep -q .; then
+            echo "macOS installer did not reject a symlink destination" >&2
+            exit 1
+          fi
+          tampered="$RUNNER_TEMP/tampered installer bundle"
+          cp -R "$RUNNER_TEMP/installer bundle" "$tampered"
+          tampered_installer="$(find "$tampered" -maxdepth 1 -name '*.command' -print -quit)"
+          dependency="$(find "$tampered" -maxdepth 1 -name 'SentiVue-Oracle-Dependencies-*.zip' -print -quit)"
+          printf 'tampered' >> "$dependency"
+          export ORACLE_INSTALLER_DEST="$RUNNER_TEMP/tampered dependency destination"
+          if "$tampered_installer" || [[ -e "$ORACLE_INSTALLER_DEST" ]]; then
+            echo "macOS installer accepted a tampered dependency sidecar" >&2
+            exit 1
+          fi
+      - name: Build and inspect unsigned macOS package
+        shell: bash
+        run: |
+          package="$(find "$RUNNER_TEMP/installer bundle-macos-package" -maxdepth 1 -name '*.pkg' -print -quit)"
+          pkgutil --expand-full "$package" "$RUNNER_TEMP/expanded package"
+          test -x "$RUNNER_TEMP/expanded package/Scripts/postinstall"
+          test -f "$RUNNER_TEMP/expanded package/Scripts/one-click.command"
+          (
+            cd "$RUNNER_TEMP/expanded package/Scripts"
+            shasum -a 256 -c one-click.command.sha256
+          )
+          base_command="$(find "$RUNNER_TEMP/installer bundle" -maxdepth 1 -name '*.command' -print -quit)"
+          cmp "$RUNNER_TEMP/expanded package/Scripts/one-click.command" "$base_command"
+          dependency_name="$(
+            python -c 'import json,sys; print(json.load(open(sys.argv[1]))["dependency_cache"]["bundle_name"])' \
+              "$RUNNER_TEMP/installer bundle/PROVENANCE.json"
+          )"
+          test -f "$RUNNER_TEMP/expanded package/Scripts/$dependency_name"
+          cmp "$RUNNER_TEMP/expanded package/Scripts/$dependency_name" \
+            "$RUNNER_TEMP/installer bundle/$dependency_name"
+          sudo rm -rf "/Applications/SentiVue Oracle"
+          sudo installer -pkg "$package" -target /
+          sudo installer -pkg "$package" -target /
+          test -f "/Applications/SentiVue Oracle/ARTIFACTS.json"
+          sudo rm -rf "/Applications/SentiVue Oracle"
+          set +e
+          signature="$(pkgutil --check-signature "$package" 2>&1)"
+          status=$?
+          set -e
+          [[ "$status" -ne 0 ]]
+          [[ "$signature" == *"no signature"* || "$signature" == *"not signed"* ]]
+      - name: Bind every asset into final release provenance
+        shell: bash
+        run: |
+          python verification/lifecycle.py finalize-installers \
+            --base "$RUNNER_TEMP/installer bundle" \
+            --package "$RUNNER_TEMP/installer bundle-macos-package" \
+            --output "$RUNNER_TEMP/final release"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-bundle-macos
+          path: ${{ runner.temp }}/installer bundle/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-package-macos
+          path: ${{ runner.temp }}/installer bundle-macos-package/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-release-final
+          path: ${{ runner.temp }}/final release/*
+          if-no-files-found: error
+
+  reproducibility:
+    runs-on: ubuntu-latest
+    needs: [windows, macos]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-bundle-windows
+          path: windows
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-bundle-macos
+          path: macos
+      - name: Require byte-identical cross-platform output
+        shell: bash
+        run: diff -rq windows macos
+
+  publish:
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    needs: [reproducibility, macos]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: installer-release-final
+          path: release
+      - name: Publish immutable GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORACLE_RELEASE_TAG: ${{ github.ref_name }}
+          ORACLE_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$ORACLE_RELEASE_TAG"
+          repo="$ORACLE_REPOSITORY"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
+            echo "invalid release tag: $tag" >&2
+            exit 1
+          }
+          [[ "$(gh api "repos/$repo" --jq '.private')" == "true" ]] || {
+            echo "refusing installer publication from a public repository" >&2
+            exit 1
+          }
+          if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo "$repo" \
+              --verify-tag \
+              --draft \
+              --title "SentiVue Oracle $tag" \
+              --notes "One-click Windows (.cmd), macOS (.command.zip), and fixed-path source-only macOS (.pkg) installers. These artifacts are currently unsigned; the macOS artifacts are not notarized. Verify RELEASE-SHA256SUMS before opening."
+          fi
+
+          declare -A local_digest=()
+          declare -A local_path=()
+          for path in release/*; do
+            name="$(basename "$path")"
+            [[ -z "${local_path[$name]:-}" ]] || {
+              echo "duplicate local release asset: $name" >&2
+              exit 1
+            }
+            local_path[$name]="$path"
+            local_digest[$name]="$(sha256sum "$path" | awk '{print $1}')"
+          done
+
+          metadata="$(gh release view "$tag" --repo "$repo" --json isDraft,assets)"
+          while IFS=$'\t' read -r name digest; do
+            [[ -n "${local_path[$name]:-}" ]] || {
+              echo "release contains unexpected asset: $name" >&2
+              exit 1
+            }
+            digest="${digest#sha256:}"
+            [[ "$digest" == "${local_digest[$name]}" ]] || {
+              echo "release asset digest mismatch: $name" >&2
+              exit 1
+            }
+            unset 'local_path[$name]'
+          done < <(jq -r '.assets[] | [.name, .digest] | @tsv' <<< "$metadata")
+
+          if [[ "$(jq -r '.isDraft' <<< "$metadata")" == "false" &&
+                "${#local_path[@]}" -ne 0 ]]; then
+            echo "published release is incomplete and will not be mutated" >&2
+            exit 1
+          fi
+          for name in "${!local_path[@]}"; do
+            gh release upload "$tag" "${local_path[$name]}" --repo "$repo"
+          done
+
+          metadata="$(gh release view "$tag" --repo "$repo" --json isDraft,assets)"
+          for name in "${!local_digest[@]}"; do
+            remote="$(jq -r --arg name "$name" '.assets[] | select(.name == $name) | .digest' <<< "$metadata")"
+            remote="${remote#sha256:}"
+            [[ "$remote" == "${local_digest[$name]}" ]] || {
+              echo "uploaded release asset failed verification: $name" >&2
+              exit 1
+            }
+          done
+          [[ "$(jq '.assets | length' <<< "$metadata")" -eq "${#local_digest[@]}" ]] || {
+            echo "release asset set is incomplete" >&2
+            exit 1
+          }
+          if [[ "$(jq -r '.isDraft' <<< "$metadata")" == "true" ]]; then
+            gh release edit "$tag" --repo "$repo" --draft=false
+          fi

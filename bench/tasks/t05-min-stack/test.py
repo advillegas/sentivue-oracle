@@ -15,7 +15,9 @@ for name in ("pop", "peek", "minimum"):
     except IndexError:
         pass
 
-s.push(5); s.push(3); s.push(7)
+s.push(5)
+s.push(3)
+s.push(7)
 assert s.minimum() == 3 and s.peek() == 7 and len(s) == 3
 assert s.pop() == 7
 assert s.minimum() == 3
@@ -24,7 +26,9 @@ assert s.minimum() == 5
 
 # duplicate minimums must survive one pop of the min
 s2 = MinStack()
-s2.push(2); s2.push(2); s2.push(9)
+s2.push(2)
+s2.push(2)
+s2.push(9)
 s2.pop()
 assert s2.minimum() == 2
 s2.pop()

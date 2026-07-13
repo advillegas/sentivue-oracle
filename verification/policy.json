@@ -542,6 +542,11 @@
       "reason": "Builds both self-extracting release formats with Windows packaging tools."
     },
     {
+      "path": "bootstrap/build-macos-package.sh",
+      "platform": "macos",
+      "reason": "Uses macOS pkgbuild to wrap the verified source installer in an unsigned package."
+    },
+    {
       "path": "bootstrap/envoy.sh",
       "platform": "posix",
       "reason": "Controls the POSIX firewall window and process trap for the envoy."

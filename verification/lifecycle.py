@@ -29,8 +29,9 @@ import time
 import tomllib
 import urllib.parse
 import urllib.request
+import unicodedata
 import zipfile
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -46,8 +47,16 @@ VERSION_PATTERN = re.compile(
     r"^v?[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?$"
 )
 PORTABLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-reparse-v2"
+INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-reparse-v3"
 DEPENDENCY_AUTHORITY_FILE = "verification/dependency-authorities.json"
+WINDOWS_RESERVED_NAMES = {
+    "aux",
+    "con",
+    "nul",
+    "prn",
+    *(f"com{number}" for number in range(1, 10)),
+    *(f"lpt{number}" for number in range(1, 10)),
+}
 
 HARD_EXCLUDED_PARTS = {
     ".agent",
@@ -270,7 +279,9 @@ def quote_command_argument(value: str, platform: str) -> str:
     """Quote one argv element for the shell used by a llama-swap command."""
 
     if not value or any(ord(character) < 32 for character in value):
-        raise LifecycleError("command argument is empty or contains a control character")
+        raise LifecycleError(
+            "command argument is empty or contains a control character"
+        )
     if platform == "posix":
         return shlex.quote(value)
     if platform == "windows":
@@ -295,20 +306,42 @@ def validate_relative_path(value: str) -> str:
         raise LifecycleError(f"unsafe absolute path: {value!r}")
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise LifecycleError(f"unsafe control character in path: {value!r}")
+    if unicodedata.normalize("NFC", value) != value:
+        raise LifecycleError(f"unsafe non-NFC path: {value!r}")
     path = PurePosixPath(value)
     if any(part in {"", ".", ".."} for part in path.parts):
         raise LifecycleError(f"unsafe traversal path: {value!r}")
+    for part in path.parts:
+        if ":" in part or part.endswith((" ", ".")):
+            raise LifecycleError(f"unsafe non-portable path component: {value!r}")
+        stem = part.split(".", 1)[0].casefold()
+        if stem in WINDOWS_RESERVED_NAMES:
+            raise LifecycleError(f"unsafe reserved path component: {value!r}")
     normalized = path.as_posix()
     if normalized != value or normalized.startswith("../"):
         raise LifecycleError(f"unsafe non-canonical path: {value!r}")
     return normalized
 
 
+def _validate_portable_path_set(paths: Iterable[str]) -> None:
+    seen: dict[str, str] = {}
+    for value in paths:
+        validate_relative_path(value)
+        key = "/".join(
+            unicodedata.normalize("NFC", part).casefold()
+            for part in PurePosixPath(value).parts
+        )
+        previous = seen.get(key)
+        if previous is not None and previous != value:
+            raise LifecycleError(
+                f"portable path collision between {previous!r} and {value!r}"
+            )
+        seen[key] = value
+
+
 def _validate_version(version: str) -> str:
     if not VERSION_PATTERN.fullmatch(version):
-        raise LifecycleError(
-            "version must be a new semantic version such as v1.2.3"
-        )
+        raise LifecycleError("version must be a new semantic version such as v1.2.3")
     return version
 
 
@@ -544,7 +577,9 @@ def _model_authorities(root: Path) -> dict[str, dict[str, Any]]:
             or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name)
             or not isinstance(raw, dict)
         ):
-            raise LifecycleError("model authority policy contains an invalid model entry")
+            raise LifecycleError(
+                "model authority policy contains an invalid model entry"
+            )
         repository = raw.get("repository")
         revision = raw.get("revision")
         include = raw.get("include")
@@ -575,9 +610,7 @@ def _model_authorities(root: Path) -> dict[str, dict[str, Any]]:
                 or not raw_layers
                 or len(raw_layers) > 1000
                 or any(
-                    not isinstance(value, int)
-                    or isinstance(value, bool)
-                    or value <= 0
+                    not isinstance(value, int) or isinstance(value, bool) or value <= 0
                     for value in raw_layers
                 )
             ):
@@ -613,13 +646,9 @@ def _model_authorities(root: Path) -> dict[str, dict[str, Any]]:
                 or isinstance(size, bool)
                 or size < 0
             ):
-                raise LifecycleError(
-                    f"model authority {name} file {index} is invalid"
-                )
+                raise LifecycleError(f"model authority {name} file {index} is invalid")
             seen.add(relative)
-            normalized_files.append(
-                {"path": relative, "sha256": digest, "size": size}
-            )
+            normalized_files.append({"path": relative, "sha256": digest, "size": size})
         normalized_authority = {
             "repository": repository,
             "revision": revision,
@@ -782,9 +811,7 @@ def _authoritative_source_url(
     )
 
 
-def _trusted_digest(
-    source: Mapping[str, Any], versions: Mapping[str, str]
-) -> str:
+def _trusted_digest(source: Mapping[str, Any], versions: Mapping[str, str]) -> str:
     key = source.get("artifact_digest_key", source.get("digest_key"))
     if not isinstance(key, str):
         return ""
@@ -794,9 +821,7 @@ def _trusted_digest(
     return value
 
 
-def _trusted_revision(
-    source: Mapping[str, Any], versions: Mapping[str, str]
-) -> str:
+def _trusted_revision(source: Mapping[str, Any], versions: Mapping[str, str]) -> str:
     key = source.get("revision_key")
     return versions.get(key, "") if isinstance(key, str) else ""
 
@@ -842,9 +867,7 @@ def _dependency_policy_errors(
         if trust_key is None:
             continue
         if not isinstance(trust_key, str) or trust_key not in versions:
-            errors.append(
-                f"bootstrap_trust_roots[{index}] has a missing version key"
-            )
+            errors.append(f"bootstrap_trust_roots[{index}] has a missing version key")
             continue
         declared_version_keys.add(trust_key)
         if not _is_exact_pin(versions[trust_key]):
@@ -968,20 +991,129 @@ def _source_manifest_entries(
     ]
 
 
+def _validated_dependency_cache_entries(
+    root: Path,
+    dependency_cache: Path,
+) -> tuple[list[GitEntry], dict[str, Any]]:
+    cache_root = dependency_cache.resolve()
+    manifest_path = cache_root / "manifest.json"
+    if (
+        not cache_root.is_dir()
+        or _is_reparse_point(cache_root)
+        or not manifest_path.is_file()
+        or _is_reparse_point(manifest_path)
+    ):
+        raise LifecycleError(
+            "full-offline dependency export is missing or has an unsafe manifest"
+        )
+    validation = validate_dependency_inputs(
+        root,
+        artifact_manifest=manifest_path,
+        cache_root=cache_root,
+        reproducible=True,
+        include_models=False,
+        include_optional=True,
+    )
+    if validation:
+        raise LifecycleError(
+            "full-offline dependency export is not policy-bound: "
+            + "; ".join(validation)
+        )
+    records, record_errors = _load_artifact_records(manifest_path)
+    if record_errors:
+        raise LifecycleError(
+            "full-offline dependency export manifest is invalid: "
+            + "; ".join(record_errors)
+        )
+    try:
+        policy = json.loads(
+            (root / "verification" / "policy.json").read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError("full-offline dependency policy is unreadable") from exc
+    raw_inputs = policy.get("dependency_inputs", []) if isinstance(policy, dict) else []
+    artifact_ids = sorted(
+        str(item["id"])
+        for item in raw_inputs
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    )
+    if not artifact_ids or any(item.startswith("model:") for item in artifact_ids):
+        raise LifecycleError("full-offline dependency policy has an invalid artifact set")
+    missing = [artifact_id for artifact_id in artifact_ids if artifact_id not in records]
+    if missing:
+        raise LifecycleError(
+            "full-offline dependency export is incomplete: " + ", ".join(missing)
+        )
+
+    entries: list[GitEntry] = []
+    included_records = [records[artifact_id] for artifact_id in artifact_ids]
+    filtered_manifest = _json_bytes(
+        {
+            "schema_version": SCHEMA_VERSION,
+            "artifacts": [record.to_payload() for record in included_records],
+        }
+    )
+    manifest_relative = "incoming/dependency-cache/manifest.json"
+    entries.append(GitEntry(manifest_relative, "", 0o100644, filtered_manifest))
+    seen_paths: set[str] = set()
+    for record in included_records:
+        relative = validate_relative_path(record.cache_path)
+        if relative in seen_paths:
+            raise LifecycleError(
+                "full-offline dependency export reuses a cached file path"
+            )
+        seen_paths.add(relative)
+        source = cache_root
+        for component in PurePosixPath(relative).parts:
+            source = source / component
+            if _is_reparse_point(source):
+                raise LifecycleError(
+                    "full-offline dependency export contains a symlink or reparse point"
+                )
+        if not source.is_file():
+            raise LifecycleError(
+                f"full-offline dependency export file is missing: {relative}"
+            )
+        data = source.read_bytes()
+        if (
+            _is_reparse_point(source)
+            or len(data) != record.size
+            or _sha256_bytes(data) != record.sha256
+        ):
+            raise LifecycleError(
+                f"full-offline dependency export changed during build: {relative}"
+            )
+        entries.append(
+            GitEntry(
+                f"incoming/dependency-cache/{relative}",
+                "",
+                0o100644,
+                data,
+            )
+        )
+    _validate_portable_path_set(entry.path for entry in entries)
+    metadata = {
+        "artifact_ids": artifact_ids,
+        "embedded": True,
+        "manifest_path": manifest_relative,
+        "manifest_sha256": _sha256_bytes(filtered_manifest),
+        "models_embedded": False,
+    }
+    return entries, metadata
+
+
 def _prepare_archive_entries(
-    root: Path, revision: str
+    root: Path,
+    revision: str,
 ) -> tuple[list[GitEntry], dict[str, Any], dict[str, Any]]:
     policy = _load_json_blob(root, revision, "verification/policy.json")
     selected = _filter_package_entries(_git_entries(root, revision), policy)
+    _validate_portable_path_set(entry.path for entry in selected)
     versions_blob = next(
         (entry.data for entry in selected if entry.path == "VERSIONS.lock"), b""
     )
     models_blob = next(
-        (
-            entry.data
-            for entry in selected
-            if entry.path == "serving/models.manifest"
-        ),
+        (entry.data for entry in selected if entry.path == "serving/models.manifest"),
         b"",
     )
     versions, version_errors = _parse_versions_text(
@@ -996,11 +1128,7 @@ def _prepare_archive_entries(
     if dependency_errors:
         raise LifecycleError("; ".join(dependency_errors))
     authority_blob = next(
-        (
-            entry.data
-            for entry in selected
-            if entry.path == DEPENDENCY_AUTHORITY_FILE
-        ),
+        (entry.data for entry in selected if entry.path == DEPENDENCY_AUTHORITY_FILE),
         b"",
     )
     if authority_blob:
@@ -1027,9 +1155,7 @@ def _prepare_archive_entries(
                 raise LifecycleError(
                     f"{artifact_id}: immutable authority has no policy entry"
                 )
-            _validate_dependency_authority_policy(
-                versions, raw, authority
-            )
+            _validate_dependency_authority_policy(versions, raw, authority)
     selected_by_path = {entry.path: entry for entry in selected}
     if "env/pyproject.toml" in selected_by_path:
         lock_entry = selected_by_path.get("env/uv.lock")
@@ -1088,9 +1214,7 @@ def _tar_mode(entry: GitEntry) -> int:
     return 0o755 if entry.mode & 0o111 else 0o644
 
 
-def _write_tar_gz(
-    path: Path, entries: Sequence[GitEntry], timestamp: int
-) -> None:
+def _write_tar_gz(path: Path, entries: Sequence[GitEntry], timestamp: int) -> None:
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
@@ -1098,8 +1222,12 @@ def _write_tar_gz(
     temporary = Path(temporary_name)
     try:
         with temporary.open("wb") as raw:
-            with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=timestamp) as zipped:
-                with tarfile.open(fileobj=zipped, mode="w", format=tarfile.PAX_FORMAT) as archive:
+            with gzip.GzipFile(
+                filename="", mode="wb", fileobj=raw, mtime=timestamp
+            ) as zipped:
+                with tarfile.open(
+                    fileobj=zipped, mode="w", format=tarfile.PAX_FORMAT
+                ) as archive:
                     for entry in entries:
                         info = tarfile.TarInfo(f"{PRODUCT_PREFIX}/{entry.path}")
                         info.size = len(entry.data)
@@ -1149,6 +1277,52 @@ def _write_zip(path: Path, entries: Sequence[GitEntry], timestamp: int) -> None:
             pass
 
 
+def _write_command_zip(path: Path, command: Path, timestamp: int) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    date_time = time.gmtime(max(timestamp, 315532800))[:6]
+    try:
+        with zipfile.ZipFile(
+            temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+        ) as archive:
+            info = zipfile.ZipInfo(command.name, date_time=date_time)
+            info.create_system = 3
+            info.external_attr = (0o755 | stat.S_IFREG) << 16
+            info.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(info, command.read_bytes())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _write_dependency_bundle(
+    root: Path,
+    dependency_cache: Path,
+    output_dir: Path,
+    version: str,
+    timestamp: int,
+) -> tuple[Path, dict[str, Any]]:
+    entries, metadata = _validated_dependency_cache_entries(root, dependency_cache)
+    bundle = output_dir / f"SentiVue-Oracle-Dependencies-{version}.zip"
+    if bundle.exists():
+        raise LifecycleError(f"refusing to overwrite existing artifact: {bundle}")
+    _write_zip(bundle, entries, timestamp)
+    disclosure = {
+        **metadata,
+        "bundle_format": "zip-sidecar",
+        "bundle_name": bundle.name,
+        "bundle_sha256": _sha256_file(bundle),
+        "bundle_size": bundle.stat().st_size,
+    }
+    return bundle, disclosure
+
+
 def _artifact_payload(paths: Sequence[Path]) -> list[dict[str, Any]]:
     return [
         {
@@ -1166,8 +1340,13 @@ def _write_release_metadata(
     revision: str,
     artifacts: Sequence[Path],
     source_timestamp: int,
+    builder_sha256: str,
+    builder_source_bound: bool = True,
     build_transforms: Sequence[Mapping[str, Any]] = (),
+    dependency_cache: Mapping[str, Any] | None = None,
 ) -> tuple[Path, Path]:
+    if not SHA256_PATTERN.fullmatch(builder_sha256):
+        raise LifecycleError("release builder digest is invalid")
     provenance = output_dir / "PROVENANCE.json"
     checksums = output_dir / "SHA256SUMS"
     payload = {
@@ -1180,9 +1359,27 @@ def _write_release_metadata(
             .replace("+00:00", "Z")
         ),
         "artifacts": _artifact_payload(artifacts),
-        "builder": "verification/lifecycle.py",
+        "builder": {
+            "path": "verification/lifecycle.py",
+            "sha256": builder_sha256,
+            "immutable_source": builder_source_bound,
+        },
         "build_transforms": [dict(item) for item in build_transforms],
+        "installer_trust": {
+            "windows": {
+                "format": "cmd",
+                "code_signing": "unsigned",
+            },
+            "macos": {
+                "format": "command",
+                "code_signing": "unsigned",
+                "notarization": "not-notarized",
+            },
+            "verification": "Verify SHA256SUMS from a separately trusted channel.",
+        },
     }
+    if dependency_cache is not None:
+        payload["dependency_cache"] = dict(dependency_cache)
     atomic_write_bytes(provenance, _json_bytes(payload))
     checksum_targets = sorted([*artifacts, provenance], key=lambda item: item.name)
     checksum_text = "".join(
@@ -1190,6 +1387,148 @@ def _write_release_metadata(
     )
     atomic_write_text(checksums, checksum_text)
     return checksums, provenance
+
+
+def finalize_installer_release(
+    base_dir: Path,
+    package_dir: Path,
+    output_dir: Path,
+) -> tuple[Path, Path]:
+    """Create one canonical manifest covering the base bundle and macOS package."""
+
+    base = verify_release_bundle(base_dir)
+    package_files = sorted(path for path in package_dir.resolve().iterdir() if path.is_file())
+    packages = [path for path in package_files if path.suffix == ".pkg"]
+    if len(packages) != 1:
+        raise LifecycleError("final release requires exactly one macOS package")
+    package = packages[0]
+    package_provenance = package.with_name(f"{package.name}.provenance.json")
+    package_checksums = package.with_name(f"{package.name}.sha256")
+    if set(package_files) != {package, package_provenance, package_checksums}:
+        raise LifecycleError("macOS package directory has missing or unexpected files")
+    try:
+        package_payload = json.loads(package_provenance.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError("macOS package provenance is invalid") from exc
+    try:
+        base_payload = json.loads(base.provenance.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError("base release provenance is invalid") from exc
+    source_archive = base.output_dir / f"{PRODUCT_PREFIX}-{base.version}.zip"
+    command_installer = (
+        base.output_dir / f"SentiVue-Oracle-Installer-{base.version}.command"
+    )
+    try:
+        with zipfile.ZipFile(source_archive) as archive:
+            immutable_package_builder = archive.read(
+                f"{PRODUCT_PREFIX}/bootstrap/build-macos-package.sh"
+            )
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise LifecycleError(
+            "base release lacks the immutable macOS package builder"
+        ) from exc
+    base_builder = base_payload.get("builder")
+    if not isinstance(base_builder, dict):
+        raise LifecycleError("base release builder provenance is invalid")
+    base_dependency = base_payload.get("dependency_cache")
+    expected_package_dependency_name = (
+        str(base_dependency.get("bundle_name"))
+        if isinstance(base_dependency, dict)
+        else "-"
+    )
+    expected_package_dependency_sha256 = (
+        str(base_dependency.get("bundle_sha256"))
+        if isinstance(base_dependency, dict)
+        else "-"
+    )
+    package_manifest = _read_checksum_manifest(package_checksums)
+    if (
+        not isinstance(package_payload, dict)
+        or package_payload.get("schema_version") != SCHEMA_VERSION
+        or package_payload.get("version") != base.version
+        or package_payload.get("source_revision") != base.revision
+        or package_payload.get("artifact") != package.name
+        or package_payload.get("sha256") != _sha256_file(package)
+        or package_payload.get("base_provenance_sha256")
+        != _sha256_file(base.provenance)
+        or package_payload.get("base_checksums_sha256")
+        != _sha256_file(base.checksums)
+        or package_payload.get("base_builder_sha256")
+        != base_builder.get("sha256")
+        or package_payload.get("package_builder_sha256")
+        != _sha256_bytes(immutable_package_builder)
+        or package_payload.get("embedded_installer") != command_installer.name
+        or package_payload.get("embedded_installer_sha256")
+        != _sha256_file(command_installer)
+        or package_payload.get("dependency_bundle")
+        != expected_package_dependency_name
+        or package_payload.get("dependency_bundle_sha256")
+        != expected_package_dependency_sha256
+        or package_payload.get("code_signing") != "unsigned"
+        or package_payload.get("notarization") != "not-notarized"
+        or package_manifest
+        != {
+            package.name: _sha256_file(package),
+            package_provenance.name: _sha256_file(package_provenance),
+        }
+    ):
+        raise LifecycleError("macOS package provenance is not bound to the base release")
+
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if any(output_dir.iterdir()):
+        raise LifecycleError("final release output directory must be empty")
+    source_paths = [
+        *(path for path in base.output_dir.iterdir() if path.is_file()),
+        package,
+        package_provenance,
+        package_checksums,
+    ]
+    if len({path.name for path in source_paths}) != len(source_paths):
+        raise LifecycleError("final release contains duplicate asset names")
+    copied: list[Path] = []
+    for source in sorted(source_paths, key=lambda item: item.name):
+        destination = output_dir / source.name
+        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream)
+            output_stream.flush()
+            os.fsync(output_stream.fileno())
+        if _sha256_file(destination) != _sha256_file(source):
+            raise LifecycleError(f"final release copy verification failed: {source.name}")
+        copied.append(destination)
+
+    final_provenance = output_dir / "RELEASE-PROVENANCE.json"
+    final_checksums = output_dir / "RELEASE-SHA256SUMS"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "version": base.version,
+        "source_revision": base.revision,
+        "base_provenance_sha256": _sha256_file(base.provenance),
+        "package_provenance_sha256": _sha256_file(package_provenance),
+        "artifacts": _artifact_payload(copied),
+        "installer_trust": {
+            "code_signing": "unsigned",
+            "macos_notarization": "not-notarized",
+        },
+    }
+    atomic_write_bytes(final_provenance, _json_bytes(payload))
+    checksum_targets = sorted([*copied, final_provenance], key=lambda item: item.name)
+    atomic_write_text(
+        final_checksums,
+        "".join(
+            f"{_sha256_file(path)}  {path.name}\n" for path in checksum_targets
+        ),
+    )
+    recorded = _read_checksum_manifest(final_checksums)
+    actual = {
+        path.name for path in output_dir.iterdir() if path.is_file()
+    } - {final_checksums.name}
+    if set(recorded) != actual or any(
+        _sha256_file(output_dir / name) != digest
+        for name, digest in recorded.items()
+    ):
+        raise LifecycleError("final release checksum verification failed")
+    return final_checksums, final_provenance
 
 
 def build_source_archives(
@@ -1215,12 +1554,20 @@ def build_source_archives(
     _write_tar_gz(tar_path, entries, timestamp)
     _write_zip(zip_path, entries, timestamp)
     artifacts = [tar_path, zip_path]
+    builder_entry = next(
+        (entry for entry in entries if entry.path == "verification/lifecycle.py"),
+        None,
+    )
     checksums, provenance = _write_release_metadata(
         output_dir,
         version,
         resolved,
         artifacts,
         timestamp,
+        _sha256_bytes(
+            builder_entry.data if builder_entry is not None else Path(__file__).read_bytes()
+        ),
+        builder_source_bound=builder_entry is not None,
     )
     return ReleaseBundle(
         version=version,
@@ -1235,17 +1582,21 @@ def build_source_archives(
 def _read_checksum_manifest(path: Path) -> dict[str, str]:
     entries: dict[str, str] = {}
     try:
-        lines = path.read_text(encoding="ascii").splitlines()
+        data = path.read_bytes()
+        text = data.decode("ascii")
     except (OSError, UnicodeDecodeError) as exc:
         raise LifecycleError(f"{path.name}: unreadable checksum manifest") from exc
+    if not text or not text.endswith("\n") or "\r" in text:
+        raise LifecycleError(f"{path.name}: checksum manifest is not canonical")
+    lines = text[:-1].split("\n")
     for line_number, line in enumerate(lines, 1):
-        if not line:
-            continue
-        digest, separator, relative = line.partition("  ")
-        if not separator or not SHA256_PATTERN.fullmatch(digest):
-            raise LifecycleError(
-                f"{path.name}:{line_number}: invalid checksum entry"
-            )
+        match = re.fullmatch(
+            r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*)",
+            line,
+        )
+        if match is None:
+            raise LifecycleError(f"{path.name}:{line_number}: invalid checksum entry")
+        digest, relative = match.groups()
         validate_relative_path(relative)
         if "/" in relative or relative in entries:
             raise LifecycleError(
@@ -1257,20 +1608,31 @@ def _read_checksum_manifest(path: Path) -> dict[str, str]:
     return entries
 
 
-def _archive_source_names(path: Path) -> set[str]:
-    names: set[str] = set()
+def _archive_source_files(path: Path) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
     if path.name.endswith(".tar.gz"):
         try:
             with tarfile.open(path, "r:gz") as archive:
                 members = archive.getmembers()
                 for member in members:
-                    if member.issym() or member.islnk():
-                        raise LifecycleError(f"{path.name}: archive contains a link")
-                    if not member.isfile():
+                    if member.isdir():
                         continue
+                    if not member.isfile() or member.issym() or member.islnk():
+                        raise LifecycleError(
+                            f"{path.name}: archive contains a link or special entry"
+                        )
                     name = member.name
                     validate_relative_path(name)
-                    names.add(name)
+                    if name in files:
+                        raise LifecycleError(
+                            f"{path.name}: archive contains a duplicate member"
+                        )
+                    stream = archive.extractfile(member)
+                    if stream is None:
+                        raise LifecycleError(
+                            f"{path.name}: archive member is unreadable"
+                        )
+                    files[name] = stream.read()
         except (tarfile.TarError, OSError) as exc:
             raise LifecycleError(f"{path.name}: invalid tar archive") from exc
     elif path.suffix.lower() == ".zip":
@@ -1282,22 +1644,142 @@ def _archive_source_names(path: Path) -> set[str]:
                     name = info.filename
                     validate_relative_path(name)
                     unix_type = (info.external_attr >> 16) & 0o170000
-                    if unix_type == stat.S_IFLNK:
-                        raise LifecycleError(f"{path.name}: archive contains a link")
-                    names.add(name)
+                    if unix_type not in {0, stat.S_IFREG}:
+                        raise LifecycleError(
+                            f"{path.name}: archive contains a link or special entry"
+                        )
+                    if name in files:
+                        raise LifecycleError(
+                            f"{path.name}: archive contains a duplicate member"
+                        )
+                    files[name] = archive.read(info)
         except (zipfile.BadZipFile, OSError) as exc:
             raise LifecycleError(f"{path.name}: invalid zip archive") from exc
-    for name in names:
+    else:
+        raise LifecycleError(f"{path.name}: unsupported source archive format")
+    _validate_portable_path_set(files)
+    for name in files:
         prefix = f"{PRODUCT_PREFIX}/"
         if not name.startswith(prefix):
             raise LifecycleError(f"{path.name}: member is outside product prefix")
         relative = name[len(prefix) :]
         if _hard_excluded(relative):
             raise LifecycleError(f"{path.name}: prohibited member {relative}")
-    return names
+    return files
 
 
-def _smoke_installer(path: Path) -> None:
+def _archive_source_names(path: Path) -> set[str]:
+    return set(_archive_source_files(path))
+
+
+def _verify_dependency_bundle(
+    path: Path,
+    disclosure: Mapping[str, Any],
+) -> None:
+    expected_fields = {
+        "artifact_ids",
+        "bundle_format",
+        "bundle_name",
+        "bundle_sha256",
+        "bundle_size",
+        "embedded",
+        "manifest_path",
+        "manifest_sha256",
+        "models_embedded",
+    }
+    artifact_ids = disclosure.get("artifact_ids")
+    if (
+        set(disclosure) != expected_fields
+        or disclosure.get("embedded") is not True
+        or disclosure.get("models_embedded") is not False
+        or disclosure.get("bundle_format") != "zip-sidecar"
+        or disclosure.get("bundle_name") != path.name
+        or disclosure.get("bundle_sha256") != _sha256_file(path)
+        or disclosure.get("bundle_size") != path.stat().st_size
+        or disclosure.get("manifest_path")
+        != "incoming/dependency-cache/manifest.json"
+        or not isinstance(artifact_ids, list)
+        or not artifact_ids
+        or any(
+            not isinstance(item, str)
+            or not PORTABLE_ID_PATTERN.fullmatch(item)
+            or item.startswith("model:")
+            for item in artifact_ids
+        )
+        or artifact_ids != sorted(set(artifact_ids))
+    ):
+        raise LifecycleError("release dependency-cache disclosure is invalid")
+
+    files: dict[str, bytes] = {}
+    prefix = f"{PRODUCT_PREFIX}/"
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                name = validate_relative_path(info.filename)
+                unix_type = (info.external_attr >> 16) & 0o170000
+                if unix_type not in {0, stat.S_IFREG} or not name.startswith(prefix):
+                    raise LifecycleError(
+                        "dependency bundle contains a link or unsafe member"
+                    )
+                relative = name[len(prefix) :]
+                if not relative.startswith("incoming/dependency-cache/"):
+                    raise LifecycleError(
+                        "dependency bundle contains a file outside its cache root"
+                    )
+                if relative in files:
+                    raise LifecycleError("dependency bundle contains a duplicate member")
+                files[relative] = archive.read(info)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise LifecycleError("dependency bundle is not a valid ZIP archive") from exc
+    _validate_portable_path_set(files)
+
+    manifest_path = str(disclosure["manifest_path"])
+    manifest_bytes = files.get(manifest_path)
+    if (
+        manifest_bytes is None
+        or disclosure.get("manifest_sha256") != _sha256_bytes(manifest_bytes)
+    ):
+        raise LifecycleError("dependency bundle manifest binding is invalid")
+    try:
+        payload = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError("dependency bundle manifest is invalid") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(payload.get("artifacts"), list)
+    ):
+        raise LifecycleError("dependency bundle manifest has an unsupported schema")
+    expected_paths = {manifest_path}
+    recorded_ids: list[str] = []
+    for raw in payload["artifacts"]:
+        if not isinstance(raw, dict):
+            raise LifecycleError("dependency bundle record is malformed")
+        try:
+            record = ArtifactRecord.from_payload(raw)
+        except (TypeError, ValueError) as exc:
+            raise LifecycleError("dependency bundle record is malformed") from exc
+        relative = validate_relative_path(record.cache_path)
+        bundled_path = f"incoming/dependency-cache/{relative}"
+        data = files.get(bundled_path)
+        if (
+            record.trust != "policy-bound"
+            or data is None
+            or record.size != len(data)
+            or record.sha256 != _sha256_bytes(data)
+        ):
+            raise LifecycleError(
+                f"dependency bundle record is invalid: {record.artifact_id}"
+            )
+        recorded_ids.append(record.artifact_id)
+        expected_paths.add(bundled_path)
+    if recorded_ids != artifact_ids or set(files) != expected_paths:
+        raise LifecycleError("dependency bundle file set disagrees with disclosure")
+
+
+def _smoke_installer(path: Path) -> tuple[bytes, dict[str, bytes]]:
     if path.suffix.lower() == ".command":
         data = path.read_bytes()
         if INSTALLER_HARDENING_TRANSFORM.encode("ascii") not in data:
@@ -1309,16 +1791,19 @@ def _smoke_installer(path: Path) -> None:
         if position < 0:
             raise LifecycleError(f"{path.name}: installer payload marker is missing")
         payload = data[position + len(marker) :]
-        try:
-            with tempfile.SpooledTemporaryFile() as temporary:
-                temporary.write(payload)
-                temporary.seek(0)
-                with tarfile.open(fileobj=temporary, mode="r:gz") as archive:
-                    names = [item.name for item in archive if item.isfile()]
-        except tarfile.TarError as exc:
-            raise LifecycleError(f"{path.name}: embedded tar is invalid") from exc
-        if f"{PRODUCT_PREFIX}/ARTIFACTS.json" not in names:
-            raise LifecycleError(f"{path.name}: embedded artifact manifest is missing")
+        digest_match = re.search(
+            rb'^EXPECTED_PAYLOAD_SHA256="([0-9a-f]{64})"$',
+            data[:position],
+            flags=re.MULTILINE,
+        )
+        if digest_match is None or digest_match.group(1).decode(
+            "ascii"
+        ) != _sha256_bytes(payload):
+            raise LifecycleError(
+                f"{path.name}: embedded tar SHA-256 binding is invalid"
+            )
+        files = _installer_payload_files(payload, ".command")
+        return payload, files
     elif path.suffix.lower() == ".cmd":
         data = path.read_bytes()
         if INSTALLER_HARDENING_TRANSFORM.encode("ascii") not in data:
@@ -1332,15 +1817,21 @@ def _smoke_installer(path: Path) -> None:
         encoded = re.sub(rb"[^A-Za-z0-9+/=]", b"", data[position + len(marker) :])
         try:
             payload = base64.b64decode(encoded, validate=True)
-            with tempfile.SpooledTemporaryFile() as temporary:
-                temporary.write(payload)
-                temporary.seek(0)
-                with zipfile.ZipFile(temporary) as archive:
-                    names = archive.namelist()
-        except (binascii.Error, zipfile.BadZipFile) as exc:
+        except binascii.Error as exc:
             raise LifecycleError(f"{path.name}: embedded zip is invalid") from exc
-        if f"{PRODUCT_PREFIX}/ARTIFACTS.json" not in names:
-            raise LifecycleError(f"{path.name}: embedded artifact manifest is missing")
+        files = _installer_payload_files(payload, ".cmd")
+        digest_match = re.search(
+            rb'\$ExpectedPayloadSha256 = "([0-9a-f]{64})"',
+            data[:position],
+        )
+        if digest_match is None or digest_match.group(1).decode(
+            "ascii"
+        ) != _sha256_bytes(payload):
+            raise LifecycleError(
+                f"{path.name}: embedded zip SHA-256 binding is invalid"
+            )
+        return payload, files
+    raise LifecycleError(f"{path.name}: unsupported installer format")
 
 
 def verify_release_bundle(output_dir: Path) -> ReleaseBundle:
@@ -1352,6 +1843,11 @@ def verify_release_bundle(output_dir: Path) -> ReleaseBundle:
     if not checksums_path.is_file() or not provenance_path.is_file():
         raise LifecycleError("release bundle lacks SHA256SUMS or PROVENANCE.json")
     expected = _read_checksum_manifest(checksums_path)
+    actual_names = {
+        path.name for path in output_dir.iterdir() if path.is_file()
+    }
+    if actual_names != set(expected) | {"SHA256SUMS"}:
+        raise LifecycleError("release directory has missing or unexpected files")
     for name, digest in expected.items():
         path = output_dir / name
         if not path.is_file():
@@ -1373,12 +1869,16 @@ def verify_release_bundle(output_dir: Path) -> ReleaseBundle:
     if not isinstance(records, list) or not records:
         raise LifecycleError("PROVENANCE.json has no artifact records")
     assets: list[Path] = []
+    recorded_names: set[str] = set()
     for payload in records:
         if not isinstance(payload, dict):
             raise LifecycleError("PROVENANCE.json has a malformed artifact")
         name = validate_relative_path(str(payload.get("name", "")))
         if "/" in name:
             raise LifecycleError("release artifacts must be direct children")
+        if name in recorded_names:
+            raise LifecycleError("PROVENANCE.json has duplicate artifact records")
+        recorded_names.add(name)
         path = output_dir / name
         digest = str(payload.get("sha256", ""))
         size = payload.get("size")
@@ -1389,49 +1889,223 @@ def verify_release_bundle(output_dir: Path) -> ReleaseBundle:
         if expected.get(name) != digest:
             raise LifecycleError(f"checksum/provenance disagreement: {name}")
         assets.append(path)
+    if set(expected) != recorded_names | {"PROVENANCE.json"}:
+        raise LifecycleError("checksum and provenance artifact sets disagree")
+
+    asset_by_name = {path.name: path for path in assets}
+    dependency_disclosure = provenance.get("dependency_cache")
+    dependency_assets = [
+        path
+        for path in assets
+        if path.name.startswith("SentiVue-Oracle-Dependencies-")
+    ]
+    if dependency_disclosure is None:
+        if dependency_assets:
+            raise LifecycleError("release has an undisclosed dependency sidecar")
+    elif not isinstance(dependency_disclosure, dict):
+        raise LifecycleError("release dependency-cache disclosure is malformed")
+    else:
+        dependency_name = str(dependency_disclosure.get("bundle_name", ""))
+        dependency_path = asset_by_name.get(dependency_name)
+        if dependency_path is None or dependency_assets != [dependency_path]:
+            raise LifecycleError("release dependency sidecar is missing or ambiguous")
+        _verify_dependency_bundle(dependency_path, dependency_disclosure)
+    source_tar = asset_by_name.get(f"{PRODUCT_PREFIX}-{version}.tar.gz")
+    source_zip = asset_by_name.get(f"{PRODUCT_PREFIX}-{version}.zip")
+    if source_tar is None or source_zip is None:
+        raise LifecycleError("release lacks canonical source archives")
+    canonical_tar_files = _installer_payload_files(
+        source_tar.read_bytes(), ".command"
+    )
+    canonical_zip_files = _installer_payload_files(source_zip.read_bytes(), ".cmd")
+    if canonical_tar_files != canonical_zip_files:
+        raise LifecycleError("source archives contain different bytes")
+    source_files = canonical_tar_files
+    source_provenance = json.loads(
+        source_files["SOURCE-PROVENANCE.json"].decode("utf-8")
+    )
+    if source_provenance.get("source_revision") != revision:
+        raise LifecycleError("source archive revision disagrees with release provenance")
+    builder = provenance.get("builder")
+    builder_source = source_files.get("verification/lifecycle.py")
+    if not isinstance(builder, dict) or builder.get("path") != "verification/lifecycle.py":
+        raise LifecycleError("release builder is not bound to immutable source")
+    if builder_source is not None:
+        if (
+            builder.get("immutable_source") is not True
+            or builder.get("sha256") != _sha256_bytes(builder_source)
+        ):
+            raise LifecycleError("release builder is not bound to immutable source")
+    elif builder.get("immutable_source") is not False or not SHA256_PATTERN.fullmatch(
+        str(builder.get("sha256", ""))
+    ):
+        raise LifecycleError("source-only fixture has invalid external builder metadata")
 
     installers = [
         path for path in assets if path.suffix.lower() in {".command", ".cmd"}
     ]
     transforms = provenance.get("build_transforms")
-    if installers:
-        if not isinstance(transforms, list):
-            raise LifecycleError("PROVENANCE.json lacks installer build transforms")
-        transformed_names = {
-            str(item.get("artifact"))
-            for item in transforms
-            if isinstance(item, dict)
-            and item.get("id") == INSTALLER_HARDENING_TRANSFORM
-            and SHA256_PATTERN.fullmatch(str(item.get("source_sha256", "")))
-        }
-        if transformed_names != {path.name for path in installers}:
+    if not installers:
+        if transforms != []:
             raise LifecycleError(
-                "PROVENANCE.json installer transform records are incomplete"
+                "source-only release has unexpected installer transforms"
+            )
+        if expected.get("PROVENANCE.json") != _sha256_file(provenance_path):
+            raise LifecycleError("PROVENANCE.json is not checksummed")
+        return ReleaseBundle(
+            version=version,
+            revision=revision,
+            output_dir=output_dir,
+            archives=assets,
+            checksums=checksums_path,
+            provenance=provenance_path,
+        )
+    if builder_source is None:
+        raise LifecycleError("installer release lacks immutable builder source")
+    if len(installers) != 2:
+        raise LifecycleError("release must contain both installer formats")
+    if not isinstance(transforms, list) or len(transforms) != len(installers):
+        raise LifecycleError("PROVENANCE.json lacks installer build transforms")
+    transform_by_name: dict[str, Mapping[str, Any]] = {}
+    for item in transforms:
+        if not isinstance(item, dict):
+            raise LifecycleError("installer build transform is malformed")
+        artifact = str(item.get("artifact", ""))
+        if artifact in transform_by_name:
+            raise LifecycleError("installer build transforms contain duplicates")
+        transform_by_name[artifact] = item
+    if set(transform_by_name) != {path.name for path in installers}:
+        raise LifecycleError(
+            "PROVENANCE.json installer transform records are incomplete"
+        )
+    source_manifest_sha256 = _sha256_bytes(
+        _installer_source_manifest(source_files)
+    )
+    expected_dependency_name = (
+        str(dependency_disclosure["bundle_name"])
+        if isinstance(dependency_disclosure, dict)
+        else ""
+    )
+    expected_dependency_sha256 = (
+        str(dependency_disclosure["bundle_sha256"])
+        if isinstance(dependency_disclosure, dict)
+        else ""
+    )
+    for installer in installers:
+        embedded_payload, embedded_files = _smoke_installer(installer)
+        installer_bytes = installer.read_bytes()
+        if installer.suffix.lower() == ".command":
+            expected_installer_bytes = (
+                _macos_installer_header(
+                    _sha256_bytes(embedded_payload),
+                    _installer_source_manifest(embedded_files),
+                    dependency_bundle_name=expected_dependency_name,
+                    dependency_bundle_sha256=expected_dependency_sha256,
+                ).encode("utf-8")
+                + embedded_payload
+            )
+            dependency_name_binding = (
+                f'DEPENDENCY_BUNDLE_NAME="{expected_dependency_name}"'.encode("ascii")
+            )
+            dependency_sha_binding = (
+                f'DEPENDENCY_BUNDLE_SHA256="{expected_dependency_sha256}"'.encode(
+                    "ascii"
+                )
+            )
+        else:
+            expected_installer_bytes = _windows_installer_text(
+                embedded_payload,
+                _sha256_bytes(embedded_payload),
+                _installer_source_manifest(embedded_files),
+                dependency_bundle_name=expected_dependency_name,
+                dependency_bundle_sha256=expected_dependency_sha256,
+            ).encode("ascii")
+            dependency_name_binding = (
+                f'$DependencyBundleName = "{expected_dependency_name}"'.encode("ascii")
+            )
+            dependency_sha_binding = (
+                f'$DependencyBundleSha256 = "{expected_dependency_sha256}"'.encode(
+                    "ascii"
+                )
+            )
+        if installer_bytes != expected_installer_bytes:
+            raise LifecycleError(
+                f"{installer.name}: hardened installer bytes are not canonical"
+            )
+        if (
+            dependency_name_binding not in installer_bytes
+            or dependency_sha_binding not in installer_bytes
+        ):
+            raise LifecycleError(
+                f"{installer.name}: dependency sidecar binding is invalid"
+            )
+        if embedded_files != source_files:
+            raise LifecycleError(
+                f"{installer.name}: embedded source differs from canonical archives"
+            )
+        expected_payload = (
+            source_tar.read_bytes()
+            if installer.suffix.lower() == ".command"
+            else source_zip.read_bytes()
+        )
+        if embedded_payload != expected_payload:
+            raise LifecycleError(
+                f"{installer.name}: embedded archive bytes are not canonical"
+            )
+        transform = transform_by_name[installer.name]
+        if (
+            transform.get("id") != INSTALLER_HARDENING_TRANSFORM
+            or transform.get("payload_sha256") != _sha256_bytes(embedded_payload)
+            or transform.get("dependency_bundle_name")
+            != expected_dependency_name
+            or transform.get("dependency_bundle_sha256")
+            != expected_dependency_sha256
+            or transform.get("source_tree_sha256") != source_manifest_sha256
+            or transform.get("source_path") != "bootstrap/build-installers.ps1"
+            or transform.get("source_sha256")
+            != _sha256_bytes(source_files["bootstrap/build-installers.ps1"])
+            or transform.get("tool_path") != "verification/lifecycle.py"
+            or transform.get("tool_sha256")
+            != _sha256_bytes(source_files["verification/lifecycle.py"])
+        ):
+            raise LifecycleError(
+                f"{installer.name}: build transform provenance is invalid"
             )
 
-    source_archives = [
-        path
-        for path in assets
-        if path.name.endswith(".tar.gz") or path.suffix.lower() == ".zip"
-    ]
-    archive_sets = [
-        _archive_source_names(path)
-        for path in source_archives
-        if path.name.startswith(f"{PRODUCT_PREFIX}-")
-    ]
-    if archive_sets:
-        required = {
-            f"{PRODUCT_PREFIX}/ARTIFACTS.json",
-            f"{PRODUCT_PREFIX}/SOURCE-PROVENANCE.json",
-        }
-        for names in archive_sets:
-            if not required <= names:
-                raise LifecycleError("source archive lacks generated manifests")
-        if any(names != archive_sets[0] for names in archive_sets[1:]):
-            raise LifecycleError("source archives contain different file sets")
-    for path in assets:
-        if path.suffix.lower() in {".command", ".cmd"}:
-            _smoke_installer(path)
+    mac_command = next(
+        path for path in installers if path.suffix.lower() == ".command"
+    )
+    command_zip = asset_by_name.get(f"{mac_command.name}.zip")
+    if command_zip is None:
+        raise LifecycleError("release lacks executable-preserving macOS ZIP")
+    try:
+        with zipfile.ZipFile(command_zip) as archive:
+            infos = archive.infolist()
+            if len(infos) != 1 or infos[0].filename != mac_command.name:
+                raise LifecycleError("macOS installer ZIP has an invalid file set")
+            mode = (infos[0].external_attr >> 16) & 0o777
+            if mode & 0o111 == 0 or archive.read(infos[0]) != mac_command.read_bytes():
+                raise LifecycleError(
+                    "macOS installer ZIP loses executable mode or bytes"
+                )
+    except zipfile.BadZipFile as exc:
+        raise LifecycleError("macOS installer ZIP is invalid") from exc
+
+    trust = provenance.get("installer_trust")
+    if not isinstance(trust, dict):
+        raise LifecycleError("PROVENANCE.json lacks installer trust disclosure")
+    windows_trust = trust.get("windows")
+    macos_trust = trust.get("macos")
+    if (
+        not isinstance(windows_trust, dict)
+        or windows_trust.get("code_signing") != "unsigned"
+        or not isinstance(macos_trust, dict)
+        or macos_trust.get("code_signing") != "unsigned"
+        or macos_trust.get("notarization") != "not-notarized"
+    ):
+        raise LifecycleError(
+            "PROVENANCE.json installer trust disclosure is invalid"
+        )
     if expected.get("PROVENANCE.json") != _sha256_file(provenance_path):
         raise LifecycleError("PROVENANCE.json is not checksummed")
     return ReleaseBundle(
@@ -1468,8 +2142,8 @@ def _find_powershell() -> str | None:
 def _installer_atomic_helper() -> str:
     """Return the ASCII PowerShell helper injected into protected installers."""
 
-    return r'''
-# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v2
+    return r"""
+# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v3
 function Assert-SafeAtomicPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     if (Test-Path -LiteralPath $full) {
@@ -1505,18 +2179,900 @@ function Write-Utf8NoBomAtomic([string]$Path, [string]$Text) {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
     }
 }
-'''.strip("\n")
+""".strip("\n")
 
 
-def _harden_built_installer(path: Path) -> dict[str, Any]:
+def _installer_payload_files(payload: bytes, suffix: str) -> dict[str, bytes]:
+    files: dict[str, bytes] = {}
+    prefix = f"{PRODUCT_PREFIX}/"
+    try:
+        if suffix == ".command":
+            with tempfile.SpooledTemporaryFile() as temporary:
+                temporary.write(payload)
+                temporary.seek(0)
+                with tarfile.open(fileobj=temporary, mode="r:gz") as archive:
+                    for member in archive.getmembers():
+                        if member.isdir():
+                            continue
+                        if not member.isfile() or member.issym() or member.islnk():
+                            raise LifecycleError(
+                                "installer tar contains a link or special entry"
+                            )
+                        name = validate_relative_path(member.name)
+                        stream = archive.extractfile(member)
+                        if stream is None:
+                            raise LifecycleError("installer tar member is unreadable")
+                        if name in files:
+                            raise LifecycleError(
+                                f"installer payload has duplicate member: {name}"
+                            )
+                        files[name] = stream.read()
+        elif suffix == ".cmd":
+            with tempfile.SpooledTemporaryFile() as temporary:
+                temporary.write(payload)
+                temporary.seek(0)
+                with zipfile.ZipFile(temporary) as archive:
+                    for info in archive.infolist():
+                        if info.is_dir():
+                            continue
+                        name = validate_relative_path(info.filename)
+                        unix_type = (info.external_attr >> 16) & 0o170000
+                        if unix_type not in {0, stat.S_IFREG}:
+                            raise LifecycleError(
+                                "installer zip contains a link or special entry"
+                            )
+                        if name in files:
+                            raise LifecycleError(
+                                f"installer payload has duplicate member: {name}"
+                            )
+                        files[name] = archive.read(info)
+        else:
+            raise LifecycleError(f"unsupported installer payload format: {suffix}")
+    except (tarfile.TarError, zipfile.BadZipFile, OSError) as exc:
+        raise LifecycleError("installer payload archive is invalid") from exc
+    if not files or any(not name.startswith(prefix) for name in files):
+        raise LifecycleError("installer payload escapes the product prefix")
+    relative_files = {name[len(prefix) :]: data for name, data in files.items()}
+    _validate_portable_path_set(relative_files)
+    provenance_bytes = relative_files.get("SOURCE-PROVENANCE.json")
+    artifact_bytes = relative_files.get("ARTIFACTS.json")
+    if provenance_bytes is None or artifact_bytes is None:
+        raise LifecycleError("installer payload lacks generated source manifests")
+    try:
+        source_provenance = json.loads(provenance_bytes.decode("utf-8"))
+        artifact_manifest = json.loads(artifact_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise LifecycleError("installer source manifests are invalid") from exc
+    provenance_keys = {"schema_version", "source_revision", "files"}
+    if isinstance(source_provenance, dict) and "protected_builder_transform" in (
+        source_provenance
+    ):
+        provenance_keys.add("protected_builder_transform")
+    if (
+        not isinstance(source_provenance, dict)
+        or set(source_provenance) != provenance_keys
+        or source_provenance.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(source_provenance.get("files"), list)
+    ):
+        raise LifecycleError("installer source provenance has an invalid schema")
+    revision = source_provenance.get("source_revision")
+    if not isinstance(revision, str) or not COMMIT_PATTERN.fullmatch(revision):
+        raise LifecycleError("installer source provenance lacks an immutable revision")
+    if "protected_builder_transform" in source_provenance:
+        transform = source_provenance["protected_builder_transform"]
+        if (
+            not isinstance(transform, dict)
+            or set(transform)
+            != {
+                "id",
+                "path",
+                "source_sha256",
+                "required_after_protected_builder",
+                "reason",
+            }
+            or transform.get("id") != INSTALLER_HARDENING_TRANSFORM
+            or transform.get("path") != "bootstrap/build-installers.ps1"
+            or not SHA256_PATTERN.fullmatch(str(transform.get("source_sha256", "")))
+            or transform.get("required_after_protected_builder") is not True
+            or not isinstance(transform.get("reason"), str)
+        ):
+            raise LifecycleError(
+                "installer source provenance has an invalid builder transform"
+            )
+    if (
+        not isinstance(artifact_manifest, dict)
+        or set(artifact_manifest)
+        != {"schema_version", "source_revision", "requirements", "note"}
+        or artifact_manifest.get("schema_version") != SCHEMA_VERSION
+        or artifact_manifest.get("source_revision") != revision
+        or not isinstance(artifact_manifest.get("requirements"), list)
+        or not isinstance(artifact_manifest.get("note"), str)
+    ):
+        raise LifecycleError("installer artifact manifest disagrees with provenance")
+    records = source_provenance.get("files")
+    declared: set[str] = set()
+    for record in records:
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"path", "mode", "sha256", "size"}
+            or not re.fullmatch(r"100(?:644|755)", str(record.get("mode", "")))
+            or not SHA256_PATTERN.fullmatch(str(record.get("sha256", "")))
+            or isinstance(record.get("size"), bool)
+            or not isinstance(record.get("size"), int)
+            or record["size"] < 0
+        ):
+            raise LifecycleError("installer source provenance has a malformed file")
+        relative = validate_relative_path(str(record.get("path", "")))
+        if relative in declared:
+            raise LifecycleError("installer source provenance has duplicate files")
+        declared.add(relative)
+        data = relative_files.get(relative)
+        if (
+            data is None
+            or record.get("size") != len(data)
+            or record.get("sha256") != _sha256_bytes(data)
+        ):
+            raise LifecycleError(
+                f"installer source provenance mismatch for {relative}"
+            )
+    generated = {"ARTIFACTS.json", "SOURCE-PROVENANCE.json"}
+    if set(relative_files) != declared | generated:
+        raise LifecycleError("installer payload file set disagrees with provenance")
+    return relative_files
+
+
+def _installer_source_manifest(files: Mapping[str, bytes]) -> bytes:
+    mutable = {"serving/models.profile", "serving/tiers.env"}
+    manifest = {
+        relative: _sha256_bytes(data)
+        for relative, data in sorted(files.items())
+        if relative not in mutable
+    }
+    return json.dumps(
+        manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("ascii")
+
+
+def _macos_installer_header(
+    payload_sha256: str,
+    source_manifest: bytes,
+    *,
+    dependency_bundle_name: str = "",
+    dependency_bundle_sha256: str = "",
+) -> str:
+    source_manifest_b64 = base64.b64encode(source_manifest).decode("ascii")
+    source_manifest_sha256 = _sha256_bytes(source_manifest)
+    manifest_payload = json.loads(source_manifest.decode("ascii"))
+    source_records = (
+        "\n".join(
+            f"{digest}\t{base64.b64encode(relative.encode('utf-8')).decode('ascii')}"
+            for relative, digest in sorted(manifest_payload.items())
+        )
+        + "\n"
+    ).encode("ascii")
+    source_records_b64 = base64.b64encode(source_records).decode("ascii")
+    source_records_sha256 = _sha256_bytes(source_records)
+    install_identity = (
+        _sha256_bytes(f"{payload_sha256}:{dependency_bundle_sha256}".encode("ascii"))
+        if dependency_bundle_sha256
+        else payload_sha256
+    )
+    template = r"""#!/bin/bash
+# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v3
+set -euo pipefail
+set -f
+EXPECTED_PAYLOAD_SHA256="__PAYLOAD_SHA256__"
+SOURCE_MANIFEST_B64="__SOURCE_MANIFEST_B64__"
+SOURCE_MANIFEST_SHA256="__SOURCE_MANIFEST_SHA256__"
+SOURCE_RECORDS_B64="__SOURCE_RECORDS_B64__"
+SOURCE_RECORDS_SHA256="__SOURCE_RECORDS_SHA256__"
+DEPENDENCY_BUNDLE_NAME="__DEPENDENCY_BUNDLE_NAME__"
+DEPENDENCY_BUNDLE_SHA256="__DEPENDENCY_BUNDLE_SHA256__"
+INSTALL_IDENTITY="__INSTALL_IDENTITY__"
+PRODUCT_NAME="sentivue-oracle"
+MARKER_NAME=".oracle-installer-payload.sha256"
+WORK=""
+PUBLISHED_NOW=0
+ALREADY_INSTALLED=0
+
+fail() {
+  printf '\nINSTALLER ERROR: %s\n' "$*" >&2
+  exit 1
+}
+cleanup() {
+  if [[ -n "$WORK" && -d "$WORK" ]]; then
+    rm -rf "$WORK"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
+assert_safe_ancestors() {
+  local cursor="$1" next
+  while [[ -n "$cursor" && "$cursor" != "/" ]]; do
+    [[ ! -L "$cursor" ]] || fail "destination ancestor is a symbolic link: $cursor"
+    next="$(dirname "$cursor")"
+    [[ "$next" != "$cursor" ]] || break
+    cursor="$next"
+  done
+}
+decode_base64() {
+  if base64 --help 2>&1 | grep -q -- '--decode'; then
+    base64 --decode
+  else
+    base64 -D
+  fi
+}
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
+  else
+    fail "SHA-256 prerequisite unavailable (need shasum or openssl)"
+  fi
+}
+verify_immutable_source() {
+  local root="$1" records expected encoded relative target cursor actual
+  records="$(mktemp "${TMPDIR:-/tmp}/oracle-source-records.XXXXXX")"
+  printf '%s' "$SOURCE_RECORDS_B64" | decode_base64 > "$records" || {
+    rm -f "$records"
+    return 1
+  }
+  [[ "$(sha256_file "$records")" == "$SOURCE_RECORDS_SHA256" ]] || {
+    rm -f "$records"
+    return 1
+  }
+  while IFS=$'\t' read -r expected encoded; do
+    [[ "$expected" =~ ^[0-9a-f]{64}$ && -n "$encoded" ]] || {
+      rm -f "$records"
+      return 1
+    }
+    relative="$(printf '%s' "$encoded" | decode_base64)" || {
+      rm -f "$records"
+      return 1
+    }
+    case "$relative" in
+      ""|/*|*\\*|*:*|*//*|../*|*/../*|*/..|.|..) rm -f "$records"; return 1 ;;
+    esac
+    target="$root/$relative"
+    [[ -f "$target" && ! -L "$target" ]] || {
+      rm -f "$records"
+      return 1
+    }
+    cursor="$target"
+    while [[ "$cursor" != "$root" ]]; do
+      [[ ! -L "$cursor" ]] || {
+        rm -f "$records"
+        return 1
+      }
+      cursor="$(dirname "$cursor")"
+    done
+    actual="$(sha256_file "$target")"
+    [[ "$actual" == "$expected" ]] || {
+      rm -f "$records"
+      return 1
+    }
+  done < "$records"
+  rm -f "$records"
+}
+publish_no_replace() {
+  local source="$1" destination="$2" compiler helper_source helper
+  compiler="$(xcrun --find clang 2>/dev/null)" ||
+    fail "Xcode Command Line Tools are required for atomic no-replace installation"
+  helper_source="$WORK/rename-no-replace.c"
+  helper="$WORK/rename-no-replace"
+  cat > "$helper_source" <<'C'
+#include <errno.h>
+#include <stdio.h>
+extern int renamex_np(const char *, const char *, unsigned int);
+int main(int argc, char **argv) {
+  if (argc != 3) return 64;
+  if (renamex_np(argv[1], argv[2], 0x00000004U) == 0) return 0;
+  perror("renamex_np");
+  return errno ? errno : 1;
+}
+C
+  "$compiler" -Os -o "$helper" "$helper_source" || return 1
+  "$helper" "$source" "$destination"
+}
+rollback_new_install() {
+  [[ "$PUBLISHED_NOW" -eq 1 ]] || return 0
+  if [[ -d "$DEST" && ! -L "$DEST" ]]; then
+    if [[ -f "$DEST/bootstrap/uninstall.sh" ]]; then
+      bash "$DEST/bootstrap/uninstall.sh" --apply --root "$DEST" --home "$HOME" ||
+        printf 'WARN: ownership-scoped side-effect rollback reported an error\n' >&2
+    fi
+    rm -rf "$DEST"
+  fi
+  PUBLISHED_NOW=0
+}
+
+DEFAULT="$HOME/sentivue-oracle"
+DEST="${ORACLE_INSTALLER_DEST:-}"
+if [[ -z "$DEST" ]]; then
+  if [[ -t 0 ]]; then
+    read -r -p "Install SentiVue Oracle to [$DEFAULT]: " DEST
+  fi
+  DEST="${DEST:-$DEFAULT}"
+fi
+case "$DEST" in
+  /*) ;;
+  *) fail "installation destination must be an absolute path" ;;
+esac
+DEST="${DEST%/}"
+[[ -n "$DEST" && "$DEST" != "/" ]] || fail "unsafe installation destination"
+PARENT="$(dirname "$DEST")"
+
+if [[ -e "$DEST" || -L "$DEST" ]]; then
+  [[ -d "$DEST" && ! -L "$DEST" ]] ||
+    fail "existing destination is not an owned installation; preserved: $DEST"
+  if [[ -f "$DEST/$MARKER_NAME" ]] &&
+     [[ "$(<"$DEST/$MARKER_NAME")" == "$INSTALL_IDENTITY" ]]; then
+    printf '==> identical installer payload is already present at %s; existing files were preserved\n' "$DEST"
+    ALREADY_INSTALLED=1
+  else
+    fail "existing unowned, different-version, or locally managed tree was preserved: $DEST"
+  fi
+else
+  assert_safe_ancestors "$PARENT"
+  mkdir -p "$PARENT"
+  assert_safe_ancestors "$PARENT"
+  WORK="$(mktemp -d "$PARENT/.sentivue-oracle-install.XXXXXX")" ||
+    fail "could not create unique installation staging directory"
+  PAYLOAD="$WORK/payload.tar.gz"
+  LIST="$WORK/members.txt"
+  TYPES="$WORK/types.txt"
+  EXTRACT="$WORK/extract"
+  mkdir "$EXTRACT"
+  PAYLOAD_LINE="$(awk '/^__PAYLOAD_BELOW__$/ {print NR + 1; exit 0}' "$0")"
+  [[ -n "$PAYLOAD_LINE" ]] || fail "installer payload marker is missing"
+  tail -n +"$PAYLOAD_LINE" "$0" > "$PAYLOAD"
+  ACTUAL_PAYLOAD_SHA256="$(sha256_file "$PAYLOAD")"
+  [[ "$ACTUAL_PAYLOAD_SHA256" == "$EXPECTED_PAYLOAD_SHA256" ]] ||
+    fail "embedded payload SHA-256 mismatch"
+  tar -tzf "$PAYLOAD" > "$LIST" || fail "embedded tar archive is invalid"
+  while IFS= read -r member; do
+    case "$member" in
+      "$PRODUCT_NAME"/*) ;;
+      *) fail "archive member escapes the product prefix: $member" ;;
+    esac
+    case "$member" in
+      /*|*\\*|*:*|*//* ) fail "archive member has an unsafe path: $member" ;;
+    esac
+    old_ifs="$IFS"
+    IFS='/'
+    set -- $member
+    IFS="$old_ifs"
+    for component in "$@"; do
+      [[ "$component" != "." && "$component" != ".." && -n "$component" ]] ||
+        fail "archive member has a traversal component: $member"
+    done
+  done < "$LIST"
+  tar -tvzf "$PAYLOAD" > "$TYPES" || fail "embedded tar metadata is invalid"
+  while IFS= read -r line; do
+    kind="${line%"${line#?}"}"
+    case "$kind" in
+      -|d) ;;
+      *) fail "archive contains a link or special entry" ;;
+    esac
+  done < "$TYPES"
+  tar -xzf "$PAYLOAD" -C "$EXTRACT" ||
+    fail "embedded payload extraction failed"
+  if [[ -n "$DEPENDENCY_BUNDLE_NAME" ]]; then
+    DEPENDENCY_BUNDLE="$(cd "$(dirname "$0")" && pwd)/$DEPENDENCY_BUNDLE_NAME"
+    [[ -f "$DEPENDENCY_BUNDLE" && ! -L "$DEPENDENCY_BUNDLE" ]] ||
+      fail "full-offline dependency sidecar is missing: $DEPENDENCY_BUNDLE_NAME"
+    [[ "$(sha256_file "$DEPENDENCY_BUNDLE")" == "$DEPENDENCY_BUNDLE_SHA256" ]] ||
+      fail "full-offline dependency sidecar SHA-256 mismatch"
+    ditto -x -k "$DEPENDENCY_BUNDLE" "$EXTRACT" ||
+      fail "full-offline dependency sidecar extraction failed"
+  fi
+  SOURCE="$EXTRACT/$PRODUCT_NAME"
+  [[ -d "$SOURCE" && -f "$SOURCE/ARTIFACTS.json" &&
+     -f "$SOURCE/SOURCE-PROVENANCE.json" ]] ||
+    fail "extracted source manifests are missing"
+  if find "$SOURCE" -type l -print -quit | grep -q .; then
+    fail "extracted source contains a symbolic link"
+  fi
+  verify_immutable_source "$SOURCE" ||
+    fail "extracted source differs from its immutable manifest"
+  printf '%s\n' "$INSTALL_IDENTITY" > "$SOURCE/$MARKER_NAME"
+  publish_no_replace "$SOURCE" "$DEST" ||
+    fail "atomic no-replace installation publish failed"
+  PUBLISHED_NOW=1
+  printf '==> source installed atomically at %s\n' "$DEST"
+fi
+
+if [[ "$ALREADY_INSTALLED" -eq 1 ]]; then
+  verify_immutable_source "$DEST" ||
+    fail "installed source was modified; existing tree was preserved without executing child setup"
+  printf '==> verified existing installation; child setup was not re-executed\n'
+  exit 0
+fi
+
+if [[ "${ORACLE_INSTALLER_SKIP_SETUP:-0}" == "1" ]]; then
+  if [[ "${ORACLE_INSTALLER_REQUIRE_IMMUTABLE:-0}" == "1" ]]; then
+    verify_immutable_source "$DEST" ||
+      fail "installed source was modified; package execution refused"
+  fi
+  printf '==> setup skipped by ORACLE_INSTALLER_SKIP_SETUP=1\n'
+  exit 0
+fi
+verify_immutable_source "$DEST" ||
+  fail "installed source was modified; preserved without executing child setup"
+if [[ ! -f "$DEST/incoming/dependency-cache/manifest.json" ]]; then
+  rollback_new_install
+  fail "the policy-bound offline dependency cache is missing, so the new destination was rolled back. Rebuild with --dependency-cache and keep its sidecar beside this installer. Models remain a separate explicit import."
+fi
+printf '==> running ownership-scoped offline setup (unsigned/not notarized installer)\n'
+if ! bash "$DEST/install"; then
+  rollback_new_install
+  fail "installer child setup failed; newly published source was rolled back"
+fi
+printf '==> SentiVue Oracle setup completed\n'
+exit 0
+__PAYLOAD_BELOW__
+"""
+    return (
+        template.replace("__PAYLOAD_SHA256__", payload_sha256)
+        .replace("__SOURCE_MANIFEST_B64__", source_manifest_b64)
+        .replace("__SOURCE_MANIFEST_SHA256__", source_manifest_sha256)
+        .replace("__SOURCE_RECORDS_B64__", source_records_b64)
+        .replace("__SOURCE_RECORDS_SHA256__", source_records_sha256)
+        .replace("__DEPENDENCY_BUNDLE_NAME__", dependency_bundle_name)
+        .replace("__DEPENDENCY_BUNDLE_SHA256__", dependency_bundle_sha256)
+        .replace("__INSTALL_IDENTITY__", install_identity)
+    )
+
+
+def _windows_installer_text(
+    payload: bytes,
+    payload_sha256: str,
+    source_manifest: bytes | None = None,
+    *,
+    dependency_bundle_name: str = "",
+    dependency_bundle_sha256: str = "",
+) -> str:
+    if source_manifest is None:
+        files = _installer_payload_files(payload, ".cmd")
+        source_manifest = _installer_source_manifest(files)
+    source_manifest_b64 = base64.b64encode(source_manifest).decode("ascii")
+    source_manifest_sha256 = _sha256_bytes(source_manifest)
+    install_identity = (
+        _sha256_bytes(f"{payload_sha256}:{dependency_bundle_sha256}".encode("ascii"))
+        if dependency_bundle_sha256
+        else payload_sha256
+    )
+    helper = _installer_atomic_helper()
+    powershell = r"""$ErrorActionPreference = "Stop"
+__ATOMIC_HELPER__
+$ExpectedPayloadSha256 = "__PAYLOAD_SHA256__"
+$SourceManifestB64 = "__SOURCE_MANIFEST_B64__"
+$SourceManifestSha256 = "__SOURCE_MANIFEST_SHA256__"
+$DependencyBundleName = "__DEPENDENCY_BUNDLE_NAME__"
+$DependencyBundleSha256 = "__DEPENDENCY_BUNDLE_SHA256__"
+$InstallIdentity = "__INSTALL_IDENTITY__"
+$ProductName = "sentivue-oracle"
+$MarkerName = ".oracle-installer-payload.sha256"
+$Stage = $null
+$PublishedNow = $false
+
+function Get-Sha256Hex([byte[]]$Bytes) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($Bytes))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $algorithm.Dispose()
+    }
+}
+function Get-Sha256File([string]$Path) {
+    Assert-SafeAtomicPath -Path $Path
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+        $algorithm.Dispose()
+    }
+}
+function Assert-ImmutableSource([string]$Root) {
+    $raw = [Convert]::FromBase64String($SourceManifestB64)
+    if ((Get-Sha256Hex $raw) -ne $SourceManifestSha256) {
+        throw "embedded source manifest digest mismatch"
+    }
+    $manifest = [Text.Encoding]::ASCII.GetString($raw) | ConvertFrom-Json
+    foreach ($property in $manifest.PSObject.Properties) {
+        $target = Join-Path $Root $property.Name
+        if (-not (Test-Path -LiteralPath $target -PathType Leaf) -or
+            (Get-Sha256File $target) -ne [string]$property.Value) {
+            throw "immutable source file is missing or modified: $($property.Name)"
+        }
+    }
+}
+function Assert-SafeArchiveName([string]$Name) {
+    if (-not $Name -or $Name.Contains("\") -or $Name.StartsWith("/") -or
+        $Name.StartsWith("\") -or $Name -match "^[A-Za-z]:" -or
+        -not $Name.StartsWith($ProductName + "/", [StringComparison]::Ordinal)) {
+        throw "archive member has an unsafe path: $Name"
+    }
+    $trimmed = $Name.TrimEnd("/")
+    if ($Name.Normalize([Text.NormalizationForm]::FormC) -ne $Name) {
+        throw "archive member is not Unicode NFC: $Name"
+    }
+    foreach ($component in $trimmed.Split("/")) {
+        $stem = $component.Split(".")[0]
+        if (-not $component -or $component -eq "." -or $component -eq ".." -or
+            $component.Contains(":") -or $component.EndsWith(" ") -or
+            $component.EndsWith(".") -or
+            $stem -match "^(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])$") {
+            throw "archive member has a traversal component: $Name"
+        }
+    }
+}
+function Select-InstallerProfile([string]$Root) {
+    $profileFile = Join-Path $Root "serving\profiles.conf"
+    if (-not (Test-Path -LiteralPath $profileFile -PathType Leaf)) {
+        throw "serving profile declaration is missing"
+    }
+    $profiles = @()
+    $seenNames = @{}
+    $previousMinimum = [int]::MaxValue
+    $lineNumber = 0
+    foreach ($rawLine in Get-Content -LiteralPath $profileFile) {
+        $lineNumber += 1
+        $trimmed = $rawLine.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#")) { continue }
+        $fields = $rawLine -split "\|"
+        if ($fields.Count -ne 7) {
+            throw "invalid serving profile declaration at line $lineNumber"
+        }
+        $name = $fields[0].Trim()
+        $minimum = 0
+        if ($name -notmatch "^[a-z][a-z0-9-]*$" -or $seenNames.ContainsKey($name) -or
+            -not [int]::TryParse($fields[1].Trim(), [ref]$minimum) -or
+            $minimum -lt 0 -or $minimum -ge $previousMinimum) {
+            throw "invalid or ambiguous serving profile identity at line $lineNumber"
+        }
+        $models = @($fields[2].Split(",") | ForEach-Object { $_.Trim() })
+        $modelSet = @{}
+        foreach ($model in $models) {
+            if ($model -notmatch "^[a-z0-9][a-z0-9._-]*$" -or
+                $modelSet.ContainsKey($model)) {
+                throw "invalid or duplicate serving profile model at line $lineNumber"
+            }
+            $modelSet[$model] = $true
+        }
+        $opus = $fields[3].Trim()
+        $sonnet = $fields[4].Trim()
+        $haiku = $fields[5].Trim()
+        if (-not $modelSet.ContainsKey($opus) -or
+            -not $modelSet.ContainsKey($sonnet) -or
+            -not $modelSet.ContainsKey($haiku) -or
+            -not $fields[6].Trim()) {
+            throw "invalid serving profile routing at line $lineNumber"
+        }
+        $profiles += [pscustomobject]@{
+            Name = $name
+            Min = $minimum
+            Models = ($models -join ",")
+            Opus = $opus
+            Sonnet = $sonnet
+            Haiku = $haiku
+        }
+        $seenNames[$name] = $true
+        $previousMinimum = $minimum
+    }
+    if (-not $profiles) { throw "no serving profiles are declared" }
+    if (@($profiles | Where-Object { $_.Name -eq "full" }).Count -ne 1) {
+        throw "serving profiles must declare exactly one full profile"
+    }
+    $ram = [math]::Floor((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
+    $budget = [math]::Max(0, $ram - 8)
+    $suggested = $profiles | Where-Object { $budget -ge $_.Min } | Select-Object -First 1
+    if (-not $suggested) { $suggested = $profiles[-1] }
+    $requested = $env:ORACLE_INSTALLER_PROFILE
+    if (-not $requested -and -not [Console]::IsInputRedirected) {
+        $requested = Read-Host "Model profile [ENTER = $($suggested.Name)]"
+    }
+    if (-not $requested) { $selected = $suggested }
+    else { $selected = $profiles | Where-Object { $_.Name -eq $requested } | Select-Object -First 1 }
+    if (-not $selected) { throw "unknown model profile: $requested" }
+    $activePath = Join-Path $Root "serving\models.profile"
+    if ($selected.Name -eq "full") {
+        if (Test-Path -LiteralPath $activePath -PathType Leaf) {
+            Remove-Item -LiteralPath $activePath -Force
+        }
+    } else {
+        Write-Utf8NoBomAtomic $activePath ((($selected.Models -split ",") -join "`n") + "`n")
+    }
+    $tiersPath = Join-Path $Root "serving\tiers.env"
+    $tiers = @(
+        "OPUS_MODEL=$($selected.Opus)"
+        "SONNET_MODEL=$($selected.Sonnet)"
+        "HAIKU_MODEL=$($selected.Haiku)"
+    )
+    Write-Utf8NoBomAtomic $tiersPath (($tiers -join "`n") + "`n")
+    Write-Host "==> profile '$($selected.Name)' selected; models are a separate policy-bound import"
+}
+
+try {
+    $default = Join-Path $env:USERPROFILE "sentivue-oracle"
+    $Destination = $env:ORACLE_INSTALLER_DEST
+    if (-not $Destination -and -not [Console]::IsInputRedirected) {
+        $Destination = Read-Host "Install SentiVue Oracle to [$default]"
+    }
+    if (-not $Destination) { $Destination = $default }
+    if (-not [IO.Path]::IsPathRooted($Destination)) {
+        throw "installation destination must be an absolute path"
+    }
+    $Destination = [IO.Path]::GetFullPath($Destination).TrimEnd("\")
+    $Parent = Split-Path -Parent $Destination
+    if (-not $Parent -or $Destination -eq [IO.Path]::GetPathRoot($Destination)) {
+        throw "unsafe installation destination"
+    }
+    $Marker = Join-Path $Destination $MarkerName
+    $AlreadyInstalled = $false
+    if (Test-Path -LiteralPath $Destination) {
+        $item = Get-Item -LiteralPath $Destination -Force
+        if (-not $item.PSIsContainer -or
+            (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) -or
+            -not (Test-Path -LiteralPath $Marker -PathType Leaf) -or
+            (Get-Content -LiteralPath $Marker -Raw).Trim() -ne $InstallIdentity) {
+            throw "existing unowned, different-version, or locally managed tree was preserved: $Destination"
+        }
+        $AlreadyInstalled = $true
+        Write-Host "==> identical installer payload is already present; existing files were preserved"
+    } else {
+        Assert-SafeAtomicPath -Path $Destination
+        New-Item -ItemType Directory -Force -Path $Parent | Out-Null
+        Assert-SafeAtomicPath -Path $Destination
+        $Stage = Join-Path $Parent (".sentivue-oracle-install-" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $Stage | Out-Null
+        $raw = [IO.File]::ReadAllText($env:ORACLE_SETUP_SELF)
+        $payloadMarker = "#==" + "B64PAYLOAD" + "==#"
+        $position = $raw.IndexOf($payloadMarker, [StringComparison]::Ordinal)
+        if ($position -lt 0 -or
+            $raw.LastIndexOf($payloadMarker, [StringComparison]::Ordinal) -ne $position) {
+            throw "installer payload marker is missing or duplicated"
+        }
+        $encoded = $raw.Substring($position + $payloadMarker.Length) -replace "[^A-Za-z0-9+/=]", ""
+        $payload = [Convert]::FromBase64String($encoded)
+        if ((Get-Sha256Hex $payload) -ne $ExpectedPayloadSha256) {
+            throw "embedded payload SHA-256 mismatch"
+        }
+        Add-Type -AssemblyName System.IO.Compression
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $extractRoot = Join-Path $Stage "extract"
+        New-Item -ItemType Directory -Path $extractRoot | Out-Null
+        $extractPrefix = [IO.Path]::GetFullPath($extractRoot).TrimEnd("\") + "\"
+        $memory = New-Object IO.MemoryStream(,$payload)
+        $archive = New-Object IO.Compression.ZipArchive(
+            $memory,
+            [IO.Compression.ZipArchiveMode]::Read,
+            $false
+        )
+        try {
+            $seenArchivePaths = @{}
+            foreach ($entry in $archive.Entries) {
+                Assert-SafeArchiveName $entry.FullName
+                $portableKey = $entry.FullName.Normalize([Text.NormalizationForm]::FormC).ToLowerInvariant()
+                if ($seenArchivePaths.ContainsKey($portableKey)) {
+                    throw "archive contains a portable path collision: $($entry.FullName)"
+                }
+                $seenArchivePaths[$portableKey] = $true
+                $unixType = (($entry.ExternalAttributes -shr 16) -band 0xF000)
+                if ($unixType -eq 0xA000 -or
+                    (($entry.ExternalAttributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                    throw "archive contains a link or reparse entry: $($entry.FullName)"
+                }
+                $target = [IO.Path]::GetFullPath((Join-Path $extractRoot $entry.FullName))
+                if (-not $target.StartsWith($extractPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "archive member escapes staging: $($entry.FullName)"
+                }
+                if ($entry.FullName.EndsWith("/")) {
+                    New-Item -ItemType Directory -Force -Path $target | Out-Null
+                    continue
+                }
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+                $inputStream = $entry.Open()
+                $outputStream = [IO.File]::Open(
+                    $target,
+                    [IO.FileMode]::CreateNew,
+                    [IO.FileAccess]::Write,
+                    [IO.FileShare]::None
+                )
+                try { $inputStream.CopyTo($outputStream) }
+                finally {
+                    $outputStream.Dispose()
+                    $inputStream.Dispose()
+                }
+            }
+        } finally {
+            $archive.Dispose()
+            $memory.Dispose()
+        }
+        if ($DependencyBundleName) {
+            $installerDirectory = Split-Path -Parent $env:ORACLE_SETUP_SELF
+            $dependencyBundle = Join-Path $installerDirectory $DependencyBundleName
+            if (-not (Test-Path -LiteralPath $dependencyBundle -PathType Leaf) -or
+                (Get-Sha256File $dependencyBundle) -ne $DependencyBundleSha256) {
+                throw "full-offline dependency sidecar is missing or has a SHA-256 mismatch"
+            }
+            $dependencyStream = [IO.File]::Open(
+                $dependencyBundle,
+                [IO.FileMode]::Open,
+                [IO.FileAccess]::Read,
+                [IO.FileShare]::Read
+            )
+            $dependencyArchive = New-Object IO.Compression.ZipArchive(
+                $dependencyStream,
+                [IO.Compression.ZipArchiveMode]::Read,
+                $false
+            )
+            try {
+                foreach ($entry in $dependencyArchive.Entries) {
+                    Assert-SafeArchiveName $entry.FullName
+                    if (-not $entry.FullName.StartsWith(
+                        $ProductName + "/incoming/dependency-cache/",
+                        [StringComparison]::Ordinal
+                    )) {
+                        throw "dependency sidecar member escapes its cache root: $($entry.FullName)"
+                    }
+                    $target = [IO.Path]::GetFullPath((Join-Path $extractRoot $entry.FullName))
+                    if (-not $target.StartsWith($extractPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw "dependency sidecar member escapes staging: $($entry.FullName)"
+                    }
+                    $unixType = (($entry.ExternalAttributes -shr 16) -band 0xF000)
+                    if ($unixType -eq 0xA000 -or
+                        (($entry.ExternalAttributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0)) {
+                        throw "dependency sidecar contains a link or reparse entry"
+                    }
+                    if ($entry.FullName.EndsWith("/")) {
+                        New-Item -ItemType Directory -Force -Path $target | Out-Null
+                        continue
+                    }
+                    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+                    $inputStream = $entry.Open()
+                    $outputStream = [IO.File]::Open(
+                        $target,
+                        [IO.FileMode]::CreateNew,
+                        [IO.FileAccess]::Write,
+                        [IO.FileShare]::None
+                    )
+                    try { $inputStream.CopyTo($outputStream) }
+                    finally {
+                        $outputStream.Dispose()
+                        $inputStream.Dispose()
+                    }
+                }
+            } finally {
+                $dependencyArchive.Dispose()
+                $dependencyStream.Dispose()
+            }
+        }
+        $Source = Join-Path $extractRoot $ProductName
+        if (-not (Test-Path -LiteralPath (Join-Path $Source "ARTIFACTS.json") -PathType Leaf) -or
+            -not (Test-Path -LiteralPath (Join-Path $Source "SOURCE-PROVENANCE.json") -PathType Leaf)) {
+            throw "extracted source manifests are missing"
+        }
+        foreach ($item in Get-ChildItem -LiteralPath $Source -Recurse -Force) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "extracted source contains a reparse point: $($item.FullName)"
+            }
+        }
+        Assert-ImmutableSource $Source
+        Select-InstallerProfile $Source
+        Write-Utf8NoBomAtomic (Join-Path $Source $MarkerName) ($InstallIdentity + "`n")
+        [IO.Directory]::Move($Source, $Destination)
+        $PublishedNow = $true
+        Write-Host "==> source installed atomically at $Destination"
+    }
+    if ($AlreadyInstalled) {
+        Assert-ImmutableSource $Destination
+        Write-Host "==> verified existing installation; child setup was not re-executed"
+        exit 0
+    }
+    if ($env:ORACLE_INSTALLER_SKIP_SETUP -eq "1") {
+        if ($env:ORACLE_INSTALLER_REQUIRE_IMMUTABLE -eq "1") {
+            Assert-ImmutableSource $Destination
+        }
+        Write-Host "==> setup skipped by ORACLE_INSTALLER_SKIP_SETUP=1"
+        exit 0
+    }
+    Assert-ImmutableSource $Destination
+    $dependencyManifest = Join-Path $Destination "incoming\dependency-cache\manifest.json"
+    if (-not (Test-Path -LiteralPath $dependencyManifest -PathType Leaf)) {
+        throw "the policy-bound offline dependency cache is missing; the newly published destination will be rolled back. Rebuild with -DependencyCache and keep its sidecar beside this installer. Models remain a separate explicit import."
+    }
+    Write-Host "==> running ownership-scoped offline setup (unsigned installer)"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Destination "bin\oracle.ps1") setup
+    if ($LASTEXITCODE -ne 0) {
+        throw "installer child setup failed: $LASTEXITCODE"
+    }
+    Write-Host "==> SentiVue Oracle setup completed"
+    exit 0
+} catch {
+    Write-Host ""
+    Write-Host "INSTALLER ERROR: $($_.Exception.Message)"
+    if ($PublishedNow -and (Test-Path -LiteralPath $Destination -PathType Container)) {
+        try {
+            $uninstaller = Join-Path $Destination "bootstrap\uninstall.ps1"
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $uninstaller `
+                -Apply -Root $Destination -HomePath $env:USERPROFILE
+            if ($LASTEXITCODE -ne 0) {
+                throw "ownership-scoped uninstaller failed: $LASTEXITCODE"
+            }
+        } catch {
+            Write-Host "WARN: ownership-scoped side-effect rollback reported an error"
+        }
+        $publishedItem = Get-Item -LiteralPath $Destination -Force
+        if (($publishedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $PublishedNow = $false
+    }
+    if ($Stage -and (Test-Path -LiteralPath $Stage)) {
+        Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    exit 1
+} finally {
+    if ($Stage -and (Test-Path -LiteralPath $Stage)) {
+        Remove-Item -LiteralPath $Stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+"""
+    powershell = powershell.replace("__ATOMIC_HELPER__", helper)
+    powershell = powershell.replace("__PAYLOAD_SHA256__", payload_sha256)
+    powershell = powershell.replace("__SOURCE_MANIFEST_B64__", source_manifest_b64)
+    powershell = powershell.replace(
+        "__SOURCE_MANIFEST_SHA256__", source_manifest_sha256
+    )
+    powershell = powershell.replace(
+        "__DEPENDENCY_BUNDLE_NAME__", dependency_bundle_name
+    )
+    powershell = powershell.replace(
+        "__DEPENDENCY_BUNDLE_SHA256__", dependency_bundle_sha256
+    )
+    powershell = powershell.replace("__INSTALL_IDENTITY__", install_identity)
+    header = r"""@echo off
+setlocal
+title SentiVue Oracle Setup
+set "ORACLE_SETUP_SELF=%~f0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$s=[IO.File]::ReadAllText($env:ORACLE_SETUP_SELF);$a='#=='+'PSPAYLOAD'+'==#';$b='#=='+'B64PAYLOAD'+'==#';$p=(($s -split [regex]::Escape($a),2)[1] -split [regex]::Escape($b),2)[0];iex $p"
+set "ORACLE_EXIT=%ERRORLEVEL%"
+if not "%ORACLE_EXIT%"=="0" echo Setup did not finish; the error above was preserved.
+endlocal & exit /b %ORACLE_EXIT%
+#==PSPAYLOAD==#
+"""
+    encoded = base64.b64encode(payload).decode("ascii")
+    chunks = "\r\n".join(
+        encoded[index : index + 76] for index in range(0, len(encoded), 76)
+    )
+    return (
+        header.replace("\n", "\r\n")
+        + powershell.replace("\n", "\r\n")
+        + "\r\n#==B64PAYLOAD==#\r\n"
+        + chunks
+        + "\r\n"
+    )
+
+
+def _harden_built_installer(
+    path: Path,
+    *,
+    dependency_bundle_name: str = "",
+    dependency_bundle_sha256: str = "",
+) -> dict[str, Any]:
     """Apply the required post-build transform without changing the protected source."""
 
     data = path.read_bytes()
-    marker_line = f"ORACLE_BUILD_TRANSFORM={INSTALLER_HARDENING_TRANSFORM}"
     if path.suffix.lower() == ".command":
         payload_marker = b"\n__PAYLOAD_BELOW__\n"
         if data.count(payload_marker) != 1:
-            raise LifecycleError("protected installer output lacks one macOS payload marker")
+            raise LifecycleError(
+                "protected installer output lacks one macOS payload marker"
+            )
         header, payload = data.split(payload_marker, 1)
         try:
             text = header.decode("utf-8")
@@ -1526,112 +3082,98 @@ def _harden_built_installer(path: Path) -> dict[str, Any]:
             raise LifecycleError(
                 "protected installer macOS failure-suppression pattern changed"
             )
-        text = text.replace("bash install || true", "bash install")
         if not text.startswith("#!/bin/bash\n"):
             raise LifecycleError("protected installer macOS shebang changed")
-        text = text.replace(
-            "#!/bin/bash\n",
-            f"#!/bin/bash\n# {marker_line}\n",
-            1,
-        )
+        files = _installer_payload_files(payload, ".command")
+        source_manifest = _installer_source_manifest(files)
+        payload_sha256 = _sha256_bytes(payload)
         atomic_write_bytes(
-            path, text.encode("utf-8") + payload_marker + payload, mode=0o755
+            path,
+            _macos_installer_header(
+                payload_sha256,
+                source_manifest,
+                dependency_bundle_name=dependency_bundle_name,
+                dependency_bundle_sha256=dependency_bundle_sha256,
+            ).encode("utf-8")
+            + payload,
+            mode=0o755,
         )
         return {
             "id": INSTALLER_HARDENING_TRANSFORM,
             "artifact": path.name,
-            "changes": ["propagate-install-failure", "utf8-header"],
+            "payload_sha256": payload_sha256,
+            "dependency_bundle_name": dependency_bundle_name,
+            "dependency_bundle_sha256": dependency_bundle_sha256,
+            "source_tree_sha256": _sha256_bytes(source_manifest),
+            "changes": [
+                "verify-embedded-payload",
+                "reject-traversal-links-special-entries",
+                "unique-same-volume-staging",
+                "atomic-create-only-install",
+                "preserve-existing-trees",
+                "propagate-install-failure",
+                "disclose-offline-prerequisites",
+            ],
         }
     if path.suffix.lower() != ".cmd":
-        raise LifecycleError(f"protected installer has an unexpected format: {path.name}")
+        raise LifecycleError(
+            f"protected installer has an unexpected format: {path.name}"
+        )
     try:
         text = data.decode("ascii")
     except UnicodeDecodeError as exc:
         raise LifecycleError("protected installer Windows output is not ASCII") from exc
     if text.count("#==B64PAYLOAD==#") != 1:
-        raise LifecycleError("protected installer output lacks one Windows payload marker")
+        raise LifecycleError(
+            "protected installer output lacks one Windows payload marker"
+        )
     if text.count('$ErrorActionPreference = "Stop"') != 1:
         raise LifecycleError("protected installer PowerShell preamble changed")
     if text.count("Set-Content -Path") != 2:
         raise LifecycleError("protected installer config-write patterns changed")
-    helper = _installer_atomic_helper()
-    text = text.replace(
-        '$ErrorActionPreference = "Stop"',
-        '$ErrorActionPreference = "Stop"\n' + helper,
-        1,
-    )
-    profile_write = (
-        'Set-Content -Path (Join-Path $dest "serving\\models.profile") '
-        '-Value (($sel.Models -split ",") -join "`n")'
-    )
-    tiers_write = (
-        'Set-Content -Path (Join-Path $dest "serving\\tiers.env") '
-        '-Value @("OPUS_MODEL=$($sel.Opus)", "SONNET_MODEL=$($sel.Sonnet)", '
-        '"HAIKU_MODEL=$($sel.Haiku)")'
-    )
-    if text.count(profile_write) != 1 or text.count(tiers_write) != 1:
-        raise LifecycleError("protected installer exact config-write patterns changed")
-    text = text.replace(
-        profile_write,
-        (
-            'Write-Utf8NoBomAtomic (Join-Path $dest "serving\\models.profile") '
-            '((($sel.Models -split ",") -join "`n") + "`n")'
-        ),
-        1,
-    )
-    text = text.replace(
-        tiers_write,
-        (
-            'Write-Utf8NoBomAtomic (Join-Path $dest "serving\\tiers.env") '
-            '((@("OPUS_MODEL=$($sel.Opus)", "SONNET_MODEL=$($sel.Sonnet)", '
-            '"HAIKU_MODEL=$($sel.Haiku)") -join "`n") + "`n")'
-        ),
-        1,
-    )
     model_acquisition = (
-        '& powershell -NoProfile -ExecutionPolicy Bypass -File '
+        "& powershell -NoProfile -ExecutionPolicy Bypass -File "
         '(Join-Path $dest "bootstrap\\download-models.ps1")'
     )
     if text.count(model_acquisition) != 1:
         raise LifecycleError("protected installer model-acquisition pattern changed")
-    text = text.replace(
-        model_acquisition,
-        (
-            'throw "Model acquisition is a separate explicit operation; '
-            'import a policy-bound cache before offline installation."'
-        ),
-        1,
+    marker = "#==B64PAYLOAD==#"
+    encoded = re.sub(r"[^A-Za-z0-9+/=]", "", text.split(marker, 1)[1])
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except binascii.Error as exc:
+        raise LifecycleError("protected installer payload is invalid base64") from exc
+    files = _installer_payload_files(payload, ".cmd")
+    source_manifest = _installer_source_manifest(files)
+    payload_sha256 = _sha256_bytes(payload)
+    atomic_write_bytes(
+        path,
+        _windows_installer_text(
+            payload,
+            payload_sha256,
+            source_manifest,
+            dependency_bundle_name=dependency_bundle_name,
+            dependency_bundle_sha256=dependency_bundle_sha256,
+        ).encode("ascii"),
     )
-    checked_commands = (
-        (
-            '& powershell -NoProfile -ExecutionPolicy Bypass -File '
-            '(Join-Path $dest "connectors\\ide\\setup-ide.ps1") install'
-        ),
-        (
-            '& powershell -NoProfile -ExecutionPolicy Bypass -File '
-            '(Join-Path $dest "bin\\oracle.ps1") setup'
-        ),
-    )
-    for command in checked_commands:
-        if text.count(command) != 1:
-            raise LifecycleError("protected installer child-command pattern changed")
-        text = text.replace(
-            command,
-            command
-            + '\n        if ($LASTEXITCODE -ne 0) { throw "installer child command failed: $LASTEXITCODE" }',
-            1,
-        )
-    if "Set-Content -Path" in text:
-        raise LifecycleError("protected installer still has ambiguous config writes")
-    atomic_write_bytes(path, text.encode("ascii"))
     return {
         "id": INSTALLER_HARDENING_TRANSFORM,
         "artifact": path.name,
+        "payload_sha256": payload_sha256,
+        "dependency_bundle_name": dependency_bundle_name,
+        "dependency_bundle_sha256": dependency_bundle_sha256,
+        "source_tree_sha256": _sha256_bytes(source_manifest),
         "changes": [
+            "verify-embedded-payload",
+            "reject-traversal-links-reparse-entries",
+            "unique-same-volume-staging",
+            "atomic-create-only-install",
+            "preserve-existing-trees",
             "atomic-utf8-no-bom-config",
             "reject-reparse-config-paths",
             "separate-online-acquisition",
             "propagate-child-failures",
+            "disclose-offline-prerequisites",
         ],
     }
 
@@ -1641,18 +3183,32 @@ def _build_installers(
     revision: str,
     output_dir: Path,
     version: str,
+    dependency_bundle: Path | None = None,
 ) -> tuple[list[Path], list[dict[str, Any]]]:
     executable = _find_powershell()
     if not executable:
         raise LifecycleError("PowerShell is required to build both installer formats")
-    entries, _requirements, source_provenance = _prepare_archive_entries(
-        root, revision
-    )
+    entries, _requirements, source_provenance = _prepare_archive_entries(root, revision)
     transform_disclosure = source_provenance.get("protected_builder_transform")
     if not isinstance(transform_disclosure, dict):
         raise LifecycleError(
             "immutable source does not disclose the protected installer transform"
         )
+    source_files = source_provenance.get("files")
+    tool_record = next(
+        (
+            item
+            for item in source_files
+            if isinstance(item, dict)
+            and item.get("path") == "verification/lifecycle.py"
+        ),
+        None,
+    ) if isinstance(source_files, list) else None
+    if (
+        not isinstance(tool_record, dict)
+        or not SHA256_PATTERN.fullmatch(str(tool_record.get("sha256", "")))
+    ):
+        raise LifecycleError("immutable source lacks the installer hardening tool")
     source_timestamp = _git_timestamp(root, revision)
     release_environment = dict(os.environ)
     release_environment.update(
@@ -1713,6 +3269,10 @@ def _build_installers(
             cwd=stage,
             env=release_environment,
         )
+        canonical_tar = Path(temporary) / "canonical-payload.tar.gz"
+        canonical_zip = Path(temporary) / "canonical-payload.zip"
+        _write_tar_gz(canonical_tar, entries, source_timestamp)
+        _write_zip(canonical_zip, entries, source_timestamp)
         names = (
             f"SentiVue-Oracle-Installer-{version}.command",
             f"SentiVue-Oracle-Setup-{version}.cmd",
@@ -1723,13 +3283,68 @@ def _build_installers(
             source = built / name
             if not source.is_file():
                 raise LifecycleError(f"installer builder did not produce {name}")
+            if source.suffix.lower() == ".command":
+                marker = b"\n__PAYLOAD_BELOW__\n"
+                generated = source.read_bytes()
+                if generated.count(marker) != 1:
+                    raise LifecycleError(
+                        "protected installer output lacks one macOS payload marker"
+                    )
+                header = generated.split(marker, 1)[0]
+                atomic_write_bytes(
+                    source,
+                    header + marker + canonical_tar.read_bytes(),
+                    mode=0o755,
+                )
+            else:
+                marker_text = "#==B64PAYLOAD==#"
+                try:
+                    generated_text = source.read_text(encoding="ascii")
+                except UnicodeDecodeError as exc:
+                    raise LifecycleError(
+                        "protected installer Windows output is not ASCII"
+                    ) from exc
+                if generated_text.count(marker_text) != 1:
+                    raise LifecycleError(
+                        "protected installer output lacks one Windows payload marker"
+                    )
+                header_text = generated_text.split(marker_text, 1)[0]
+                encoded = base64.b64encode(canonical_zip.read_bytes()).decode("ascii")
+                chunks = "\r\n".join(
+                    encoded[index : index + 76] for index in range(0, len(encoded), 76)
+                )
+                atomic_write_bytes(
+                    source,
+                    (
+                        header_text.rstrip("\r\n")
+                        + "\r\n"
+                        + marker_text
+                        + "\r\n"
+                        + chunks
+                        + "\r\n"
+                    ).encode("ascii"),
+                )
             target = output_dir / name
             if target.exists():
-                raise LifecycleError(f"refusing to overwrite existing artifact: {target}")
+                raise LifecycleError(
+                    f"refusing to overwrite existing artifact: {target}"
+                )
             shutil.copyfile(source, target)
-            transform = _harden_built_installer(target)
+            transform = _harden_built_installer(
+                target,
+                dependency_bundle_name=(
+                    dependency_bundle.name if dependency_bundle is not None else ""
+                ),
+                dependency_bundle_sha256=(
+                    _sha256_file(dependency_bundle)
+                    if dependency_bundle is not None
+                    else ""
+                ),
+            )
             transform["source_path"] = transform_disclosure["path"]
             transform["source_sha256"] = transform_disclosure["source_sha256"]
+            transform["tool_path"] = "verification/lifecycle.py"
+            transform["tool_sha256"] = tool_record["sha256"]
             transforms.append(transform)
             results.append(target)
         return results, transforms
@@ -1739,6 +3354,10 @@ def _require_release_inputs_match_revision(root: Path, revision: str) -> None:
     for relative in (
         "VERSIONS.lock",
         "bootstrap/build-installers.ps1",
+        "bootstrap/build-one-click-installers.ps1",
+        "bootstrap/build-one-click-installers.sh",
+        "bootstrap/build-macos-package.sh",
+        "verification/lifecycle.py",
         "verification/policy.json",
         DEPENDENCY_AUTHORITY_FILE,
         "serving/models.manifest",
@@ -1751,7 +3370,9 @@ def _require_release_inputs_match_revision(root: Path, revision: str) -> None:
         try:
             working = path.read_bytes()
         except OSError as exc:
-            raise LifecycleError(f"release authority input is unreadable: {relative}") from exc
+            raise LifecycleError(
+                f"release authority input is unreadable: {relative}"
+            ) from exc
         if working != committed:
             raise LifecycleError(
                 f"release authority input differs from immutable revision: {relative}"
@@ -1763,22 +3384,53 @@ def _build_release_bundle(
     version: str,
     output_dir: Path,
     revision: str,
+    dependency_cache: Path | None = None,
 ) -> ReleaseBundle:
     source_bundle = build_source_archives(root, revision, output_dir, version)
+    timestamp = _git_timestamp(root, source_bundle.revision)
+    dependency_bundle: Path | None = None
+    dependency_disclosure: dict[str, Any] | None = None
+    if dependency_cache is not None:
+        dependency_bundle, dependency_disclosure = _write_dependency_bundle(
+            root,
+            dependency_cache,
+            source_bundle.output_dir,
+            version,
+            timestamp,
+        )
     installers, transforms = _build_installers(
         root.resolve(),
         source_bundle.revision,
         source_bundle.output_dir,
         version,
+        dependency_bundle=dependency_bundle,
     )
-    artifacts = [*source_bundle.archives, *installers]
+    mac_command = next(path for path in installers if path.suffix == ".command")
+    command_zip = source_bundle.output_dir / f"{mac_command.name}.zip"
+    if command_zip.exists():
+        raise LifecycleError(f"refusing to overwrite existing artifact: {command_zip}")
+    _write_command_zip(
+        command_zip,
+        mac_command,
+        timestamp,
+    )
+    artifacts = [
+        *source_bundle.archives,
+        *([dependency_bundle] if dependency_bundle is not None else []),
+        *installers,
+        command_zip,
+    ]
     checksums, provenance = _write_release_metadata(
         source_bundle.output_dir,
         version,
         source_bundle.revision,
         artifacts,
-        _git_timestamp(root, source_bundle.revision),
+        timestamp,
+        _sha256_bytes(
+            _git_blob(root, source_bundle.revision, "verification/lifecycle.py")
+        ),
         build_transforms=transforms,
+        dependency_cache=dependency_disclosure,
     )
     bundle = ReleaseBundle(
         version=version,
@@ -1846,12 +3498,49 @@ def _reuse_immutable_release_output(
                 f"release output appeared during create-only resume: {name}"
             ) from exc
     verified = verify_release_bundle(output_dir)
-    if (
-        verified.version != expected.version
-        or verified.revision != expected.revision
-    ):
+    if verified.version != expected.version or verified.revision != expected.revision:
         raise LifecycleError("resumed release output differs from immutable rebuild")
     return verified
+
+
+def build_installer_bundle(
+    root: Path,
+    version: str,
+    output_dir: Path,
+    revision: str = "HEAD",
+    dependency_cache: Path | None = None,
+) -> ReleaseBundle:
+    """Build source archives plus both one-click installers without publishing."""
+
+    root = root.resolve()
+    output_dir = output_dir.resolve()
+    _validate_version(version)
+    resolved_revision = _resolve_revision(root, revision)
+    if resolved_revision != _current_revision(root):
+        raise LifecycleError(
+            "installer tooling must be executed from the checked-out revision"
+        )
+    _require_release_inputs_match_revision(root, resolved_revision)
+    if output_dir.is_dir() and any(output_dir.iterdir()):
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".installer-rebuild-", dir=output_dir.parent
+        ) as temporary_directory:
+            expected = _build_release_bundle(
+                root,
+                version,
+                Path(temporary_directory),
+                resolved_revision,
+                dependency_cache=dependency_cache,
+            )
+            return _reuse_immutable_release_output(expected, output_dir)
+    return _build_release_bundle(
+        root,
+        version,
+        output_dir,
+        resolved_revision,
+        dependency_cache=dependency_cache,
+    )
 
 
 def preflight_release(
@@ -1879,6 +3568,8 @@ def preflight_release(
         ),
         cache_root=dependency_cache,
         reproducible=True,
+        include_models=False,
+        include_optional=True,
     )
     if dependency_errors:
         raise LifecycleError(
@@ -1896,14 +3587,19 @@ def preflight_release(
                 version,
                 Path(temporary_directory),
                 resolved_revision,
+                dependency_cache=dependency_cache,
             )
             return _reuse_immutable_release_output(expected, output_dir)
-    return _build_release_bundle(root, version, output_dir, resolved_revision)
+    return _build_release_bundle(
+        root,
+        version,
+        output_dir,
+        resolved_revision,
+        dependency_cache=dependency_cache,
+    )
 
 
-def _existing_tag_targets(
-    root: Path, version: str
-) -> tuple[str | None, str | None]:
+def _existing_tag_targets(root: Path, version: str) -> tuple[str | None, str | None]:
     local_result = _run(
         ["git", "rev-parse", f"refs/tags/{version}^{{commit}}"], cwd=root
     )
@@ -1923,16 +3619,16 @@ def _existing_tag_targets(
     )
     remote: str | None = None
     if remote_result.returncode == 0:
-        first_line = str(remote_result.stdout).splitlines()[0] if remote_result.stdout else ""
+        first_line = (
+            str(remote_result.stdout).splitlines()[0] if remote_result.stdout else ""
+        )
         remote = first_line.split(maxsplit=1)[0]
         if not COMMIT_PATTERN.fullmatch(remote):
             raise LifecycleError(f"remote release tag is malformed: {version}")
     return local, remote
 
 
-def _existing_release_assets(
-    root: Path, version: str
-) -> dict[str, str] | None:
+def _existing_release_assets(root: Path, version: str) -> dict[str, str] | None:
     result = _run(
         ["gh", "release", "view", version, "--json", "tagName,assets"],
         cwd=root,
@@ -1965,7 +3661,7 @@ def publish_release(
     output_dir: Path,
     revision: str = "HEAD",
 ) -> ReleaseBundle:
-    """Create a new tag and release only after a complete local preflight."""
+    """Push one immutable tag after preflight; CI owns draft-first publication."""
 
     root = root.resolve()
     _validate_version(version)
@@ -1977,58 +3673,11 @@ def publish_release(
             raise LifecycleError(
                 f"{location} release tag {version} points to a different revision"
             )
-    release_assets = _existing_release_assets(root, version)
-    if release_assets is not None and remote_tag is None:
-        raise LifecycleError("existing release has no matching remote tag")
-    release_paths = [
-        *bundle.archives,
-        bundle.checksums,
-        bundle.provenance,
-    ]
-    expected_assets = {path.name: _sha256_file(path) for path in release_paths}
-    missing_assets: list[Path] = []
-    if release_assets is not None:
-        unexpected = set(release_assets) - set(expected_assets)
-        if unexpected:
-            raise LifecycleError(
-                "existing release has unexpected immutable assets: "
-                + ", ".join(sorted(unexpected))
-            )
-        for path in release_paths:
-            digest = release_assets.get(path.name)
-            if digest is None:
-                missing_assets.append(path)
-            elif digest != f"sha256:{expected_assets[path.name]}":
-                raise LifecycleError(
-                    f"existing release asset digest differs: {path.name}"
-                )
-
     commands: list[list[str]] = []
     if local_tag is None:
         commands.append(["git", "tag", version, bundle.revision])
     if remote_tag is None:
         commands.append(["git", "push", "origin", f"refs/tags/{version}"])
-    if release_assets is None:
-        commands.append(
-            [
-            "gh",
-            "release",
-            "create",
-            version,
-            *[str(path) for path in release_paths],
-            "--title",
-            f"SentiVue Oracle {version}",
-            "--notes",
-            (
-                f"Immutable release from {bundle.revision}. "
-                "Verify every asset with SHA256SUMS."
-            ),
-            ]
-        )
-    elif missing_assets:
-        commands.append(
-            ["gh", "release", "upload", version, *[str(path) for path in missing_assets]]
-        )
     for command in commands:
         completed = _run(command, cwd=root)
         if completed.returncode != 0:
@@ -2277,9 +3926,7 @@ def _guard_source_destination(
                 f"source trusted root ancestor is not a directory: {candidate}"
             )
     if not trusted_root.is_dir():
-        raise LifecycleError(
-            f"explicit source trusted root is missing: {trusted_root}"
-        )
+        raise LifecycleError(f"explicit source trusted root is missing: {trusted_root}")
     real_root = Path(os.path.realpath(trusted_root))
     current = trusted_root
     for index, part in enumerate(relative.parts):
@@ -2298,9 +3945,8 @@ def _guard_source_destination(
                 )
             resolved = Path(os.path.realpath(current))
             try:
-                contained = (
-                    os.path.commonpath((str(real_root), str(resolved)))
-                    == str(real_root)
+                contained = os.path.commonpath((str(real_root), str(resolved))) == str(
+                    real_root
                 )
             except ValueError:
                 contained = False
@@ -2314,9 +3960,7 @@ def _guard_source_destination(
 def _create_source_parent(trusted_root: Path, destination: Path) -> None:
     """Create missing destination ancestors one at a time under a checked root."""
 
-    trusted_root, destination = _guard_source_destination(
-        trusted_root, destination
-    )
+    trusted_root, destination = _guard_source_destination(trusted_root, destination)
     relative_parent = destination.parent.relative_to(trusted_root)
     current = trusted_root
     for part in relative_parent.parts:
@@ -2378,7 +4022,11 @@ def _extract_source_archive(archive_path: Path, destination: Path) -> Path:
         except (tarfile.TarError, OSError) as exc:
             raise LifecycleError(f"invalid source tar archive: {archive_path}") from exc
     children = list(destination.iterdir())
-    if len(children) == 1 and children[0].is_dir() and not _is_reparse_point(children[0]):
+    if (
+        len(children) == 1
+        and children[0].is_dir()
+        and not _is_reparse_point(children[0])
+    ):
         return children[0]
     return destination
 
@@ -2390,7 +4038,9 @@ def _source_tree_digest(source_root: Path) -> str:
         if relative == SOURCE_RECEIPT:
             continue
         if _is_reparse_point(path):
-            raise LifecycleError(f"installed source tree contains a reparse point: {path}")
+            raise LifecycleError(
+                f"installed source tree contains a reparse point: {path}"
+            )
         encoded = relative.encode("utf-8")
         digest.update(len(encoded).to_bytes(4, "big"))
         digest.update(encoded)
@@ -2436,7 +4086,9 @@ def _source_receipt(
     try:
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LifecycleError("source destination has an invalid ownership receipt") from exc
+        raise LifecycleError(
+            "source destination has an invalid ownership receipt"
+        ) from exc
     required = {
         "schema_version",
         "artifact_id",
@@ -2497,9 +4149,7 @@ def _source_install_preflight(
     """Validate policy, archive, containment, and prior ownership without mutation."""
 
     root = root.resolve()
-    _trusted_root, destination = _guard_source_destination(
-        trusted_root, destination
-    )
+    _trusted_root, destination = _guard_source_destination(trusted_root, destination)
     archive_path = resolve_cached_artifact(
         manifest_path,
         cache_root,
@@ -2514,9 +4164,7 @@ def _source_install_preflight(
         raise LifecycleError("; ".join(errors))
     record = records[artifact_id]
     previous = (
-        _source_receipt(destination, artifact_id)
-        if destination.exists()
-        else None
+        _source_receipt(destination, artifact_id) if destination.exists() else None
     )
     temporary, expected_root = _expected_source_tree(archive_path)
     try:
@@ -2575,18 +4223,12 @@ def install_source_archive(
         expected_version=expected_version,
         expected_requested_version=expected_requested_version,
     )
-    trusted_root, destination = _guard_source_destination(
-        trusted_root, destination
-    )
-    desired_receipt = _source_receipt_payload(
-        artifact_id, record, expected_tree_digest
-    )
+    trusted_root, destination = _guard_source_destination(trusted_root, destination)
+    desired_receipt = _source_receipt_payload(artifact_id, record, expected_tree_digest)
     if previous == desired_receipt:
         return destination
     _create_source_parent(trusted_root, destination)
-    trusted_root, destination = _guard_source_destination(
-        trusted_root, destination
-    )
+    trusted_root, destination = _guard_source_destination(trusted_root, destination)
     temporary, content_root = _expected_source_tree(archive_path, destination.parent)
     backup_temporary: Path | None = None
     backup: Path | None = None
@@ -2779,9 +4421,7 @@ def _normalize_dependency_authority(
         raise LifecycleError(f"{artifact_id}: dependency authority is invalid")
     parsed = urllib.parse.urlparse(source_url)
     if parsed.username or parsed.password:
-        raise LifecycleError(
-            f"{artifact_id}: authority source URL embeds credentials"
-        )
+        raise LifecycleError(f"{artifact_id}: authority source URL embeds credentials")
     if kind == "container":
         if not re.fullmatch(
             r"oci://[^@\s]+@sha256:[0-9a-f]{64}",
@@ -2790,16 +4430,10 @@ def _normalize_dependency_authority(
             raise LifecycleError(
                 f"{artifact_id}: container authority is not digest-immutable"
             )
-    elif parsed.scheme != "https" and not (
-        allow_file and parsed.scheme == "file"
-    ):
-        raise LifecycleError(
-            f"{artifact_id}: authority source URL must use HTTPS"
-        )
+    elif parsed.scheme != "https" and not (allow_file and parsed.scheme == "file"):
+        raise LifecycleError(f"{artifact_id}: authority source URL must use HTTPS")
     if kind == "git" and not COMMIT_PATTERN.fullmatch(resolved):
-        raise LifecycleError(
-            f"{artifact_id}: Git authority lacks an immutable commit"
-        )
+        raise LifecycleError(f"{artifact_id}: Git authority lacks an immutable commit")
     return {
         "kind": str(kind),
         "requested_version": requested,
@@ -2828,9 +4462,7 @@ def _dependency_authorities_from_payload(
             raise LifecycleError(
                 "dependency authority manifest contains an invalid entry"
             )
-        authorities[artifact_id] = _normalize_dependency_authority(
-            artifact_id, raw
-        )
+        authorities[artifact_id] = _normalize_dependency_authority(artifact_id, raw)
     return authorities
 
 
@@ -2843,7 +4475,9 @@ def _load_dependency_authorities(
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LifecycleError(f"dependency authority manifest is unreadable: {exc}") from exc
+        raise LifecycleError(
+            f"dependency authority manifest is unreadable: {exc}"
+        ) from exc
     return _dependency_authorities_from_payload(payload)
 
 
@@ -2873,9 +4507,7 @@ def _validate_dependency_authority_policy(
         )
     source = raw.get("source")
     if not isinstance(source, dict):
-        raise LifecycleError(
-            f"{artifact_id}: authoritative source policy is missing"
-        )
+        raise LifecycleError(f"{artifact_id}: authoritative source policy is missing")
     locked_digest = _trusted_digest(source, versions)
     if (
         SHA256_PATTERN.fullmatch(locked_digest)
@@ -2912,10 +4544,7 @@ def _validate_dependency_authority_policy(
         or "unresolved" in identity
         or "unresolved" in expected_url
     )
-    if (
-        not unresolved_identity
-        and normalized["source_url"] != expected_url
-    ):
+    if not unresolved_identity and normalized["source_url"] != expected_url:
         raise LifecycleError(
             f"{artifact_id}: promoted source differs from VERSIONS.lock identity"
         )
@@ -2926,12 +4555,9 @@ def _validate_dependency_authority_policy(
             if isinstance(identity_digest_key, str)
             else ""
         )
-        if (
-            re.fullmatch(r"sha256:[0-9a-f]{64}", locked_identity_digest)
-            and not normalized["source_url"].endswith(
-                f"@{locked_identity_digest}"
-            )
-        ):
+        if re.fullmatch(
+            r"sha256:[0-9a-f]{64}", locked_identity_digest
+        ) and not normalized["source_url"].endswith(f"@{locked_identity_digest}"):
             raise LifecycleError(
                 f"{artifact_id}: promoted container digest differs from VERSIONS.lock"
             )
@@ -2947,27 +4573,19 @@ def _effective_dependency_authority(
 ) -> dict[str, str]:
     artifact_id = str(raw.get("id", ""))
     available = (
-        _load_dependency_authorities(root)
-        if authorities is None
-        else authorities
+        _load_dependency_authorities(root) if authorities is None else authorities
     )
     promoted = available.get(artifact_id)
     if promoted is not None:
-        return _validate_dependency_authority_policy(
-            versions, raw, promoted
-        )
+        return _validate_dependency_authority_policy(versions, raw, promoted)
     version_key = str(raw.get("version_key", ""))
     requested = versions.get(version_key, "")
     source = raw.get("source")
     if not isinstance(source, dict):
-        raise LifecycleError(
-            f"{artifact_id}: authoritative source policy is missing"
-        )
+        raise LifecycleError(f"{artifact_id}: authoritative source policy is missing")
     digest = _trusted_digest(source, versions)
     if not SHA256_PATTERN.fullmatch(digest):
-        raise LifecycleError(
-            f"{artifact_id}: immutable trusted digest is unresolved"
-        )
+        raise LifecycleError(f"{artifact_id}: immutable trusted digest is unresolved")
     kind = str(raw.get("kind", ""))
     resolved = _trusted_resolved_version(source, versions, requested)
     if kind == "git":
@@ -2977,9 +4595,7 @@ def _effective_dependency_authority(
                 f"{artifact_id}: immutable trusted revision is unresolved"
             )
     elif not _is_exact_pin(resolved):
-        raise LifecycleError(
-            f"{artifact_id}: trusted resolved version is unresolved"
-        )
+        raise LifecycleError(f"{artifact_id}: trusted resolved version is unresolved")
     source_url = _authoritative_source_url(
         source,
         versions,
@@ -3033,14 +4649,12 @@ def promote_dependency_authority(
     try:
         supplied_payload = json.loads(authority_file.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise LifecycleError(f"supplied dependency authority is unreadable: {exc}") from exc
-    supplied = _dependency_authorities_from_payload(supplied_payload).get(
-        artifact_id
-    )
-    if supplied is None:
         raise LifecycleError(
-            f"supplied dependency authority lacks {artifact_id}"
-        )
+            f"supplied dependency authority is unreadable: {exc}"
+        ) from exc
+    supplied = _dependency_authorities_from_payload(supplied_payload).get(artifact_id)
+    if supplied is None:
+        raise LifecycleError(f"supplied dependency authority lacks {artifact_id}")
     versions, policy = _load_dependency_policy(root)
     raw_inputs = policy.get("dependency_inputs", [])
     raw = next(
@@ -3055,16 +4669,12 @@ def promote_dependency_authority(
         raise LifecycleError(
             f"{artifact_id}: absent from authoritative dependency policy"
         )
-    promoted = _validate_dependency_authority_policy(
-        versions, raw, supplied
-    )
+    promoted = _validate_dependency_authority_policy(versions, raw, supplied)
     authorities = _load_dependency_authorities(root)
     authorities[artifact_id] = promoted
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "authorities": {
-            key: authorities[key] for key in sorted(authorities)
-        },
+        "authorities": {key: authorities[key] for key in sorted(authorities)},
     }
     atomic_write_bytes(tracked_path, _json_bytes(payload))
     return promoted
@@ -3089,10 +4699,10 @@ def _trusted_export_digest(
         None,
     )
     if raw is None:
-        raise LifecycleError(f"{artifact_id}: absent from authoritative dependency policy")
-    authority = _effective_dependency_authority(
-        root.resolve(), versions, raw
-    )
+        raise LifecycleError(
+            f"{artifact_id}: absent from authoritative dependency policy"
+        )
+    authority = _effective_dependency_authority(root.resolve(), versions, raw)
     if requested_version != authority["requested_version"]:
         raise LifecycleError(
             f"{artifact_id}: requested version differs from authoritative policy"
@@ -3176,10 +4786,7 @@ def export_artifact(
             requested_version=requested_version,
             resolved_version=resolved_version,
         )
-        if (
-            expected_sha256 is not None
-            and expected_sha256.lower() != policy_digest
-        ):
+        if expected_sha256 is not None and expected_sha256.lower() != policy_digest:
             raise LifecycleError(
                 "caller-supplied hash differs from authoritative trusted digest"
             )
@@ -3330,15 +4937,15 @@ def import_model_snapshot(
         "include": supplied.get("include"),
         "files": sorted(
             supplied.get("files", []),
-            key=lambda item: str(item.get("path", "")) if isinstance(item, dict) else "",
+            key=lambda item: (
+                str(item.get("path", "")) if isinstance(item, dict) else ""
+            ),
         ),
     }
     if "layer_mib" in supplied:
         normalized_supplied["layer_mib"] = supplied.get("layer_mib")
     if "kv_mib_per_token" in supplied:
-        normalized_supplied["kv_mib_per_token"] = supplied.get(
-            "kv_mib_per_token"
-        )
+        normalized_supplied["kv_mib_per_token"] = supplied.get("kv_mib_per_token")
     if normalized_supplied != tracked:
         raise LifecycleError(
             f"supplied model authority differs from tracked policy: {model_name}"
@@ -3358,9 +4965,7 @@ def import_model_snapshot(
         relative: path
         for relative, path in _local_model_files(model_root, tracked["include"])
     }
-    expected_files = {
-        str(item["path"]): item for item in tracked["files"]
-    }
+    expected_files = {str(item["path"]): item for item in tracked["files"]}
     if set(local_files) != set(expected_files):
         missing = sorted(set(expected_files) - set(local_files))
         unexpected = sorted(set(local_files) - set(expected_files))
@@ -3467,8 +5072,7 @@ def validate_model_snapshot(
             or payload.get("include") != authority["include"]
             or payload.get("requested_revision") != authority["revision"]
             or payload.get("resolved_revision") != authority["revision"]
-            or payload.get("authority_sha256")
-            != _model_authority_digest(authority)
+            or payload.get("authority_sha256") != _model_authority_digest(authority)
             or raw_files != authority["files"]
         ):
             return [f"{record.artifact_id}: policy-bound model authority mismatch"]
@@ -3647,9 +5251,7 @@ def validate_dependency_inputs(
             )
             continue
         try:
-            _validate_dependency_authority_policy(
-                versions, raw, authority
-            )
+            _validate_dependency_authority_policy(versions, raw, authority)
         except LifecycleError as exc:
             errors.append(str(exc))
     for raw in raw_inputs:
@@ -3665,11 +5267,7 @@ def validate_dependency_inputs(
             continue
         if artifact_ids is not None and artifact_id not in artifact_ids:
             continue
-        if (
-            raw.get("optional", False)
-            and artifact_ids is None
-            and not include_optional
-        ):
+        if raw.get("optional", False) and artifact_ids is None and not include_optional:
             continue
         value = versions.get(version_key)
         if value is None:
@@ -3681,9 +5279,7 @@ def validate_dependency_inputs(
                 artifact_id not in authorities
                 and isinstance(source, dict)
                 and raw.get("kind") == "git"
-                and not COMMIT_PATTERN.fullmatch(
-                    _trusted_revision(source, versions)
-                )
+                and not COMMIT_PATTERN.fullmatch(_trusted_revision(source, versions))
             ):
                 errors.append(
                     f"{artifact_id}: immutable trusted revision is unresolved"
@@ -3699,9 +5295,7 @@ def validate_dependency_inputs(
                     if isinstance(identity_digest_key, str)
                     else ""
                 )
-                if not re.fullmatch(
-                    r"sha256:[0-9a-f]{64}", identity_digest
-                ):
+                if not re.fullmatch(r"sha256:[0-9a-f]{64}", identity_digest):
                     errors.append(
                         f"{artifact_id}: immutable container identity "
                         "digest is unresolved"
@@ -3718,7 +5312,9 @@ def validate_dependency_inputs(
                 errors.append(str(exc))
             record = records.get(artifact_id)
             if record is None:
-                errors.append(f"{artifact_id}: reproducible mode needs a resolved artifact")
+                errors.append(
+                    f"{artifact_id}: reproducible mode needs a resolved artifact"
+                )
                 continue
             if record.trust != "policy-bound":
                 errors.append(
@@ -3743,13 +5339,17 @@ def validate_dependency_inputs(
                     f"{artifact_id}: resolution did not record unresolved input"
                 )
             elif not dynamic and record.requested_version != value:
-                errors.append(f"{artifact_id}: requested version differs from {version_key}")
+                errors.append(
+                    f"{artifact_id}: requested version differs from {version_key}"
+                )
             elif (
                 not dynamic
                 and raw.get("kind") != "git"
                 and record.resolved_version != value
             ):
-                errors.append(f"{artifact_id}: resolved version differs from {version_key}")
+                errors.append(
+                    f"{artifact_id}: resolved version differs from {version_key}"
+                )
 
     for model in models:
         artifact_id = f"model:{model['name']}"
@@ -3765,15 +5365,21 @@ def validate_dependency_inputs(
                     f"{artifact_id}: reproducible mode needs a trusted revision in models.manifest"
                 )
             if record is None:
-                errors.append(f"{artifact_id}: reproducible mode needs a resolved artifact")
+                errors.append(
+                    f"{artifact_id}: reproducible mode needs a resolved artifact"
+                )
             elif record.trust != "policy-bound":
                 errors.append(
                     f"{artifact_id}: untrusted acquisition evidence is not reproducible"
                 )
             elif not COMMIT_PATTERN.fullmatch(record.resolved_version):
-                errors.append(f"{artifact_id}: resolved model revision is not immutable")
+                errors.append(
+                    f"{artifact_id}: resolved model revision is not immutable"
+                )
             elif revision != "dynamic" and record.requested_version != revision:
-                errors.append(f"{artifact_id}: requested revision differs from manifest")
+                errors.append(
+                    f"{artifact_id}: requested revision differs from manifest"
+                )
             elif revision != "dynamic" and record.resolved_version != revision:
                 errors.append(f"{artifact_id}: resolved revision differs from manifest")
             elif artifact_manifest is not None:
@@ -3837,9 +5443,7 @@ def _load_json_template(path: Path, default: Mapping[str, Any]) -> dict[str, Any
     return payload
 
 
-def _detect_model_ids(
-    root: Path, models: Sequence[Mapping[str, str]]
-) -> list[str]:
+def _detect_model_ids(root: Path, models: Sequence[Mapping[str, str]]) -> list[str]:
     cache_root = root / "incoming" / "dependency-cache"
     detected: list[str] = []
     for model in models:
@@ -3897,9 +5501,7 @@ def resolve_sync_profile(
                 f"serving/profiles.conf:{line_number}: expected 7 fields"
             )
         name, _minimum, raw_models, opus, sonnet, haiku, _download = fields
-        models = tuple(
-            item.strip() for item in raw_models.split(",") if item.strip()
-        )
+        models = tuple(item.strip() for item in raw_models.split(",") if item.strip())
         if (
             not name
             or not models
@@ -3942,9 +5544,7 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
     home = home.resolve()
     manifest_path = root / "serving" / "models.manifest"
     try:
-        models, errors = _parse_models_text(
-            manifest_path.read_text(encoding="utf-8")
-        )
+        models, errors = _parse_models_text(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError) as exc:
         raise LifecycleError(f"model manifest is unreadable: {exc}") from exc
     if errors:
@@ -3956,17 +5556,13 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
             "configuration is unavailable"
         )
     by_name = {model["name"]: model for model in models}
-    admission_path = (
-        root / "state" / "generated" / "serving" / "admission.json"
-    )
+    admission_path = root / "state" / "generated" / "serving" / "admission.json"
     admission_payload: dict[str, Any] | None = None
     admission_models: dict[str, Any] | None = None
     admission_tiers: dict[str, Any] | None = None
     if admission_path.is_file():
         try:
-            raw_admission = json.loads(
-                admission_path.read_text(encoding="utf-8")
-            )
+            raw_admission = json.loads(admission_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise LifecycleError(
                 f"serving admission metadata is invalid: {exc}"
@@ -4048,13 +5644,12 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
         )
         haiku = fast[0]["name"] if fast else sonnet
     anchor = sonnet
-    ordered = [by_name[anchor], *[model for model in detected if model["name"] != anchor]]
+    ordered = [
+        by_name[anchor],
+        *[model for model in detected if model["name"] != anchor],
+    ]
 
-    tiers_text = (
-        f"OPUS_MODEL={opus}\n"
-        f"SONNET_MODEL={sonnet}\n"
-        f"HAIKU_MODEL={haiku}\n"
-    )
+    tiers_text = f"OPUS_MODEL={opus}\nSONNET_MODEL={sonnet}\nHAIKU_MODEL={haiku}\n"
     tiers_path = root / "serving" / "tiers.env"
     admitted_contexts: dict[str, int] = {}
     if admission_payload is not None:
@@ -4080,9 +5675,7 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
             )
             raw_nominal = by_name[model_name]["context"]
             if not str(raw_nominal).isdigit():
-                raise LifecycleError(
-                    f"model context is invalid: {model_name}"
-                )
+                raise LifecycleError(f"model context is invalid: {model_name}")
             nominal = int(raw_nominal)
             if (
                 not isinstance(advertised, int)
@@ -4128,9 +5721,7 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
         model["name"]: admitted_contexts.get(
             model["name"],
             min(
-                int(model["context"])
-                if str(model["context"]).isdigit()
-                else 8192,
+                int(model["context"]) if str(model["context"]).isdigit() else 8192,
                 8192,
             ),
         )
@@ -4191,9 +5782,7 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
 
     kilo_marker = b"// GENERATED by SentiVue Oracle lifecycle\n"
     kilo_path = root / "state" / "generated" / "kilo" / "kilo.jsonc"
-    kilo_models = {
-        name: value for name, value in model_map.items()
-    }
+    kilo_models = {name: value for name, value in model_map.items()}
     kilo_payload = {
         "model": f"openai-compatible/{anchor}",
         "share": "disabled",
@@ -4215,9 +5804,11 @@ def sync_model_configs(root: Path, home: Path) -> list[Path]:
         "permission": {"edit": "allow", "bash": "allow", "webfetch": "deny"},
         "experimental": {"openTelemetry": False},
     }
-    kilo_text = kilo_marker.decode("ascii") + json.dumps(
-        kilo_payload, indent=2, sort_keys=True
-    ) + "\n"
+    kilo_text = (
+        kilo_marker.decode("ascii")
+        + json.dumps(kilo_payload, indent=2, sort_keys=True)
+        + "\n"
+    )
 
     writes = {
         tiers_path: tiers_text,
@@ -4333,10 +5924,9 @@ def _current_revision(root: Path) -> str:
             provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
             if isinstance(provenance, dict):
                 revision = str(provenance.get("source_revision", ""))
-                if (
-                    provenance.get("schema_version") == SCHEMA_VERSION
-                    and COMMIT_PATTERN.fullmatch(revision)
-                ):
+                if provenance.get(
+                    "schema_version"
+                ) == SCHEMA_VERSION and COMMIT_PATTERN.fullmatch(revision):
                     return revision
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             pass
@@ -4373,7 +5963,9 @@ def initialize_install_state(
     if path.is_file():
         previous = _read_state(root)
         if previous.get("installation_root") != str(root):
-            raise LifecycleError("install state belongs to a different installation root")
+            raise LifecycleError(
+                "install state belongs to a different installation root"
+            )
         if previous.get("home_root") != str(home):
             raise LifecycleError("install state belongs to a different home root")
         owned_paths = previous["owned_paths"]
@@ -4425,9 +6017,7 @@ def phase_is_current(root: Path, phase: str) -> bool:
         for raw in phase_paths:
             if not isinstance(raw, dict):
                 return False
-            _scope, _relative, kind, digest, target = _owned_target(
-                root, home, raw
-            )
+            _scope, _relative, kind, digest, target = _owned_target(root, home, raw)
             if kind == "directory":
                 if not target.is_dir() or _is_reparse_point(target):
                     return False
@@ -4455,9 +6045,7 @@ def begin_install_phase(root: Path, phase: str) -> None:
     root = _guard_state_root(root)
     state = _read_state(root)
     state["pending_phase"] = phase
-    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
-        "+00:00", "Z"
-    )
+    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     _write_state(root, state)
 
 
@@ -4479,9 +6067,7 @@ def mark_install_phase(root: Path, phase: str) -> None:
     }
     if state.get("pending_phase") == phase:
         state["pending_phase"] = None
-    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
-        "+00:00", "Z"
-    )
+    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     _write_state(root, state)
 
 
@@ -4565,9 +6151,7 @@ def register_owned_path(root: Path, home: Path, path: Path) -> dict[str, Any]:
         state["owned_paths"],
         key=lambda item: (str(item.get("scope")), str(item.get("path"))),
     )
-    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
-        "+00:00", "Z"
-    )
+    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     _write_state(root, state)
     return entry
 
@@ -4628,9 +6212,7 @@ def register_owned_tree(
         state["owned_paths"],
         key=lambda item: (str(item.get("scope")), str(item.get("path"))),
     )
-    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
-        "+00:00", "Z"
-    )
+    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     _write_state(root, state)
     return entries
 
@@ -4675,9 +6257,7 @@ def register_owned_service(
         state["owned_services"],
         key=lambda item: (str(item.get("kind")), str(item.get("identifier"))),
     )
-    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
-        "+00:00", "Z"
-    )
+    state["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     _write_state(root, state)
     return entry
 
@@ -4693,10 +6273,7 @@ def _validate_owned_service(raw: Mapping[str, Any]) -> dict[str, str]:
         return {"kind": kind, "identifier": identifier}
     if kind == "windows-pid-file" and identifier == "state/llama-swap.pid":
         return {"kind": kind, "identifier": identifier}
-    if (
-        kind == "windows-scheduled-task"
-        and identifier == "SentiVueOracleServing"
-    ):
+    if kind == "windows-scheduled-task" and identifier == "SentiVueOracleServing":
         return {"kind": kind, "identifier": identifier}
     raise LifecycleError("unsafe owned service identifier in install state")
 
@@ -4790,7 +6367,9 @@ def _stop_owned_service(service: Mapping[str, str], root: Path | None = None) ->
         raise LifecycleError("unsafe owned service identifier in install state")
     launchctl = shutil.which("launchctl")
     if not launchctl or not hasattr(os, "getuid"):
-        raise LifecycleError("cannot safely stop owned launchd service on this platform")
+        raise LifecycleError(
+            "cannot safely stop owned launchd service on this platform"
+        )
     target = f"gui/{os.getuid()}/{service['identifier']}"
     present = _run([launchctl, "print", target])
     if present.returncode != 0:
@@ -4879,9 +6458,7 @@ def _owned_target(
     ):
         raise LifecycleError("unsafe ownership fingerprint in install state")
     base = root if scope == "install" else home
-    target = _managed_target(
-        base, relative, allow_final_reparse=kind == "symlink"
-    )
+    target = _managed_target(base, relative, allow_final_reparse=kind == "symlink")
     return scope, relative, kind, digest if isinstance(digest, str) else None, target
 
 
@@ -4905,11 +6482,7 @@ def _remove_owned(
             return "remove", "owned directory is empty"
         return "preserve-nonempty", "owned directory contains unowned entries"
     actual_kind = (
-        "symlink"
-        if _is_reparse_point(target)
-        else "file"
-        if target.is_file()
-        else ""
+        "symlink" if _is_reparse_point(target) else "file" if target.is_file() else ""
     )
     if actual_kind != kind:
         return "preserve-modified", "owned path changed type"
@@ -4974,9 +6547,7 @@ def uninstall(
                 _stop_owned_service(service, root)
     for raw, (scope, relative, kind, digest, target) in validated:
         base = root if scope == "install" else home
-        target = _managed_target(
-            base, relative, allow_final_reparse=kind == "symlink"
-        )
+        target = _managed_target(base, relative, allow_final_reparse=kind == "symlink")
         action, reason = _remove_owned(
             target,
             kind=kind,
@@ -4990,9 +6561,7 @@ def uninstall(
     if purge:
         for relative in PURGE_ROOTS:
             validate_relative_path(relative)
-            target = _managed_target(
-                root, relative, allow_final_reparse=True
-            )
+            target = _managed_target(root, relative, allow_final_reparse=True)
             if target.exists() or target.is_symlink():
                 entries.append(
                     UninstallEntry(
@@ -5003,9 +6572,7 @@ def uninstall(
                     )
                 )
                 if apply:
-                    target = _managed_target(
-                        root, relative, allow_final_reparse=True
-                    )
+                    target = _managed_target(root, relative, allow_final_reparse=True)
                     if _is_reparse_point(target):
                         if target.is_dir():
                             target.rmdir()
@@ -5019,8 +6586,8 @@ def uninstall(
     if apply and not purge:
         state["owned_services"] = []
         state["owned_paths"] = retained
-        state["updated_at"] = datetime.now(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
+        state["updated_at"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         )
         _write_state(root, state)
     return UninstallPlan(applied=apply, purge=purge, entries=entries)
@@ -5036,23 +6603,40 @@ def _print_uninstall(plan: UninstallPlan) -> None:
 
 
 def _command_package(args: argparse.Namespace) -> int:
-    bundle = build_source_archives(
-        args.root, args.revision, args.output, args.version
-    )
+    bundle = build_source_archives(args.root, args.revision, args.output, args.version)
     verify_release_bundle(bundle.output_dir)
     print(bundle.output_dir)
     return 0
 
 
+def _command_installers(args: argparse.Namespace) -> int:
+    bundle = build_installer_bundle(
+        args.root,
+        args.version,
+        args.output,
+        args.revision,
+        dependency_cache=args.dependency_cache,
+    )
+    print(bundle.output_dir)
+    return 0
+
+
+def _command_finalize_installers(args: argparse.Namespace) -> int:
+    checksums, provenance = finalize_installer_release(
+        args.base,
+        args.package,
+        args.output,
+    )
+    print(checksums)
+    print(provenance)
+    return 0
+
+
 def _command_release(args: argparse.Namespace) -> int:
     if args.publish:
-        bundle = publish_release(
-            args.root, args.version, args.output, args.revision
-        )
+        bundle = publish_release(args.root, args.version, args.output, args.revision)
     else:
-        bundle = preflight_release(
-            args.root, args.version, args.output, args.revision
-        )
+        bundle = preflight_release(args.root, args.version, args.output, args.revision)
     print(bundle.output_dir)
     return 0
 
@@ -5063,6 +6647,7 @@ def _command_validate_dependencies(args: argparse.Namespace) -> int:
         artifact_manifest=args.manifest,
         cache_root=args.cache,
         reproducible=args.reproducible,
+        include_models=not args.exclude_models,
         include_optional=args.include_optional,
     )
     if errors:
@@ -5262,9 +6847,7 @@ def _command_state(args: argparse.Namespace) -> int:
     if args.state_action == "own-model":
         if not args.model_name or args.cache is None:
             raise LifecycleError("state own-model requires --model-name and --cache")
-        register_model_ownership(
-            args.root, args.home, args.cache, args.model_name
-        )
+        register_model_ownership(args.root, args.home, args.cache, args.model_name)
         return 0
     raise LifecycleError("unknown state action")
 
@@ -5309,6 +6892,20 @@ def build_parser() -> argparse.ArgumentParser:
     package.add_argument("--version", required=True)
     package.set_defaults(handler=_command_package)
 
+    installers = subparsers.add_parser("installers")
+    installers.add_argument("--root", type=Path, required=True)
+    installers.add_argument("--revision", default="HEAD")
+    installers.add_argument("--output", type=Path, required=True)
+    installers.add_argument("--version", required=True)
+    installers.add_argument("--dependency-cache", type=Path)
+    installers.set_defaults(handler=_command_installers)
+
+    finalize_installers = subparsers.add_parser("finalize-installers")
+    finalize_installers.add_argument("--base", type=Path, required=True)
+    finalize_installers.add_argument("--package", type=Path, required=True)
+    finalize_installers.add_argument("--output", type=Path, required=True)
+    finalize_installers.set_defaults(handler=_command_finalize_installers)
+
     release = subparsers.add_parser("release")
     release.add_argument("--root", type=Path, required=True)
     release.add_argument("--revision", default="HEAD")
@@ -5324,6 +6921,7 @@ def build_parser() -> argparse.ArgumentParser:
     dependencies.add_argument("--manifest", type=Path)
     dependencies.add_argument("--cache", type=Path)
     dependencies.add_argument("--reproducible", action="store_true")
+    dependencies.add_argument("--exclude-models", action="store_true")
     dependencies.add_argument("--include-optional", action="store_true")
     dependencies.set_defaults(handler=_command_validate_dependencies)
 
@@ -5452,7 +7050,9 @@ def build_parser() -> argparse.ArgumentParser:
     sync.set_defaults(handler=_command_sync_config)
 
     quote_argument = subparsers.add_parser("quote-argument")
-    quote_argument.add_argument("--platform", choices=("posix", "windows"), required=True)
+    quote_argument.add_argument(
+        "--platform", choices=("posix", "windows"), required=True
+    )
     quote_argument.add_argument("--value", required=True)
     quote_argument.set_defaults(handler=_command_quote_argument)
     return parser

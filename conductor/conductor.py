@@ -2718,7 +2718,6 @@ class Conductor:
             # Engine/API failures are INFRASTRUCTURE, not task failures: the model
             # never got to work, so the attempt must not count against the task.
             # Heal the serving layer, back off, and retry (bounded).
-            stripped = out.strip()
             infrastructure_failure = self.engine_failure(developer_tag, out)
             if infrastructure_failure:
                 attempted_number = t.attempts
@@ -3562,7 +3561,7 @@ class Conductor:
             f"# {'Final report' if final else 'Hourly report'} â€” mission `{self.m.name}`",
             f"\n{now()} Â· engine {self.m.engine} Â· elapsed {elapsed:.1f} h of {self.m.hours} h",
             f"\n**Happening now:** {self.current}",
-            f"\n**Status:** " + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())),
+            "\n**Status:** " + ", ".join(f"{v} {k}" for k, v in sorted(counts.items())),
             "\n## Tasks\n| id | status | attempts | note |\n|---|---|---|---|",
         ]
         lines += [f"| {t.id} | {t.status} | {t.attempts} | {t.note} |" for t in self.m.tasks]
