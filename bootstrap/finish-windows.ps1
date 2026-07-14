@@ -58,17 +58,17 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "==> gh not authenticated - run 'gh auth login' first, then re-run."
     exit 0
 }
-# PRIVACY: repo must be private, always.
+# Visibility is the owner's choice (currently public for one-click downloads);
+# push to whatever exists and never change it here.
 $existing = gh repo view $RepoName --json url --jq .url 2>$null
 if ($LASTEXITCODE -eq 0 -and $existing) {
     $vis = gh repo view $RepoName --json visibility --jq .visibility
-    if ($vis -ne "PRIVATE") { Write-Host "==> ABORT: $existing exists but is $vis, not PRIVATE."; exit 1 }
     if (@(git remote) -notcontains "origin") { git remote add origin $existing }
     git push -u origin main | Out-Host
-    Write-Host "==> pushed to existing private repo: $existing"
+    Write-Host "==> pushed to existing $vis repo: $existing"
 } else {
-    gh repo create $RepoName --private --source . --remote origin --push | Out-Host
+    gh repo create $RepoName --public --source . --remote origin --push | Out-Host
     $url = gh repo view $RepoName --json url --jq .url
-    Write-Host "==> created PRIVATE repo and pushed: $url"
+    Write-Host "==> created PUBLIC repo and pushed: $url"
 }
 Write-Host "==> DONE. Transfer the tarball (or 'git clone' on the Mac) and run: bash install"

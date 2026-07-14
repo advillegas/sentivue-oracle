@@ -2955,7 +2955,10 @@ def test_one_click_builders_publish_native_unsigned_artifacts_honestly() -> None
     assert "Publish immutable GitHub release assets" in workflow
     assert "installer-package-macos" in workflow
     assert "installer-release-final" in workflow
-    assert "Refuse public artifact publication" in workflow
+    # The owner distributes from a public repository; releases must not be
+    # gated on private visibility.
+    assert "Refuse public artifact publication" not in workflow
+    assert "refusing installer publication from a public repository" not in workflow
     assert "ORACLE_DEPENDENCY_RELEASE_TAG" not in workflow
     assert "ORACLE_DEPENDENCY_ASSET_SHA256" not in workflow
     assert "ORACLE_RELEASE_DEPENDENCY_CACHE" not in workflow

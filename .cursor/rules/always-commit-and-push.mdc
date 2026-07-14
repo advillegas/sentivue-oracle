@@ -22,7 +22,8 @@ change, docs), ALWAYS finish by committing and pushing — without waiting to be
 Notes:
 
 - One commit per coherent change-set; don't batch unrelated work into one commit.
-- The remote is the private repo `advillegas/sentivue-oracle`. It must stay private.
+- The remote is `advillegas/sentivue-oracle`. The owner keeps it PUBLIC so the
+  Mac can download releases without signing in — never flip its visibility.
 - Never force-push unless explicitly asked; if a push is rejected, fetch and retry.
 - If a push genuinely cannot complete (auth/network), say so explicitly at the end of
   the turn — never end a turn with silently unpushed commits.

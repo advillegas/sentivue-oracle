@@ -19,21 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  private-repository:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Refuse public artifact publication
-        env:
-          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
-        shell: bash
-        run: |
-          [[ "$REPOSITORY_VISIBILITY" == "private" ]] || {
-            echo "Installer builds and releases are disabled unless the repository is private." >&2
-            exit 1
-          }
-
   windows:
-    needs: private-repository
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -111,7 +97,6 @@ jobs:
           if-no-files-found: error
 
   macos:
-    needs: private-repository
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -261,10 +246,6 @@ jobs:
           repo="$ORACLE_REPOSITORY"
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] || {
             echo "invalid release tag: $tag" >&2
-            exit 1
-          }
-          [[ "$(gh api "repos/$repo" --jq '.private')" == "true" ]] || {
-            echo "refusing installer publication from a public repository" >&2
             exit 1
           }
           # The download page shows exactly two files: the Windows installer
