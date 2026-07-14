@@ -92,8 +92,14 @@ offers exactly two downloads:
 
 - **Windows Installer** — `SentiVue-Oracle-Setup-<ver>.cmd`. Double-click it.
 - **Mac Installer** — `SentiVue-Oracle-Installer-<ver>.pkg`. Double-click it.
-  (First launch: right-click -> Open, or approve it under System Settings ->
-  Privacy & Security, because the installer is unsigned and not notarized.)
+
+Because the Mac build is not yet Apple-notarized, macOS blocks the first open.
+One-time unblock (about 30 seconds): double-click the `.pkg` and click **Done**
+on the "could not verify" dialog, then open **System Settings -> Privacy &
+Security**, scroll down to the Security section, click **Open Anyway** beside
+the blocked-installer message, and confirm with your password or Touch ID. On
+macOS Sonoma or older, right-click the `.pkg` and choose Open instead. Enrolling
+the release in Apple notarization removes this step entirely.
 
 That is the whole install — no unzipping and no commands. The Mac package
 publishes the verified source, then opens a Terminal window that finishes the
