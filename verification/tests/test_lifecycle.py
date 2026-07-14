@@ -3403,7 +3403,11 @@ def test_vault_seeding_never_aborts_a_working_install() -> None:
     assert "if ! bash bootstrap/vault.sh init; then" in install
     assert "the platform is unaffected" in install
     assert "existing history preserved" in vault
-    assert "git -C \"$ROOT\" push --quiet vault --all &&" in vault
+    # git's rejection stderr is captured so it never looks like an install
+    # error, and only surfaced for genuinely unexpected push failures.
+    assert 'push_log="$(mktemp' in vault
+    assert "non-fast-forward" in vault
+    assert 'cat "$push_log" >&2' in vault
 
 
 def test_install_profile_choice_is_machine_bounded_and_revisable() -> None:
