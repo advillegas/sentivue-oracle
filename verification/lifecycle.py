@@ -48,7 +48,7 @@ VERSION_PATTERN = re.compile(
     r"^v?[0-9]+(?:\.[0-9]+){2}(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?$"
 )
 PORTABLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-reparse-v4"
+INSTALLER_HARDENING_TRANSFORM = "protected-builder-atomic-utf8-reparse-v5"
 DEPENDENCY_AUTHORITY_FILE = "verification/dependency-authorities.json"
 WINDOWS_RESERVED_NAMES = {
     "aux",
@@ -2171,7 +2171,7 @@ def _installer_atomic_helper() -> str:
     """Return the ASCII PowerShell helper injected into protected installers."""
 
     return r"""
-# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v4
+# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v5
 function Assert-SafeAtomicPath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     if (Test-Path -LiteralPath $full) {
@@ -2386,7 +2386,7 @@ def _macos_installer_header(
         else payload_sha256
     )
     template = r"""#!/bin/bash
-# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v4
+# ORACLE_BUILD_TRANSFORM=protected-builder-atomic-utf8-reparse-v5
 set -euo pipefail
 set -f
 EXPECTED_PAYLOAD_SHA256="__PAYLOAD_SHA256__"
@@ -2517,6 +2517,20 @@ esac
 DEST="${DEST%/}"
 [[ -n "$DEST" && "$DEST" != "/" ]] || fail "unsafe installation destination"
 PARENT="$(dirname "$DEST")"
+
+if [[ -d "$DEST" && ! -L "$DEST" && -f "$DEST/$MARKER_NAME" ]] &&
+   [[ "$(<"$DEST/$MARKER_NAME")" != "$INSTALL_IDENTITY" ]] &&
+   [[ ! -e "$DEST/$COMPLETE_MARKER_NAME" ]]; then
+  # A different-version tree that this product installed but never finished is
+  # an abandoned attempt; move it aside so a newer installer proceeds without
+  # manual cleanup. Completed installations are still never touched.
+  ASIDE="$DEST.incomplete-$(date +%Y%m%d%H%M%S)"
+  [[ ! -e "$ASIDE" && ! -L "$ASIDE" ]] ||
+    fail "abandoned-install rename target already exists: $ASIDE"
+  mv "$DEST" "$ASIDE" ||
+    fail "could not move the abandoned incomplete installation aside"
+  printf '==> moved an incomplete older installation aside to %s (safe to delete)\n' "$ASIDE"
+fi
 
 if [[ -e "$DEST" || -L "$DEST" ]]; then
   [[ -d "$DEST" && ! -L "$DEST" ]] ||
@@ -2840,6 +2854,25 @@ try {
     }
     $Marker = Join-Path $Destination $MarkerName
     $AlreadyInstalled = $false
+    if (Test-Path -LiteralPath $Destination) {
+        $existingItem = Get-Item -LiteralPath $Destination -Force
+        $existingComplete = Join-Path $Destination $CompleteMarkerName
+        if ($existingItem.PSIsContainer -and
+            (($existingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) -and
+            (Test-Path -LiteralPath $Marker -PathType Leaf) -and
+            (Get-Content -LiteralPath $Marker -Raw).Trim() -ne $InstallIdentity -and
+            -not (Test-Path -LiteralPath $existingComplete)) {
+            # A different-version tree this product installed but never finished
+            # is an abandoned attempt; move it aside so a newer installer can
+            # proceed. Completed installations are still never touched.
+            $aside = "$Destination.incomplete-" + (Get-Date -Format "yyyyMMddHHmmss")
+            if (Test-Path -LiteralPath $aside) {
+                throw "abandoned-install rename target already exists: $aside"
+            }
+            Move-Item -LiteralPath $Destination -Destination $aside
+            Write-Host "==> moved an incomplete older installation aside to $aside (safe to delete)"
+        }
+    }
     if (Test-Path -LiteralPath $Destination) {
         $item = Get-Item -LiteralPath $Destination -Force
         if (-not $item.PSIsContainer -or

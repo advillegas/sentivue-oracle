@@ -2607,6 +2607,7 @@ __PAYLOAD__
     assert "embedded payload SHA-256 mismatch" in hardened
     assert "archive member has a traversal component" in hardened
     assert "existing unowned, different-version" in hardened
+    assert "moved an incomplete older installation aside" in hardened
     assert "ORACLE_INSTALLER_SKIP_SETUP" in hardened
     assert hardened.count("if ($LASTEXITCODE -ne 0)") >= 5
     assert "ownership-scoped uninstaller failed" in hardened
@@ -2617,6 +2618,8 @@ __PAYLOAD__
     assert b"tar -tvzf" in mac_header
     assert b"mktemp -d" in mac_header
     assert b"existing unowned, different-version" in mac_header
+    assert b"moved an incomplete older installation aside" in mac_header
+    assert b'ASIDE="$DEST.incomplete-' in mac_header
     assert b"Python 3.12 or newer is required for safe" not in mac_header
     assert b'mv -n "$source" "$destination"' in mac_header
     assert b"renamex_np" not in mac_header
@@ -2713,6 +2716,42 @@ def test_one_click_windows_installer_is_atomic_idempotent_and_preserves_trees(
     assert refused.returncode != 0
     assert "was preserved" in refused.stdout
     assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+
+    stale = tmp_path / "stale incomplete tree"
+    put(stale, ".oracle-installer-payload.sha256", ("0" * 64) + "\n")
+    put(stale, "old.txt", "old attempt\n")
+    stale_environment = dict(environment)
+    stale_environment["ORACLE_INSTALLER_DEST"] = str(stale)
+    upgraded = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=stale_environment,
+        check=False,
+    )
+    assert upgraded.returncode == 0, upgraded.stdout + upgraded.stderr
+    assert "moved an incomplete older installation aside" in upgraded.stdout
+    assert (stale / "README.md").read_text(encoding="utf-8") == "original\n"
+    aside_trees = list(tmp_path.glob("stale incomplete tree.incomplete-*"))
+    assert len(aside_trees) == 1
+    assert (aside_trees[0] / "old.txt").read_text(encoding="utf-8") == "old attempt\n"
+
+    completed_stale = tmp_path / "completed older tree"
+    put(completed_stale, ".oracle-installer-payload.sha256", ("0" * 64) + "\n")
+    put(completed_stale, ".oracle-install-complete", ("0" * 64) + "\n")
+    completed_sentinel = put(completed_stale, "keep.txt", "user data\n")
+    completed_environment = dict(environment)
+    completed_environment["ORACLE_INSTALLER_DEST"] = str(completed_stale)
+    kept = subprocess.run(
+        ["cmd", "/d", "/c", str(installer)],
+        text=True,
+        capture_output=True,
+        env=completed_environment,
+        check=False,
+    )
+    assert kept.returncode != 0
+    assert "was preserved" in kept.stdout
+    assert completed_sentinel.read_text(encoding="utf-8") == "user data\n"
 
     tampered = installer_dir / "tampered.cmd"
     tampered_text = installer.read_text(encoding="ascii")
@@ -2944,6 +2983,11 @@ def test_one_click_builders_publish_native_unsigned_artifacts_honestly() -> None
     assert "/usr/bin/open -a Terminal" in package
     assert "launchctl asuser" in package
     assert 'GITHUB_ACTIONS' in package
+    # Failures leave a readable report on the Desktop; Installer.app's own
+    # dialog is generic and unactionable.
+    assert "SentiVue Oracle Install Error.txt" in package
+    assert "trap report_failure EXIT" in package
+    assert "/usr/bin/tee -a" in package
     assert "checked-out package builder differs from immutable source" in package
     assert "base dependency sidecar is missing or invalid" in package
     assert 'if [[ "$DEPENDENCY_BUNDLE_NAME" != "-" ]]' in package

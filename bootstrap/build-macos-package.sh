@@ -214,6 +214,33 @@ cat > "$SCRIPTS/postinstall" <<'POSTINSTALL'
 #!/bin/bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INSTALL_LOG="$(mktemp /tmp/sentivue-oracle-install.XXXXXX.log)"
+exec > >(/usr/bin/tee -a "$INSTALL_LOG") 2>&1
+report_failure() {
+  # Installer.app only shows a generic failure dialog; leave the actual error
+  # on the console user's Desktop so it is diagnosable without log spelunking.
+  local status=$?
+  [[ "$status" -ne 0 ]] || exit 0
+  local console_user user_home report
+  console_user="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
+  if [[ -n "$console_user" && "$console_user" != "root" ]]; then
+    user_home="$(dscl . -read "/Users/$console_user" NFSHomeDirectory 2>/dev/null | cut -d' ' -f2-)"
+    if [[ -n "$user_home" && -d "$user_home/Desktop" ]]; then
+      report="$user_home/Desktop/SentiVue Oracle Install Error.txt"
+      {
+        echo "SentiVue Oracle installation failed."
+        echo "Send this file to support, or rerun the installer after fixing the cause."
+        echo "Time: $(date)"
+        echo
+        echo "--- last installer output ---"
+        tail -n 100 "$INSTALL_LOG" 2>/dev/null
+      } > "$report" || true
+      chown "$console_user" "$report" 2>/dev/null || true
+    fi
+  fi
+  exit "$status"
+}
+trap report_failure EXIT
 (cd "$SCRIPT_DIR" && shasum -a 256 -c one-click.command.sha256) || {
   echo "embedded source installer digest mismatch" >&2
   exit 1
