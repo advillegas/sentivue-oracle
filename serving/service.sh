@@ -66,14 +66,16 @@ write_generated_plist() {
 
 verify_owned_launchd() {
   [[ -f "$PLIST" ]] || return 1
-  [[ -f "$GENERATED_PLIST" ]] || {
-    echo "ERROR: refusing launchd operation: Oracle ownership descriptor is missing." >&2
-    return 1
-  }
-  cmp -s "$GENERATED_PLIST" "$PLIST" || {
+  # The launchd LABEL (com.sentivue.oracle-serving) is Oracle-specific, so any
+  # plist installed at $PLIST is our own service (possibly from a previous
+  # install/version). A missing generated descriptor is therefore NOT grounds
+  # to refuse: stop/restart can regenerate it or bootout by label. Only refuse
+  # when a freshly generated descriptor positively disagrees with what is
+  # installed at $PLIST.
+  if [[ -f "$GENERATED_PLIST" ]] && ! cmp -s "$GENERATED_PLIST" "$PLIST"; then
     echo "ERROR: refusing launchd operation: $PLIST is not the Oracle descriptor." >&2
     return 1
-  }
+  fi
 }
 
 publish_plist() {
@@ -140,17 +142,25 @@ start_service() {
     echo "ERROR: durable service start is macOS launchd scoped." >&2
     return 1
   }
-  if [[ ! -f "$PLIST" ]]; then
-    install_service
-  else
-    verify_owned_launchd
-    render
-    sync_engine_configs
-    write_generated_plist
-    if ! cmp -s "$GENERATED_PLIST" "$PLIST"; then
-      publish_plist
-    fi
+  [[ -x "$SWAP" ]] || {
+    echo "ERROR: policy-bound llama-swap is missing: $SWAP" >&2
+    return 1
+  }
+  # The launchd LABEL is Oracle-specific, so any plist already at $PLIST is our
+  # own service from a previous install/version. Generate the descriptor FIRST,
+  # then adopt/replace the same-label plist in place. Never verify ownership
+  # before $GENERATED_PLIST exists (that aborted reinstalls that found a stale
+  # plist from an earlier version).
+  render
+  sync_engine_configs
+  write_generated_plist
+  if [[ ! -f "$PLIST" ]] || ! cmp -s "$GENERATED_PLIST" "$PLIST"; then
+    publish_plist
   fi
+  "$PYTHON" "$LIFECYCLE" state own --root "$ROOT" --home "$HOME" \
+    --path "$PLIST" >/dev/null
+  "$PYTHON" "$LIFECYCLE" state own-service --root "$ROOT" --home "$HOME" \
+    --service-kind launchd-user --identifier "$LABEL" >/dev/null
   launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
   echo "serving starting through launchd on 127.0.0.1:9099"

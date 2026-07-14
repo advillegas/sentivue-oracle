@@ -440,6 +440,55 @@ def test_impossible_context_is_rejected_instead_of_advertised() -> None:
         )
 
 
+def test_large_nominal_context_grants_large_window_when_memory_allows() -> None:
+    # A wide nominal window (qwen3-coder-30b's 262144 native max) on a
+    # large-memory Metal machine must let admission grant a substantially larger
+    # advertised context than the old 65536 nominal ever could.
+    plan = serving.plan_context(
+        model_name="qwen3-coder-30b",
+        nominal_context_tokens=262144,
+        requested_parallel=1,
+        model_memory_mib=40 * GIB,
+        usable_memory_mib=40 * GIB + 70000,
+        prompt_tool_overhead_tokens=4096,
+        output_reserve_tokens=4096,
+        kv_mib_per_token=0.25,
+    )
+
+    assert plan.slot_context_tokens == 262144
+    assert plan.advertised_context_tokens >= 200000
+    assert plan.peak_memory_mib <= plan.usable_memory_mib
+
+
+def test_large_nominal_context_reduces_gracefully_on_constrained_memory() -> None:
+    # The same wide nominal on a memory-starved machine must never over-commit:
+    # admission drops parallelism and caps the slot to what KV memory allows,
+    # yielding a small-but-valid advertised context rather than raising.
+    kwargs = dict(
+        model_name="qwen3-coder-30b",
+        requested_parallel=2,
+        model_memory_mib=40 * GIB,
+        usable_memory_mib=40 * GIB + 8000,
+        prompt_tool_overhead_tokens=4096,
+        output_reserve_tokens=4096,
+        kv_mib_per_token=0.25,
+    )
+    wide = serving.plan_context(nominal_context_tokens=262144, **kwargs)
+
+    # Parallelism was reduced and the slot is memory-bound, not nominal-bound.
+    assert wide.parallel_slots == 1
+    assert wide.slot_context_tokens < 262144
+    assert wide.advertised_context_tokens < 65536
+    assert wide.advertised_context_tokens >= serving.MINIMUM_ADVERTISED_CONTEXT
+    assert wide.peak_memory_mib <= wide.usable_memory_mib
+
+    # On this constrained machine memory is the binding constraint, so raising
+    # the nominal from 65536 to 262144 changes nothing: it cannot over-commit.
+    narrow = serving.plan_context(nominal_context_tokens=65536, **kwargs)
+    assert wide.advertised_context_tokens == narrow.advertised_context_tokens
+    assert wide.slot_context_tokens == narrow.slot_context_tokens
+
+
 def test_request_estimator_includes_messages_tools_and_output() -> None:
     estimate = serving.estimate_request_tokens(
         {
@@ -2500,6 +2549,32 @@ def test_review_doctors_are_offline_and_wrappers_verify_owned_service_identity()
     assert "Get-ServiceArguments" in windows
     assert "cmp -s" in macos
     assert "refusing" in macos.lower()
+
+
+def test_start_service_adopts_a_preexisting_same_label_plist_on_reinstall() -> None:
+    macos = (REPO_ROOT / "serving/service.sh").read_text(encoding="utf-8")
+    start = macos.split("start_service()", 1)[1].split("\nstatus_service()", 1)[0]
+
+    # The launchd label is Oracle-specific, so a leftover plist from a previous
+    # install must be adopted, not refused. start must generate the descriptor
+    # BEFORE any ownership check and never call verify_owned_launchd (the source
+    # of the "ownership descriptor is missing" reinstall abort).
+    assert "verify_owned_launchd" not in start
+    assert "ownership descriptor is missing" not in macos
+    for step in ("render", "sync_engine_configs", "write_generated_plist"):
+        assert step in start
+    # Publish (adopt/replace) when the plist is absent OR differs from generated.
+    assert 'if [[ ! -f "$PLIST" ]] || ! cmp -s "$GENERATED_PLIST" "$PLIST"; then' in start
+    assert "publish_plist" in start
+    # Ownership is registered and the same-label job is booted out then in.
+    assert 'state own --root "$ROOT"' in start
+    assert "state own-service" in start
+    assert "launchd-user" in start
+    assert 'launchctl bootout "gui/$(id -u)/$LABEL"' in start
+    assert 'launchctl bootstrap "gui/$(id -u)" "$PLIST"' in start
+    # A missing generated descriptor must no longer hard-fail ownership checks.
+    verify = macos.split("verify_owned_launchd()", 1)[1].split("\npublish_plist()", 1)[0]
+    assert "ownership descriptor is missing" not in verify
 
 
 def test_review_readme_uses_real_profiles_and_no_unsupported_installer_wizard() -> None:
