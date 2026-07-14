@@ -2887,9 +2887,15 @@ def run_offline_probes(
     planned_placements: Mapping[str, Mapping[str, Any] | PlacementPlan] | None = None,
     listener_inspector: Callable[[int], Sequence[str]] | None = None,
     expected_listener_ports: Mapping[str, int] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> list[ProbeResult]:
     """Run read-only production-shaped compatibility probes."""
 
+    def note(message: str) -> None:
+        if progress is not None:
+            progress(message)
+
+    note("checking the local service and model list")
     results: list[ProbeResult] = []
     cold_running = transport("GET", "/running", None)
     cold_entries: list[Any] = []
@@ -2936,6 +2942,7 @@ def run_offline_probes(
             },
         )
     )
+    note("probing the chat model (first model load can take a few minutes)")
     plan = contexts.get(chat_model)
     if plan is None:
         results.append(_probe("openai_chat", FAIL, "chat model has no admission plan"))
@@ -3270,6 +3277,7 @@ def run_offline_probes(
             {"http_status": anthropic.status},
         )
     )
+    note("probing the embedding model")
     embedding = transport(
         "POST",
         "/v1/embeddings",
@@ -3765,6 +3773,8 @@ def run_offline_probes(
             },
         )
     )
+    if engine_runner is not None:
+        note("probing headless engine sessions (real model inference)")
     for engine in ("claude", "opencode"):
         if engine_runner is None:
             results.append(
@@ -5101,27 +5111,53 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if not chat_model or not embedding_model:
                 raise ServingError("admission metadata has no chat/embedding model")
-            results = run_offline_probes(
-                transport=_http_transport(args.base_url),
-                contexts=contexts,
-                chat_model=chat_model,
-                embedding_model=embedding_model,
-                listeners=(),
-                listener_inspector=inspect_loopback_listeners,
-                expected_listener_ports={"public": 9099, "internal": 9098},
-                planned_placements={
-                    name: raw["placement"]
-                    for name, raw in raw_models.items()
-                    if isinstance(name, str)
-                    and isinstance(raw, dict)
-                    and isinstance(raw.get("placement"), dict)
-                },
-                engine_runner=(
-                    _headless_engine_runner(root, chat_model)
-                    if args.include_engines
-                    else None
-                ),
-            )
+            # Verification loads real models and runs inference, which can take
+            # minutes. Stream step names plus an elapsed-time heartbeat to
+            # stderr so it never looks frozen; stdout stays pure JSON for
+            # callers that parse it.
+            def _verify_progress(message: str) -> None:
+                print(f"==> {message}", file=sys.stderr, flush=True)
+
+            verify_started = time.monotonic()
+            verify_done = threading.Event()
+
+            def _verify_heartbeat() -> None:
+                while not verify_done.wait(5):
+                    elapsed = int(time.monotonic() - verify_started)
+                    print(
+                        f"    ... still verifying ({elapsed}s elapsed)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+            heartbeat = threading.Thread(target=_verify_heartbeat, daemon=True)
+            heartbeat.start()
+            try:
+                results = run_offline_probes(
+                    transport=_http_transport(args.base_url),
+                    contexts=contexts,
+                    chat_model=chat_model,
+                    embedding_model=embedding_model,
+                    listeners=(),
+                    listener_inspector=inspect_loopback_listeners,
+                    expected_listener_ports={"public": 9099, "internal": 9098},
+                    planned_placements={
+                        name: raw["placement"]
+                        for name, raw in raw_models.items()
+                        if isinstance(name, str)
+                        and isinstance(raw, dict)
+                        and isinstance(raw.get("placement"), dict)
+                    },
+                    engine_runner=(
+                        _headless_engine_runner(root, chat_model)
+                        if args.include_engines
+                        else None
+                    ),
+                    progress=_verify_progress,
+                )
+            finally:
+                verify_done.set()
+                heartbeat.join(timeout=1)
             aggregate = aggregate_probe_status(results)
             print(
                 json.dumps(

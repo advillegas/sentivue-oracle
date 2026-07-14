@@ -1180,6 +1180,39 @@ def test_probe_capacity_failure_is_fail_not_false_green() -> None:
     assert serving.aggregate_probe_status(results) == FAIL
 
 
+def test_offline_probe_progress_reports_each_phase() -> None:
+    def transport(method: str, path: str, body: object = None) -> HttpResponse:
+        return HttpResponse(200, {"status": "ok", "data": [], "running": []}, {}, 1)
+
+    messages: list[str] = []
+    serving.run_offline_probes(
+        transport=transport,
+        contexts={"chat": production_plan()},
+        chat_model="chat",
+        embedding_model="embed",
+        listeners=("127.0.0.1:9099",),
+        engine_runner=lambda engine: (0, "ENGINE-OK"),
+        progress=messages.append,
+    )
+    joined = "\n".join(messages)
+    assert "checking the local service and model list" in joined
+    assert "probing the chat model" in joined
+    assert "probing the embedding model" in joined
+    assert "probing headless engine sessions" in joined
+
+    without_engine: list[str] = []
+    serving.run_offline_probes(
+        transport=transport,
+        contexts={"chat": production_plan()},
+        chat_model="chat",
+        embedding_model="embed",
+        listeners=("127.0.0.1:9099",),
+        engine_runner=None,
+        progress=without_engine.append,
+    )
+    assert not any("headless engine sessions" in message for message in without_engine)
+
+
 def test_health_only_can_never_make_verification_green() -> None:
     results = [
         serving.ProbeResult("health", PASS, "healthy", {}),

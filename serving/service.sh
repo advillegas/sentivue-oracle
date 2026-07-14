@@ -37,7 +37,10 @@ render() {
     echo "ERROR: policy-bound llama-server is missing: $SERVER" >&2
     return 1
   }
-  local backend="${ORACLE_BACKEND:-cpu}"
+  # Apple Silicon runs models on the Metal GPU (shared unified memory), which is
+  # dramatically faster than CPU. Default to Metal; ORACLE_BACKEND=cpu forces the
+  # slow path only when explicitly requested.
+  local backend="${ORACLE_BACKEND:-metal}"
   [[ "$backend" == "metal" || "$backend" == "cpu" ]] || {
     echo "ERROR: the macOS toolchain supports explicit metal or cpu only." >&2
     return 1
