@@ -208,10 +208,14 @@ if ! phase_done models || ! phase_done profile; then
       continue
     fi
     MIN_GB="$(profile_minimum "$PROFILE")"
-    if [[ "$budget" -lt "$MIN_GB" ]]; then
+    SMALLEST="$(grep -Ev '^\s*#' serving/profiles.conf | tail -1 | cut -d'|' -f1 | xargs)"
+    if [[ "$budget" -lt "$MIN_GB" && "$PROFILE" != "$SMALLEST" ]]; then
       # Refuse profiles this machine cannot serve: the biggest model must fit
-      # in wired GPU memory, which cannot exceed physical unified memory.
-      message="profile '$PROFILE' needs >= ${MIN_GB} GB of unified memory; this Mac has ${mem_gb} GB (~${budget} GB usable). Profiles that fit: $(fitting_profiles "$budget")"
+      # in wired GPU memory, which cannot exceed physical unified memory. The
+      # smallest profile always remains available as the floor.
+      FITS="$(fitting_profiles "$budget")"
+      [[ -n "$FITS" ]] || FITS="$SMALLEST"
+      message="profile '$PROFILE' needs >= ${MIN_GB} GB of unified memory; this Mac has ${mem_gb} GB (~${budget} GB usable). Profiles that fit: $FITS"
       [[ $YES -eq 1 || -n "${ORACLE_INSTALLER_PROFILE:-}" ]] && die "$message"
       warn "$message"
       PROFILE=""

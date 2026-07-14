@@ -2819,9 +2819,11 @@ function Select-InstallerProfile([string]$Root) {
     if (-not $requested) { $selected = $suggested }
     else { $selected = $profiles | Where-Object { $_.Name -eq $requested } | Select-Object -First 1 }
     if (-not $selected) { throw "unknown model profile: $requested" }
-    if ($selected.Min -gt $budget) {
+    # The smallest profile always remains available as the floor.
+    if ($selected.Min -gt $budget -and $selected.Name -ne $profiles[-1].Name) {
         $fits = (@($profiles | Where-Object { $_.Min -le $budget } |
             ForEach-Object { $_.Name }) -join ", ")
+        if (-not $fits) { $fits = $profiles[-1].Name }
         throw ("profile '{0}' needs >= {1} GB of memory; this machine has {2} GB (~{3} GB usable). Profiles that fit: {4}" -f
             $selected.Name, $selected.Min, $ram, $budget, $fits)
     }
