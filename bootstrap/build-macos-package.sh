@@ -214,7 +214,9 @@ cat > "$SCRIPTS/postinstall" <<'POSTINSTALL'
 #!/bin/bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-INSTALL_LOG="$(mktemp /tmp/sentivue-oracle-install.XXXXXX.log)"
+# BSD mktemp requires trailing X's; a suffix would create a literal file that
+# collides on rerun.
+INSTALL_LOG="$(mktemp /tmp/sentivue-oracle-install.XXXXXX)"
 exec > >(/usr/bin/tee -a "$INSTALL_LOG") 2>&1
 report_failure() {
   # Installer.app only shows a generic failure dialog; leave the actual error

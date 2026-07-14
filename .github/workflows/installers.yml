@@ -169,11 +169,18 @@ jobs:
           base_command="$(find "$RUNNER_TEMP/installer bundle" -maxdepth 1 -name '*.command' -print -quit)"
           cmp "$RUNNER_TEMP/expanded package/Scripts/one-click.command" "$base_command"
           package_destination="$HOME/sentivue-oracle"
+          dump_install_failure() {
+            echo "--- /var/log/install.log tail ---"
+            sudo tail -n 160 /var/log/install.log || true
+            echo "--- desktop error report ---"
+            cat "$HOME/Desktop/SentiVue Oracle Install Error.txt" 2>/dev/null || true
+            exit 1
+          }
           sudo rm -rf "$package_destination"
           sudo env ORACLE_INSTALLER_SKIP_SETUP=1 GITHUB_ACTIONS=true \
-            installer -pkg "$package" -target /
+            installer -pkg "$package" -target / || dump_install_failure
           sudo env ORACLE_INSTALLER_SKIP_SETUP=1 GITHUB_ACTIONS=true \
-            installer -pkg "$package" -target /
+            installer -pkg "$package" -target / || dump_install_failure
           test -f "$package_destination/ARTIFACTS.json"
           test -x "$package_destination/.oracle-resume-installer.command"
           test -x "$package_destination/Resume Install.command"
