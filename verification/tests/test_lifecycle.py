@@ -398,7 +398,7 @@ def test_final_release_manifest_binds_base_bundle_and_macos_package(
     package_dir = tmp_path / "package"
     package = put(
         package_dir,
-        "SentiVue-Oracle-Source-Installer-v1.2.3.pkg",
+        "SentiVue-Oracle-Installer-v1.2.3.pkg",
         b"package bytes",
     )
     package_provenance = put(
@@ -2936,7 +2936,14 @@ def test_one_click_builders_publish_native_unsigned_artifacts_honestly() -> None
     assert "pkgbuild" in package
     assert "--nopayload" in package
     assert "ORACLE_INSTALLER_SKIP_SETUP=1" in package
-    assert "This .pkg is source-only." in package
+    # The package continues the complete connected setup from a staged copy,
+    # in a visible Terminal, and never launches it in CI/source-only mode.
+    assert "SentiVue-Oracle-Installer-$VERSION.pkg" in package
+    assert '.oracle-resume-installer.command"' in package
+    assert 'RESUME_LAUNCHER="$DEST/Resume Install.command"' in package
+    assert "/usr/bin/open -a Terminal" in package
+    assert "launchctl asuser" in package
+    assert 'GITHUB_ACTIONS' in package
     assert "checked-out package builder differs from immutable source" in package
     assert "base dependency sidecar is missing or invalid" in package
     assert 'if [[ "$DEPENDENCY_BUNDLE_NAME" != "-" ]]' in package
@@ -2959,7 +2966,9 @@ def test_one_click_builders_publish_native_unsigned_artifacts_honestly() -> None
     assert "release build is missing one of the two installers" in workflow
     assert "unexpected asset staged for the download page" in workflow
     assert 'label="Windows Installer  (double-click)"' in workflow
-    assert 'label="Mac Installer  (unzip, then double-click)"' in workflow
+    assert 'label="Mac Installer  (double-click)"' in workflow
+    assert "SentiVue-Oracle-Installer-*.pkg" in workflow
+    assert "command.zip'" not in workflow.split("publish:", 1)[1]
     assert '"${local_path[$name]}#$label"' in workflow
     assert "Download and double-click. That is the whole install." in workflow
     assert "github.ref_name }}\"" not in workflow

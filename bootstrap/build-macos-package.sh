@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Wrap the verified .command source installer in an unsigned macOS package.
+# Wrap the verified .command installer in an unsigned macOS package. The
+# package is the double-click Mac install: it publishes the immutable source,
+# then continues the complete connected setup in a visible Terminal window.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -234,16 +236,37 @@ DEST="$USER_HOME/sentivue-oracle"
   ORACLE_INSTALLER_REQUIRE_IMMUTABLE=1 \
   /bin/bash "$SCRIPT_DIR/one-click.command"
 echo "SentiVue Oracle source installed at $DEST"
-if compgen -G "$SCRIPT_DIR/SentiVue-Oracle-Dependencies-*.zip" >/dev/null; then
-  echo "The verified offline dependency export was installed with the source."
-else
-  echo "Use the .command release artifact for complete connected setup."
+# Installer.app deletes its temporary Scripts directory when this script
+# returns, so setup continues from a copy staged inside the installed tree.
+RESUME_INSTALLER="$DEST/.oracle-resume-installer.command"
+RESUME_LAUNCHER="$DEST/Resume Install.command"
+/usr/bin/install -m 755 -o "$CONSOLE_USER" \
+  "$SCRIPT_DIR/one-click.command" "$RESUME_INSTALLER"
+LAUNCHER_TMP="$(mktemp)"
+printf '#!/bin/bash\nexport ORACLE_INSTALLER_DEST=%q\nexec /bin/bash %q\n' \
+  "$DEST" "$RESUME_INSTALLER" > "$LAUNCHER_TMP"
+/usr/bin/install -m 755 -o "$CONSOLE_USER" "$LAUNCHER_TMP" "$RESUME_LAUNCHER"
+rm -f "$LAUNCHER_TMP"
+if [[ "${ORACLE_INSTALLER_SKIP_SETUP:-0}" == "1" || -n "${GITHUB_ACTIONS:-}" ]]; then
+  echo "Source-only package mode: full setup was skipped."
+  echo "Finish later by double-clicking: $RESUME_LAUNCHER"
+  exit 0
 fi
-echo "This .pkg is source-only. Run ORACLE_CONNECTED_SETUP=1 bash \"$DEST/install\" as the console user, or use the one-click .command artifact."
+CONSOLE_UID="$(/usr/bin/id -u "$CONSOLE_USER")"
+if /bin/launchctl asuser "$CONSOLE_UID" /usr/bin/sudo -u "$CONSOLE_USER" \
+  /usr/bin/open -a Terminal "$RESUME_LAUNCHER"; then
+  echo "Setup is continuing in a Terminal window: it selects a hardware"
+  echo "profile, downloads every checksum-bound dependency and model shard,"
+  echo "installs the engines and local IDE, and finishes on its own."
+else
+  echo "Could not open Terminal automatically."
+  echo "Finish setup by double-clicking: $RESUME_LAUNCHER"
+fi
+exit 0
 POSTINSTALL
 chmod 755 "$SCRIPTS/postinstall"
 
-PACKAGE="$OUTPUT/SentiVue-Oracle-Source-Installer-$VERSION.pkg"
+PACKAGE="$OUTPUT/SentiVue-Oracle-Installer-$VERSION.pkg"
 [[ ! -e "$PACKAGE" ]] || {
   echo "refusing to overwrite existing package: $PACKAGE" >&2
   exit 1
@@ -251,7 +274,7 @@ PACKAGE="$OUTPUT/SentiVue-Oracle-Source-Installer-$VERSION.pkg"
 pkgbuild \
   --nopayload \
   --scripts "$SCRIPTS" \
-  --identifier "io.sentivue.oracle.source-installer" \
+  --identifier "io.sentivue.oracle.installer" \
   --version "${VERSION#v}" \
   "$PACKAGE"
 
@@ -280,7 +303,7 @@ cat > "$PROVENANCE" <<EOF
   "dependency_bundle_sha256": "$DEPENDENCY_BUNDLE_SHA",
   "code_signing": "unsigned",
   "notarization": "not-notarized",
-  "scope": "atomic source-only install; connected dependencies and models are acquired by the one-click .command artifact"
+  "scope": "double-click Mac install; publishes immutable source, then continues complete connected setup in Terminal"
 }
 EOF
 PROVENANCE_SHA="$(shasum -a 256 "$PROVENANCE" | awk '{print $1}')"

@@ -185,9 +185,13 @@ jobs:
           cmp "$RUNNER_TEMP/expanded package/Scripts/one-click.command" "$base_command"
           package_destination="$HOME/sentivue-oracle"
           sudo rm -rf "$package_destination"
-          sudo installer -pkg "$package" -target /
-          sudo installer -pkg "$package" -target /
+          sudo env ORACLE_INSTALLER_SKIP_SETUP=1 GITHUB_ACTIONS=true \
+            installer -pkg "$package" -target /
+          sudo env ORACLE_INSTALLER_SKIP_SETUP=1 GITHUB_ACTIONS=true \
+            installer -pkg "$package" -target /
           test -f "$package_destination/ARTIFACTS.json"
+          test -x "$package_destination/.oracle-resume-installer.command"
+          test -x "$package_destination/Resume Install.command"
           sudo rm -rf "$package_destination"
           set +e
           signature="$(pkgutil --check-signature "$package" 2>&1)"
@@ -267,7 +271,7 @@ jobs:
           # and the Mac installer. Every other build product stays in the
           # workflow artifacts for provenance but is never published.
           windows_installer="$(find release -maxdepth 1 -name 'SentiVue-Oracle-Setup-*.cmd' -print -quit)"
-          mac_installer="$(find release -maxdepth 1 -name 'SentiVue-Oracle-Installer-*.command.zip' -print -quit)"
+          mac_installer="$(find release -maxdepth 1 -name 'SentiVue-Oracle-Installer-*.pkg' -print -quit)"
           [[ -n "$windows_installer" && -n "$mac_installer" ]] || {
             echo "release build is missing one of the two installers" >&2
             exit 1
@@ -286,7 +290,7 @@ jobs:
                 '## Download and double-click. That is the whole install.' \
                 '' \
                 '- **Windows:** download the .cmd file and double-click it.' \
-                '- **Mac:** download the .command.zip file, unzip it, and double-click the .command file. (First launch: right-click -> Open, because the installer is unsigned.)' \
+                '- **Mac:** download the .pkg file and double-click it. (First launch: right-click -> Open, or approve it under System Settings -> Privacy and Security, because the installer is unsigned.)' \
                 '' \
                 'The installer picks a model profile for your hardware, downloads everything it needs (checksum-bound dependencies, every model shard, engines, IDE), and finishes setup on its own. If it gets interrupted, run the same installer again and it resumes.')"
           fi
@@ -327,8 +331,8 @@ jobs:
               SentiVue-Oracle-Setup-*.cmd)
                 label="Windows Installer  (double-click)"
                 ;;
-              SentiVue-Oracle-Installer-*.command.zip)
-                label="Mac Installer  (unzip, then double-click)"
+              SentiVue-Oracle-Installer-*.pkg)
+                label="Mac Installer  (double-click)"
                 ;;
               *)
                 echo "unexpected asset staged for the download page: $name" >&2

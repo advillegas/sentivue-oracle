@@ -91,19 +91,22 @@ The [Releases page](https://github.com/advillegas/sentivue-oracle/releases)
 offers exactly two downloads:
 
 - **Windows Installer** — `SentiVue-Oracle-Setup-<ver>.cmd`. Double-click it.
-- **Mac Installer** — `SentiVue-Oracle-Installer-<ver>.command.zip`. Unzip,
-  then double-click the `.command` file. (First launch: right-click -> Open,
-  because the installer is unsigned and not notarized.)
+- **Mac Installer** — `SentiVue-Oracle-Installer-<ver>.pkg`. Double-click it.
+  (First launch: right-click -> Open, or approve it under System Settings ->
+  Privacy & Security, because the installer is unsigned and not notarized.)
 
-That is the whole install. The installer picks a model profile for your
-hardware, downloads everything it needs (checksum-bound dependencies, every
-model shard, engines, LeanCTX, and the local IDE), configures local serving,
-and finishes on its own. If it gets interrupted, run the same installer again
-and it resumes where it left off. Existing unowned, different-version, or
-locally modified trees are never overwritten.
+That is the whole install — no unzipping and no commands. The Mac package
+publishes the verified source, then opens a Terminal window that finishes the
+rest automatically. The installer picks a model profile for your hardware,
+downloads everything it needs (checksum-bound dependencies, every model shard,
+engines, LeanCTX, and the local IDE), configures local serving, and finishes
+on its own. If it gets interrupted, run the same installer again (or
+double-click `Resume Install.command` inside the installed folder) and it
+resumes where it left off. Existing unowned, different-version, or locally
+modified trees are never overwritten.
 
 All other build products (`RELEASE-SHA256SUMS`, `RELEASE-PROVENANCE.json`,
-source archives, the source-only macOS `.pkg`) stay in the tag's workflow
+source archives, the `.command.zip` launcher) stay in the tag's workflow
 artifacts for verification and scripted installs; they are deliberately kept
 off the download page.
 
