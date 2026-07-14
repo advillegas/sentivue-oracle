@@ -271,6 +271,15 @@ echo "==> [7/8] Generated engine configuration deferred until model validation"
 
 if [[ "$(uname -s)" == "Darwin" ]] && git --version >/dev/null 2>&1; then
   echo "==> [8/8] Local git vault (offline private remote + auto-backup target)"
+  if [[ ! -d "$ROOT/.git" ]]; then
+    # Installer-published trees carry verified source without git history, but
+    # the vault and worktree missions require a repository; create it locally.
+    git -C "$ROOT" init --initial-branch=main --quiet
+    git -C "$ROOT" add -A
+    git -C "$ROOT" -c user.name="oracle" -c user.email="oracle@localhost" \
+      commit --quiet -m "installer import"
+    echo "    initialized git history for the installer-published tree"
+  fi
   bash bootstrap/vault.sh init
 elif [[ "$(uname -s)" == "Darwin" ]]; then
   echo "WARN: Apple Git is unavailable; vault and worktree missions remain disabled"
