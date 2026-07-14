@@ -3394,6 +3394,27 @@ def test_mac_bootstrap_installs_shimmed_node_and_llama_trees() -> None:
     assert "ORACLE_CONNECTED_SETUP=1 /bin/bash bootstrap/install.sh" in workflow
 
 
+def test_install_profile_choice_is_machine_bounded_and_revisable() -> None:
+    source = (REPO_ROOT / "install").read_text(encoding="utf-8")
+
+    # Impossible profiles are refused with the fitting alternatives, the
+    # choice stays revisable until models finish, and the sudo prompt for the
+    # GPU reservation explains itself (and is skipped when infeasible).
+    assert "Profiles that fit:" in source
+    assert 'if ! phase_done models || ! phase_done profile; then' in source
+    assert "previously chosen: $PREVIOUS (press ENTER to keep it)" in source
+    assert "Typing is INVISIBLE" in source
+    assert 'sudo -p "  Password: "' in source
+    assert "pick a smaller profile" in source
+    assert '[[ "$required_wired_mib" -le "$machine_mib" ]]' in source
+
+    windows_template = (REPO_ROOT / "verification/lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "Profiles that fit: {4}" in windows_template
+    assert "$selected.Min -gt $budget" in windows_template
+
+
 def test_ide_setups_create_owned_desktop_shortcuts() -> None:
     bash_source = (REPO_ROOT / "connectors/ide/setup-ide.sh").read_text(
         encoding="utf-8"

@@ -2819,6 +2819,12 @@ function Select-InstallerProfile([string]$Root) {
     if (-not $requested) { $selected = $suggested }
     else { $selected = $profiles | Where-Object { $_.Name -eq $requested } | Select-Object -First 1 }
     if (-not $selected) { throw "unknown model profile: $requested" }
+    if ($selected.Min -gt $budget) {
+        $fits = (@($profiles | Where-Object { $_.Min -le $budget } |
+            ForEach-Object { $_.Name }) -join ", ")
+        throw ("profile '{0}' needs >= {1} GB of memory; this machine has {2} GB (~{3} GB usable). Profiles that fit: {4}" -f
+            $selected.Name, $selected.Min, $ram, $budget, $fits)
+    }
     $activePath = Join-Path $Root "serving\models.profile"
     if ($selected.Name -eq "full") {
         if (Test-Path -LiteralPath $activePath -PathType Leaf) {

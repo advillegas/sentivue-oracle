@@ -148,7 +148,22 @@ if ! phase_done bootstrap; then
 else ok "bootstrap already done"; fi
 
 # ---------------------------------------------------------------- profile
-if ! phase_done profile; then
+profile_line() {  # profile_line <name> -> the matching profiles.conf row
+  grep -Ev '^\s*#' serving/profiles.conf |
+    awk -F'|' -v p="$1" '{n=$1; gsub(/[[:space:]]/, "", n)} n == p {print; exit}'
+}
+profile_minimum() {  # profile_minimum <name>
+  profile_line "$1" | cut -d'|' -f2 | xargs
+}
+fitting_profiles() {  # fitting_profiles <budget-gb> -> comma list that fits
+  grep -Ev '^\s*#' serving/profiles.conf |
+    awk -F'|' -v budget="$1" '{
+      name=$1; min=$2
+      gsub(/[[:space:]]/, "", name); gsub(/[[:space:]]/, "", min)
+      if (name != "" && min + 0 <= budget + 0) fits = fits (fits ? ", " : "") name
+    } END { print fits }'
+}
+if ! phase_done models || ! phase_done profile; then
   say "Model profile (hardware-adaptive)"
   mem_gb=$(( $(sysctl -n hw.memsize) / 1073741824 ))
   budget=$(( mem_gb * 85 / 100 ))     # leave headroom for the OS
@@ -158,21 +173,52 @@ if ! phase_done profile; then
     [[ -z "$name" || "$name" == \#* ]] && continue
     [[ $budget -ge $min ]] && { SUGGEST="$name"; break; }
   done < <(grep -Ev '^\s*#' serving/profiles.conf)
-  if [[ -z "$PROFILE" ]]; then
-    if [[ $YES -eq 1 ]]; then PROFILE="$SUGGEST"; else
-      echo "  detected ${mem_gb} GB unified memory — suggested profile: $SUGGEST"
-      echo
-      grep -Ev '^\s*#' serving/profiles.conf | while IFS='|' read -r name min models o s h dl; do
-        printf "    %-6s needs >= %3s GB   download %s\n" "$(echo "$name"|xargs)" "$(echo "$min"|xargs)" "$(echo "$dl"|xargs)"
-      done
-      echo
-      read -rp "  profile [ENTER = $SUGGEST]: " ans
-      PROFILE="${ans:-$SUGGEST}"
-    fi
+  # A previously chosen profile stays the default, but until models finish
+  # downloading the choice can be changed on any rerun.
+  PREVIOUS=""
+  if phase_done profile && [[ -f serving/tiers.env ]]; then
+    PREVIOUS="$SUGGEST"
+    previous_opus="$(grep -s '^OPUS_MODEL=' serving/tiers.env | cut -d= -f2)"
+    while IFS='|' read -r name min models o s h dl; do
+      name="$(echo "$name" | xargs)"; o="$(echo "$o" | xargs)"
+      [[ -z "$name" || "$name" == \#* ]] && continue
+      if [[ "$o" == "$previous_opus" ]]; then PREVIOUS="$name"; break; fi
+    done < <(grep -Ev '^\s*#' serving/profiles.conf)
   fi
-  LINE="$(grep -Ev '^\s*#' serving/profiles.conf | awk -F'|' -v p="$PROFILE" '$1 ~ p"[ ]*$" || $1 == p {print; exit}')"
-  [[ -n "$LINE" ]] || LINE="$(grep -Ev '^\s*#' serving/profiles.conf | grep -E "^${PROFILE}[[:space:]]*\|" | head -1)"
-  [[ -n "$LINE" ]] || die "unknown profile '$PROFILE' (see serving/profiles.conf)"
+  DEFAULT="${PREVIOUS:-$SUGGEST}"
+  while :; do
+    if [[ -z "$PROFILE" ]]; then
+      if [[ $YES -eq 1 ]]; then PROFILE="$DEFAULT"; else
+        echo "  detected ${mem_gb} GB unified memory — suggested profile: $SUGGEST"
+        [[ -z "$PREVIOUS" ]] || echo "  previously chosen: $PREVIOUS (press ENTER to keep it)"
+        echo
+        grep -Ev '^\s*#' serving/profiles.conf | while IFS='|' read -r name min models o s h dl; do
+          printf "    %-6s needs >= %3s GB   download %s\n" "$(echo "$name"|xargs)" "$(echo "$min"|xargs)" "$(echo "$dl"|xargs)"
+        done
+        echo
+        read -rp "  profile [ENTER = $DEFAULT]: " ans
+        PROFILE="${ans:-$DEFAULT}"
+      fi
+    fi
+    LINE="$(profile_line "$PROFILE")"
+    if [[ -z "$LINE" ]]; then
+      [[ $YES -eq 1 ]] && die "unknown profile '$PROFILE' (see serving/profiles.conf)"
+      warn "unknown profile '$PROFILE' — choose one of: $(fitting_profiles 100000)"
+      PROFILE=""
+      continue
+    fi
+    MIN_GB="$(profile_minimum "$PROFILE")"
+    if [[ "$budget" -lt "$MIN_GB" ]]; then
+      # Refuse profiles this machine cannot serve: the biggest model must fit
+      # in wired GPU memory, which cannot exceed physical unified memory.
+      message="profile '$PROFILE' needs >= ${MIN_GB} GB of unified memory; this Mac has ${mem_gb} GB (~${budget} GB usable). Profiles that fit: $(fitting_profiles "$budget")"
+      [[ $YES -eq 1 || -n "${ORACLE_INSTALLER_PROFILE:-}" ]] && die "$message"
+      warn "$message"
+      PROFILE=""
+      continue
+    fi
+    break
+  done
   MODELS="$(echo "$LINE" | cut -d'|' -f3 | xargs)"
   OPUS="$(echo "$LINE" | cut -d'|' -f4 | xargs)"
   SONNET="$(echo "$LINE" | cut -d'|' -f5 | xargs)"
@@ -203,11 +249,17 @@ if [[ $NO_MODELS -eq 0 ]] && ! phase_done models; then
     qwen3-coder-480b) required_wired_mib=327680 ;;
   esac
   if [[ "$required_wired_mib" -gt 0 ]]; then
+    machine_mib=$(( $(sysctl -n hw.memsize) / 1048576 ))
+    [[ "$required_wired_mib" -le "$machine_mib" ]] ||
+      die "This profile needs ${required_wired_mib} MiB of GPU memory but this Mac has ${machine_mib} MiB; rerun the installer and pick a smaller profile."
     actual_wired_mib="$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)"
     if [[ "$actual_wired_mib" -lt "$required_wired_mib" ]]; then
-      warn "This profile needs a ${required_wired_mib} MiB GPU wired-memory limit."
-      sudo sysctl -w "iogpu.wired_limit_mb=$required_wired_mib" >/dev/null ||
-        die "Could not configure the GPU wired-memory limit."
+      say "One-time GPU memory reservation"
+      echo "  macOS needs your login password (sudo) to reserve ${required_wired_mib} MiB"
+      echo "  of GPU memory for the models. Typing is INVISIBLE — no dots appear."
+      echo "  Type your Mac password and press Return."
+      sudo -p "  Password: " sysctl -w "iogpu.wired_limit_mb=$required_wired_mib" >/dev/null ||
+        die "Could not configure the GPU wired-memory limit; rerun the installer to try again (you can also pick a smaller profile)."
       actual_wired_mib="$(sysctl -n iogpu.wired_limit_mb 2>/dev/null || echo 0)"
       [[ "$actual_wired_mib" -ge "$required_wired_mib" ]] ||
         die "GPU wired-memory limit did not take effect."
