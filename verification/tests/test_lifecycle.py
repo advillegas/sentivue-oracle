@@ -3394,6 +3394,18 @@ def test_mac_bootstrap_installs_shimmed_node_and_llama_trees() -> None:
     assert "ORACLE_CONNECTED_SETUP=1 /bin/bash bootstrap/install.sh" in workflow
 
 
+def test_vault_seeding_never_aborts_a_working_install() -> None:
+    install = (REPO_ROOT / "bootstrap/install.sh").read_text(encoding="utf-8")
+    vault = (REPO_ROOT / "bootstrap/vault.sh").read_text(encoding="utf-8")
+
+    # A history-protected vault from an earlier attempt rejects a reinstall's
+    # fresh history; that backup convenience must never fail the install.
+    assert "if ! bash bootstrap/vault.sh init; then" in install
+    assert "the platform is unaffected" in install
+    assert "existing history preserved" in vault
+    assert "git -C \"$ROOT\" push --quiet vault --all &&" in vault
+
+
 def test_install_profile_choice_is_machine_bounded_and_revisable() -> None:
     source = (REPO_ROOT / "install").read_text(encoding="utf-8")
 

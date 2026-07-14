@@ -280,7 +280,13 @@ if [[ "$(uname -s)" == "Darwin" ]] && git --version >/dev/null 2>&1; then
       commit --quiet -m "installer import"
     echo "    initialized git history for the installer-published tree"
   fi
-  bash bootstrap/vault.sh init
+  # The vault is an offline backup convenience, not a platform prerequisite: a
+  # reinstall creates a fresh history that a history-protected vault from an
+  # earlier attempt will reject, and that must never abort a working install.
+  if ! bash bootstrap/vault.sh init; then
+    echo "WARN: local git vault was not seeded (an earlier attempt may own it);"
+    echo "      the platform is unaffected. Reseed later with: oracle vault sync"
+  fi
 elif [[ "$(uname -s)" == "Darwin" ]]; then
   echo "WARN: Apple Git is unavailable; vault and worktree missions remain disabled"
   echo "      until Command Line Tools are installed."

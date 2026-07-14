@@ -49,10 +49,18 @@ case "$cmd" in
   init)
     mkdir -p "$VAULT"
     ensure_remote "$ROOT" "sentivue-oracle"
-    git -C "$ROOT" push --quiet vault --all
-    git -C "$ROOT" push --quiet vault --tags
-    echo "vault ready: $VAULT"
-    echo "  remote 'vault' registered on $ROOT; all branches + tags pushed"
+    # The vault is history-protected, so a reinstall's fresh, unrelated history
+    # is rejected as non-fast-forward. That is not an error: the remote is
+    # registered and nothing is overwritten. Report it and succeed.
+    if git -C "$ROOT" push --quiet vault --all &&
+       git -C "$ROOT" push --quiet vault --tags; then
+      echo "vault ready: $VAULT"
+      echo "  remote 'vault' registered on $ROOT; all branches + tags pushed"
+    else
+      echo "vault ready: $VAULT (remote registered; existing history preserved)"
+      echo "  the initial push was declined because the vault already holds"
+      echo "  content; nothing was overwritten. Reseed with: oracle vault sync"
+    fi
     ;;
   sync)
     repo="${1:-$ROOT}"
