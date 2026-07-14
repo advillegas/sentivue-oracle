@@ -316,13 +316,16 @@ else ok "local IDE already installed"; fi
 if [[ $NO_MODELS -eq 0 ]]; then
   say "Render config + start serving"
   bash connectors/ide/sync-models.sh
-  own_tree "$ROOT/state/generated"
   bash bootstrap/render-config.sh
-  own_path "$ROOT/serving/llama-swap.rendered.yaml"
+  # The rendered llama-swap config lives under state/generated (owned as a tree
+  # below); it is not a tracked file at serving/, so it needs no separate
+  # ownership registration.
+  own_tree "$ROOT/state/generated"
+  # serving/service.sh already registers ownership of the launchd plist and the
+  # service under its real label (com.sentivue.oracle-serving); the installer
+  # must not re-register them under a stale name.
   bash serving/service.sh start
-  own_path "$HOME/Library/LaunchAgents/com.sentivue.llamaswap.plist"
-  own_service launchd-user com.sentivue.llamaswap
-  own_path "$ROOT/logs"
+  [[ -d "$ROOT/logs" ]] && own_path "$ROOT/logs"
   say "Waiting for llama-swap health…"
   healthy=0
   for _ in $(seq 1 30); do

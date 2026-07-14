@@ -3410,6 +3410,23 @@ def test_vault_seeding_never_aborts_a_working_install() -> None:
     assert 'cat "$push_log" >&2' in vault
 
 
+def test_install_serve_phase_owns_only_paths_that_exist() -> None:
+    install = (REPO_ROOT / "install").read_text(encoding="utf-8")
+    service = (REPO_ROOT / "serving/service.sh").read_text(encoding="utf-8")
+
+    # The renderer writes the llama-swap config under state/generated (owned as
+    # a tree); the installer must not own a stale serving/*.rendered.yaml path.
+    assert "llama-swap.rendered.yaml" not in install
+    assert 'own_tree "$ROOT/state/generated"' in install
+    # The launchd plist and service are registered by service.sh under its real
+    # label; the installer must not re-register them (and never under a stale
+    # name that would fatally fail own_path/own_service on a missing path).
+    assert "com.sentivue.llamaswap" not in install
+    assert 'LABEL="com.sentivue.oracle-serving"' in service
+    assert 'state own --root "$ROOT"' in service
+    assert "bash serving/service.sh start" in install
+
+
 def test_install_profile_choice_is_machine_bounded_and_revisable() -> None:
     source = (REPO_ROOT / "install").read_text(encoding="utf-8")
 
