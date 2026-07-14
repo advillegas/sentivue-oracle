@@ -201,8 +201,9 @@ case "${1:-status}" in
     if [[ $has_backend -eq 0 ]]; then
       backend_args=(--backend "${ORACLE_BACKEND:-cpu}")
     fi
+    # bash 3.2 + set -u abort on empty-array expansion; use the guarded idiom.
     exec "$PYTHON" "$SERVING" capabilities --root "$ROOT" \
-      "${backend_args[@]}" "$@"
+      ${backend_args[@]+"${backend_args[@]}"} "$@"
     ;;
   verify)
     shift

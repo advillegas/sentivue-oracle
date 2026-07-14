@@ -248,9 +248,11 @@ MCP_POSTGRES_ARCHIVE="$(artifact_path "python-mcp-postgres" "$MCP_POSTGRES")"
 HF_CLI_ARCHIVE="$(
   artifact_path "hf-cli" "$HF_CLI_VERSION" "$HF_CLI_RESOLVED_VERSION"
 )"
-uvx "${UV_MODE[@]}" --from "$MCP_DUCKDB_ARCHIVE" mcp-server-duckdb --help >/dev/null
-uvx "${UV_MODE[@]}" --from "$MCP_POSTGRES_ARCHIVE" postgres-mcp --help >/dev/null
-uv tool install "${UV_MODE[@]}" "$HF_CLI_ARCHIVE"
+# macOS ships bash 3.2, where expanding an EMPTY array under `set -u` aborts
+# with "unbound variable"; the ${arr[@]+...} idiom is the portable form.
+uvx ${UV_MODE[@]+"${UV_MODE[@]}"} --from "$MCP_DUCKDB_ARCHIVE" mcp-server-duckdb --help >/dev/null
+uvx ${UV_MODE[@]+"${UV_MODE[@]}"} --from "$MCP_POSTGRES_ARCHIVE" postgres-mcp --help >/dev/null
+uv tool install ${UV_MODE[@]+"${UV_MODE[@]}"} "$HF_CLI_ARCHIVE"
 
 echo "==> [5/8] Skills -> both engines"
 bash bootstrap/sync-skills.sh

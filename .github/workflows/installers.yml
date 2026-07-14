@@ -191,6 +191,26 @@ jobs:
           set -e
           [[ "$status" -ne 0 ]]
           [[ "$signature" == *"no signature"* || "$signature" == *"not signed"* ]]
+      - name: Probe the real connected bootstrap with system bash 3.2
+        timeout-minutes: 30
+        shell: bash
+        run: |
+          # This reproduces a real Mac install: the published source tree runs
+          # its own connected bootstrap under /bin/bash (macOS ships bash 3.2,
+          # whose set -u semantics differ from modern bash) and must produce
+          # working toolchains end to end.
+          cd "$RUNNER_TEMP/installed tree with spaces"
+          ORACLE_CONNECTED_SETUP=1 /bin/bash bootstrap/install.sh
+          test -x ".tools/bin/node"
+          test -x ".tools/bin/npm"
+          test -x ".tools/bin/npx"
+          test -x ".tools/llama/llama-server"
+          test -x ".tools/bin/llama-server"
+          ".tools/bin/node" --version
+          ".tools/bin/npm" --version
+          ".tools/bin/uv" --version
+          ".tools/bin/lean-ctx" --version
+          ".tools/npm/bin/claude" --version
       - name: Bind every asset into final release provenance
         shell: bash
         run: |

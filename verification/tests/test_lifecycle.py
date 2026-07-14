@@ -3381,6 +3381,17 @@ def test_mac_bootstrap_installs_shimmed_node_and_llama_trees() -> None:
     assert "install_binary_tree \"brew-llama-cpp\"" in source
     assert '"$ROOT/.tools/llama"' in source
     assert 'exec %q "$@"' in source
+    # macOS bash 3.2 aborts on empty-array expansion under set -u; every
+    # possibly-empty array must use the guarded ${arr[@]+...} idiom.
+    assert '"${UV_MODE[@]}"' not in source.replace('${UV_MODE[@]+"${UV_MODE[@]}"}', "")
+    assert source.count('${UV_MODE[@]+"${UV_MODE[@]}"}') == 3
+    service = (REPO_ROOT / "serving/service.sh").read_text(encoding="utf-8")
+    assert '${backend_args[@]+"${backend_args[@]}"}' in service
+    workflow = (REPO_ROOT / ".github/workflows/installers.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "Probe the real connected bootstrap with system bash 3.2" in workflow
+    assert "ORACLE_CONNECTED_SETUP=1 /bin/bash bootstrap/install.sh" in workflow
 
 
 def test_ide_setups_create_owned_desktop_shortcuts() -> None:
@@ -3639,7 +3650,7 @@ esac
         "df",
         "#!/usr/bin/env bash\n"
         "printf 'Filesystem Blocks Used Available Capacity Mounted\\n"
-        "fixture 1000 1 999 1%% /\\n'\n",
+        "fixture 2000000000 1 1900000000 1%% /\\n'\n",
     )
     for path in (fake_python, fake_curl, fake_df):
         path.chmod(0o755)
@@ -3666,8 +3677,22 @@ esac
     env["HOME"] = str(home)
     env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
 
+    # Git-bash on Windows prepends its own bin directories to the inherited
+    # PATH, which would resolve real tools (curl) ahead of these stubs and
+    # leak the host's live services into the fixture. Prepending inside the
+    # shell keeps the stubs authoritative on every platform.
     completed = subprocess.run(
-        [str(bash), str(root / "install"), "--yes"],
+        [
+            str(bash),
+            "-c",
+            'if command -v cygpath >/dev/null 2>&1; then '
+            'stub_bin="$(cygpath -u "$1")"; else stub_bin="$1"; fi; '
+            'export PATH="$stub_bin:$PATH"; shift; exec bash "$@"',
+            "_",
+            str(fake_bin),
+            str(root / "install"),
+            "--yes",
+        ],
         cwd=root,
         env=env,
         text=True,
