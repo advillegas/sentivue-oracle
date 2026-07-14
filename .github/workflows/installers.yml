@@ -293,10 +293,10 @@ jobs:
                 '- **Mac:** download the .pkg file and double-click it.' \
                 '' \
                 '### Mac first open (one time, about 30 seconds)' \
-                'This build is not yet Apple-notarized, so macOS blocks the first open:' \
+                'This build is not yet Apple-notarized, so macOS blocks the first open. Do these steps back-to-back:' \
                 '1. Double-click the .pkg. When macOS says it could not verify the installer, click **Done** (not Move to Trash).' \
-                '2. Open **System Settings -> Privacy & Security**, scroll down to the Security section, and click **Open Anyway** beside the blocked-installer message.' \
-                '3. Confirm **Open Anyway** and enter your password or Touch ID. The installer then runs normally.' \
+                '2. Immediately open **System Settings -> Privacy & Security** and scroll the main pane all the way to the bottom. An **Open Anyway** button appears there beside the blocked-installer message -- but only for about an hour after step 1, so it is invisible if you open Settings first.' \
+                '3. Click **Open Anyway**, confirm, and enter your password or Touch ID. The installer then runs normally.' \
                 '' \
                 'On macOS Sonoma or older you can instead right-click the .pkg and choose Open.' \
                 '' \
