@@ -26,7 +26,9 @@ if [[ -f "$archive" ]] &&
   rm -f "$archive"
 fi
 if [[ ! -f "$archive" ]]; then
-  printf '==> downloading pinned portable Python %s\n' "$PYTHON_VERSION"
+  # Progress goes to stderr so stdout stays a single clean line: the path to
+  # the pinned interpreter, which callers capture with $(...).
+  printf '==> downloading pinned portable Python %s\n' "$PYTHON_VERSION" >&2
   curl --proto '=https' --tlsv1.2 -L -C - --fail --retry 10 \
     --retry-all-errors --connect-timeout 30 --progress-bar \
     -o "$partial" "$URL"

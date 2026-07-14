@@ -3394,6 +3394,33 @@ def test_mac_bootstrap_installs_shimmed_node_and_llama_trees() -> None:
     assert "ORACLE_CONNECTED_SETUP=1 /bin/bash bootstrap/install.sh" in workflow
 
 
+def test_bootstrap_establishes_pinned_python_instead_of_failing() -> None:
+    bootstrap = (REPO_ROOT / "bootstrap/install.sh").read_text(encoding="utf-8")
+    python_boot = (REPO_ROOT / "bootstrap/bootstrap-python.sh").read_text(
+        encoding="utf-8"
+    )
+
+    # A host interpreter that is missing or a different 3.12 patch must trigger
+    # the pinned portable-Python bootstrap, not a hard failure.
+    assert 'if [[ "$ACTUAL_PYTHON_VERSION" != "$PYTHON_VERSION" ]]; then' in bootstrap
+    assert 'PYTHON_BIN="$(bash "$ROOT/bootstrap/bootstrap-python.sh")"' in bootstrap
+    assert "establishing the pinned Python" in bootstrap
+    # The bootstrapper must emit only the interpreter path on stdout so $() is clean.
+    assert "downloading pinned portable Python %s\\n' \"$PYTHON_VERSION\" >&2" in python_boot
+
+
+def test_macos_backend_defaults_to_auto_and_never_hard_errors() -> None:
+    service = (REPO_ROOT / "serving/service.sh").read_text(encoding="utf-8")
+
+    # Default must be "auto" (GPU when safely placeable, else CPU) so setup
+    # always completes; explicit metal/cpu remain available.
+    assert 'local backend="${ORACLE_BACKEND:-auto}"' in service
+    assert (
+        '[[ "$backend" == "auto" || "$backend" == "metal" || "$backend" == "cpu" ]]'
+        in service
+    )
+
+
 def test_vault_seeding_never_aborts_a_working_install() -> None:
     install = (REPO_ROOT / "bootstrap/install.sh").read_text(encoding="utf-8")
     vault = (REPO_ROOT / "bootstrap/vault.sh").read_text(encoding="utf-8")

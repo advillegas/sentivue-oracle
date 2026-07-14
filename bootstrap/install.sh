@@ -119,11 +119,22 @@ if [[ "$(uname -s)/$(uname -m)" != "Darwin/arm64" && -z "${ORACLE_SKIP_OS_CHECK:
   exit 1
 fi
 
-PYTHON_BIN="$(find_python)" || {
-  echo "ERROR: Python 3.12+ is a platform prerequisite for offline validation." >&2
-  exit 1
-}
-ACTUAL_PYTHON_VERSION="$("$PYTHON_BIN" -c 'import platform; print(platform.python_version())')"
+PYTHON_BIN="$(find_python)" || PYTHON_BIN=""
+ACTUAL_PYTHON_VERSION=""
+[[ -n "$PYTHON_BIN" ]] &&
+  ACTUAL_PYTHON_VERSION="$("$PYTHON_BIN" -c 'import platform; print(platform.python_version())')"
+if [[ "$ACTUAL_PYTHON_VERSION" != "$PYTHON_VERSION" ]]; then
+  # The host interpreter is missing or a different patch release (a newer 3.12.x
+  # is common and still rejected by the exact-version trust root). Rather than
+  # fail, establish the pinned, checksum-verified portable Python ourselves.
+  echo "==> establishing the pinned Python $PYTHON_VERSION trust root" \
+    "(found: ${ACTUAL_PYTHON_VERSION:-none})"
+  PYTHON_BIN="$(bash "$ROOT/bootstrap/bootstrap-python.sh")" || {
+    echo "ERROR: could not establish the pinned Python $PYTHON_VERSION trust root." >&2
+    exit 1
+  }
+  ACTUAL_PYTHON_VERSION="$("$PYTHON_BIN" -c 'import platform; print(platform.python_version())')"
+fi
 [[ "$ACTUAL_PYTHON_VERSION" == "$PYTHON_VERSION" ]] || {
   echo "ERROR: bootstrap trust root requires Python $PYTHON_VERSION, found $ACTUAL_PYTHON_VERSION." >&2
   exit 1
