@@ -4160,11 +4160,23 @@ def _extract_source_archive(archive_path: Path, destination: Path) -> Path:
     else:
         try:
             with tarfile.open(archive_path, "r:*") as archive:
+                members: dict[str, tarfile.TarInfo] = {}
+                tar_links: list[tuple[str, tarfile.TarInfo]] = []
                 for member in archive.getmembers():
                     relative = validate_relative_path(member.name.rstrip("/"))
+                    if relative in members:
+                        raise LifecycleError(
+                            f"source archive contains a duplicate member: {relative}"
+                        )
+                    members[relative] = member
                     target = destination / Path(*PurePosixPath(relative).parts)
                     if member.issym() or member.islnk():
-                        raise LifecycleError("source archive contains a link")
+                        # Official toolchain tarballs (Node, llama.cpp, ...) ship
+                        # internal links; they are materialized as regular files
+                        # after every non-link member exists, and never as
+                        # symlinks on disk.
+                        tar_links.append((relative, member))
+                        continue
                     if member.isdir():
                         target.mkdir(parents=True, exist_ok=True)
                         continue
@@ -4179,6 +4191,80 @@ def _extract_source_archive(archive_path: Path, destination: Path) -> Path:
                     with source, target.open("xb") as output:
                         shutil.copyfileobj(source, output)
                     os.chmod(target, member.mode & 0o777)
+                for relative, member in tar_links:
+                    seen = {relative}
+                    current_relative = relative
+                    current = member
+                    while current.issym() or current.islnk():
+                        raw_target = current.linkname
+                        if (
+                            not raw_target
+                            or len(raw_target) > 4096
+                            or "\x00" in raw_target
+                        ):
+                            raise LifecycleError(
+                                "source archive link target is invalid"
+                            )
+                        if current.issym():
+                            resolved = posixpath.normpath(
+                                posixpath.join(
+                                    posixpath.dirname(current_relative),
+                                    raw_target,
+                                )
+                            )
+                        else:
+                            # Hard-link targets are archive-root relative.
+                            resolved = posixpath.normpath(raw_target)
+                        resolved = validate_relative_path(resolved)
+                        if (
+                            PurePosixPath(resolved).parts[0]
+                            != PurePosixPath(relative).parts[0]
+                        ):
+                            raise LifecycleError(
+                                "source archive symbolic link escapes its source root"
+                            )
+                        if resolved in seen:
+                            raise LifecycleError(
+                                "source archive contains a symbolic link cycle"
+                            )
+                        seen.add(resolved)
+                        current_relative = resolved
+                        next_member = members.get(resolved)
+                        if next_member is None:
+                            raise LifecycleError(
+                                "source archive symbolic link target is missing"
+                            )
+                        current = next_member
+                    target = destination / Path(*PurePosixPath(relative).parts)
+                    if current.isdir():
+                        prefix = current_relative.rstrip("/") + "/"
+                        if any(
+                            nested_relative.startswith(prefix)
+                            for nested_relative, _nested in tar_links
+                        ):
+                            raise LifecycleError(
+                                "source archive directory link target contains links"
+                            )
+                        source_directory = destination / Path(
+                            *PurePosixPath(current_relative).parts
+                        )
+                        if not source_directory.is_dir():
+                            raise LifecycleError(
+                                "source archive symbolic link directory is missing"
+                            )
+                        shutil.copytree(source_directory, target)
+                        continue
+                    if not current.isfile():
+                        raise LifecycleError(
+                            "source archive symbolic link target is not a regular file"
+                        )
+                    source = archive.extractfile(current)
+                    if source is None:
+                        raise LifecycleError("source archive member is unreadable")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with source, target.open("xb") as output:
+                        shutil.copyfileobj(source, output)
+                    os.chmod(target, current.mode & 0o777)
         except (tarfile.TarError, OSError) as exc:
             raise LifecycleError(f"invalid source tar archive: {archive_path}") from exc
     children = list(destination.iterdir())

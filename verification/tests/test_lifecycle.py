@@ -3281,6 +3281,80 @@ def test_second_review_optional_source_setups_use_validated_cache(
         assert "@cobusgreyling/" not in source
 
 
+def test_source_tar_materializes_internal_links_and_rejects_escapes(
+    tmp_path: Path,
+) -> None:
+    archive = tmp_path / "node-fixture.tar.gz"
+    with tarfile.open(archive, "w:gz") as output:
+        payload = b"#!/usr/bin/env node\nconsole.log('npm')\n"
+        cli = tarfile.TarInfo("node/lib/node_modules/npm/bin/npm-cli.js")
+        cli.size = len(payload)
+        cli.mode = 0o755
+        output.addfile(cli, io.BytesIO(payload))
+        link = tarfile.TarInfo("node/bin/npm")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../lib/node_modules/npm/bin/npm-cli.js"
+        output.addfile(link)
+
+    extracted = lifecycle._extract_source_archive(archive, tmp_path / "safe")
+
+    materialized = extracted / "bin" / "npm"
+    assert materialized.read_bytes() == b"#!/usr/bin/env node\nconsole.log('npm')\n"
+    assert not materialized.is_symlink()
+    assert not any(path.is_symlink() for path in extracted.rglob("*"))
+
+    escaping = tmp_path / "escaping.tar.gz"
+    with tarfile.open(escaping, "w:gz") as output:
+        outside = tarfile.TarInfo("outside.txt")
+        outside.size = len(b"unsafe\n")
+        output.addfile(outside, io.BytesIO(b"unsafe\n"))
+        link = tarfile.TarInfo("node/bin/npm")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "../../outside.txt"
+        output.addfile(link)
+    with pytest.raises(LifecycleError, match="escapes its source root|relative path"):
+        lifecycle._extract_source_archive(escaping, tmp_path / "rejected")
+
+    dangling = tmp_path / "dangling.tar.gz"
+    with tarfile.open(dangling, "w:gz") as output:
+        link = tarfile.TarInfo("node/bin/npm")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "missing-target"
+        output.addfile(link)
+    with pytest.raises(LifecycleError, match="target is missing"):
+        lifecycle._extract_source_archive(dangling, tmp_path / "rejected-dangling")
+
+
+def test_mac_bootstrap_installs_shimmed_node_and_llama_trees() -> None:
+    source = (REPO_ROOT / "bootstrap/install.sh").read_text(encoding="utf-8")
+
+    # Node's bin/npm symlink is materialized as an inert copy, so PATH shims
+    # must execute the real CLI entry points from their canonical location.
+    assert 'printf \'#!/bin/bash\\nexec %q %q "$@"\\n\' "$node_binary" "$cli_js"' in source
+    assert 'for node_cli in npm npx; do' in source
+    assert 'export PATH="$ROOT/.tools/bin:$(dirname "$node_binary"):$PATH"' in source
+    # llama-server is dylib-linked and must ship beside its libraries.
+    assert "install_binary_tree \"brew-llama-cpp\"" in source
+    assert '"$ROOT/.tools/llama"' in source
+    assert 'exec %q "$@"' in source
+
+
+def test_ide_setups_create_owned_desktop_shortcuts() -> None:
+    bash_source = (REPO_ROOT / "connectors/ide/setup-ide.sh").read_text(
+        encoding="utf-8"
+    )
+    powershell_source = (REPO_ROOT / "connectors/ide/setup-ide.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'shortcut="$desktop/SentiVue Oracle.command"' in bash_source
+    assert "install_desktop_shortcut" in bash_source
+    assert 'state own \\' in bash_source
+    assert 'SentiVue Oracle.lnk' in powershell_source
+    assert "Install-DesktopShortcut" in powershell_source
+    assert "desktop shortcut ownership registration failed" in powershell_source
+
+
 def test_source_zip_materializes_internal_links_and_rejects_escapes(
     tmp_path: Path,
 ) -> None:

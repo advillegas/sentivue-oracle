@@ -82,6 +82,37 @@ install_cached_binary() {
   rm -rf "$stage"
 }
 
+install_binary_tree() {
+  # Dynamically linked tools (llama-server) need every sibling dylib beside the
+  # binary (@rpath=@loader_path), so the anchor's whole directory is installed.
+  local artifact_id="$1" requested="$2" resolved="$3" anchor="$4" destination="$5"
+  local archive stage anchor_path
+  archive="$(artifact_path "$artifact_id" "$requested" "$resolved")"
+  stage="$(mktemp -d "$ROOT/.binary-stage.XXXXXX")"
+  case "$archive" in
+    *.zip) ditto -x -k "$archive" "$stage" ;;
+    *.tar|*.tar.gz|*.tgz) tar -xf "$archive" -C "$stage" ;;
+    *)
+      rm -rf "$stage"
+      echo "ERROR: $artifact_id is not an archive" >&2
+      return 1
+      ;;
+  esac
+  anchor_path="$(find "$stage" -type f -name "$anchor" | head -1)"
+  [[ -n "$anchor_path" ]] || {
+    rm -rf "$stage"
+    echo "ERROR: $artifact_id has no $anchor" >&2
+    return 1
+  }
+  chmod +x "$anchor_path"
+  mkdir -p "$(dirname "$destination")"
+  rm -rf "${destination}.new"
+  cp -R "$(dirname "$anchor_path")" "${destination}.new"
+  rm -rf "$destination"
+  mv -f "${destination}.new" "$destination"
+  rm -rf "$stage"
+}
+
 if [[ "$(uname -s)/$(uname -m)" != "Darwin/arm64" && -z "${ORACLE_SKIP_OS_CHECK:-}" ]]; then
   echo "ERROR: deployment target is macOS arm64 (Mac Studio)."
   echo "       Set ORACLE_SKIP_OS_CHECK=1 to force (authoring machines only)."
@@ -115,7 +146,26 @@ install_source_tree "node-darwin-arm64" "$NODE_VERSION" "$NODE_RESOLVED_VERSION"
   "$ROOT/.tools/node"
 node_binary="$(find "$ROOT/.tools/node" -type f -path '*/bin/node' | head -1)"
 [[ -n "$node_binary" ]] || { echo "ERROR: cached Node tree has no bin/node" >&2; exit 1; }
-export PATH="$(dirname "$node_binary"):$ROOT/.tools/bin:$PATH"
+node_root="$(cd "$(dirname "$node_binary")/.." && pwd)"
+mkdir -p "$ROOT/.tools/bin"
+# The validated Node tree materializes its bin/npm and bin/npx symlinks as
+# inert copies (which would resolve modules relative to the wrong directory),
+# so PATH-visible shims execute the real CLIs from their canonical location.
+printf '#!/bin/bash\nexec %q "$@"\n' "$node_binary" > "$ROOT/.tools/bin/node.new"
+chmod +x "$ROOT/.tools/bin/node.new"
+mv -f "$ROOT/.tools/bin/node.new" "$ROOT/.tools/bin/node"
+for node_cli in npm npx; do
+  cli_js="$node_root/lib/node_modules/npm/bin/$node_cli-cli.js"
+  [[ -f "$cli_js" ]] || {
+    echo "ERROR: cached Node tree has no $node_cli CLI" >&2
+    exit 1
+  }
+  printf '#!/bin/bash\nexec %q %q "$@"\n' "$node_binary" "$cli_js" \
+    > "$ROOT/.tools/bin/$node_cli.new"
+  chmod +x "$ROOT/.tools/bin/$node_cli.new"
+  mv -f "$ROOT/.tools/bin/$node_cli.new" "$ROOT/.tools/bin/$node_cli"
+done
+export PATH="$ROOT/.tools/bin:$(dirname "$node_binary"):$PATH"
 install_cached_binary "uv-darwin-arm64" "$UV_VERSION" "$UV_VERSION" uv \
   "$ROOT/.tools/bin/uv"
 install_cached_binary "uv-darwin-arm64" "$UV_VERSION" "$UV_VERSION" uvx \
@@ -130,8 +180,14 @@ cp "$ROOT/engines/shared/lean-ctx-config.toml" \
   "$ROOT/state/lean-ctx/config/config.toml.new"
 mv -f "$ROOT/state/lean-ctx/config/config.toml.new" \
   "$ROOT/state/lean-ctx/config/config.toml"
-install_cached_binary "brew-llama-cpp" "$LLAMA_CPP_BREW_VERSION" \
-  "$LLAMA_CPP_BREW_RESOLVED_VERSION" llama-server "$ROOT/.tools/bin/llama-server"
+# The official llama.cpp archive is dylib-linked (@rpath=@loader_path), so the
+# server ships as a directory tree with a PATH shim, never as a lone binary.
+install_binary_tree "brew-llama-cpp" "$LLAMA_CPP_BREW_VERSION" \
+  "$LLAMA_CPP_BREW_RESOLVED_VERSION" llama-server "$ROOT/.tools/llama"
+printf '#!/bin/bash\nexec %q "$@"\n' "$ROOT/.tools/llama/llama-server" \
+  > "$ROOT/.tools/bin/llama-server.new"
+chmod +x "$ROOT/.tools/bin/llama-server.new"
+mv -f "$ROOT/.tools/bin/llama-server.new" "$ROOT/.tools/bin/llama-server"
 for required in tar node npm uv uvx jq lean-ctx llama-server; do
   command -v "$required" >/dev/null || {
     echo "ERROR: $required is absent; install it from the validated platform export." >&2

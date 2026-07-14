@@ -85,6 +85,25 @@ register_ide_ownership() {
     --root "$ROOT" --home "$HOME" --path "$VSCODIUM_ROOT" >/dev/null
   "$python_bin" "$ROOT/verification/lifecycle.py" state own-tree \
     --root "$ROOT" --home "$HOME" --path "$ROOT/state/generated" >/dev/null
+  if [[ -e "$HOME/Desktop/SentiVue Oracle.command" ]]; then
+    "$python_bin" "$ROOT/verification/lifecycle.py" state own \
+      --root "$ROOT" --home "$HOME" \
+      --path "$HOME/Desktop/SentiVue Oracle.command" >/dev/null
+  fi
+}
+
+install_desktop_shortcut() {
+  # Double-clickable Desktop launcher; created locally so it carries no
+  # quarantine attribute, and ownership-registered so uninstall removes it.
+  local desktop="$HOME/Desktop" shortcut temporary
+  mkdir -p "$desktop"
+  shortcut="$desktop/SentiVue Oracle.command"
+  temporary="$(mktemp "$desktop/.sentivue-shortcut.XXXXXX")"
+  printf '#!/bin/bash\nexec /bin/bash %q launch\n' \
+    "$ROOT/connectors/ide/setup-ide.sh" > "$temporary"
+  chmod 755 "$temporary"
+  mv -f "$temporary" "$shortcut"
+  echo "==> desktop shortcut: SentiVue Oracle.command -> your IDE"
 }
 
 install_codium_from_cache() {
@@ -295,6 +314,7 @@ case "${1:-launch}" in
     graft_ripgrep
     bash "$ROOT/connectors/ide/sync-models.sh"
     update_user_config
+    install_desktop_shortcut
     register_ide_ownership
     echo
     echo "IDE ready. Models are auto-detected on every launch; Kilo Code reads"

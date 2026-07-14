@@ -101,6 +101,35 @@ function Install-OracleAgentsExtension {
     Write-Host "==> installed agents sidebar extension (sentivue.oracle-agents-$ver)"
 }
 
+function Install-DesktopShortcut {
+    # Double-clickable Desktop launcher for the IDE; ownership-registered so
+    # uninstall removes it. Existing user shortcuts are replaced atomically.
+    $codium = Find-Codium
+    if (-not $codium) { throw "repo-local VSCodium is missing" }
+    $desktop = [Environment]::GetFolderPath("Desktop")
+    New-Item -ItemType Directory -Force -Path $desktop | Out-Null
+    $shortcutPath = Join-Path $desktop "SentiVue Oracle.lnk"
+    $temporary = Join-Path $desktop (".sentivue-shortcut-{0}.lnk" -f [Guid]::NewGuid().ToString("N"))
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $link = $shell.CreateShortcut($temporary)
+        $link.TargetPath = "powershell.exe"
+        $link.Arguments = ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" launch' -f
+            (Join-Path $PSScriptRoot "setup-ide.ps1"))
+        $codiumExe = Get-ChildItem $VSCodiumAppRoot -Recurse -Filter "VSCodium.exe" `
+            -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($codiumExe) { $link.IconLocation = "$($codiumExe.FullName),0" }
+        $link.WorkingDirectory = $Root
+        $link.Description = "SentiVue Oracle - your own Cursor on local models"
+        $link.Save()
+        Move-Item -LiteralPath $temporary -Destination $shortcutPath -Force
+    } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "==> desktop shortcut: SentiVue Oracle -> your IDE"
+    return $shortcutPath
+}
+
 function Update-UserConfig {
     # This dedicated user-data directory is Oracle-owned; canonical user files
     # remain untouched.
@@ -255,6 +284,7 @@ switch ($Cmd) {
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "sync-models.ps1")
         if ($LASTEXITCODE -ne 0) { throw "generated model configuration failed" }
         Update-UserConfig
+        $shortcut = Install-DesktopShortcut
         $python = Join-Path $Root "env\.venv\Scripts\python.exe"
         if (-not (Test-Path -LiteralPath $python)) {
             $python = (Get-Command python -ErrorAction Stop).Source
@@ -267,6 +297,9 @@ switch ($Cmd) {
                 --path $ownedTree | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "IDE ownership registration failed" }
         }
+        & $python $lifecycle state own --root $Root --home $env:USERPROFILE `
+            --path $shortcut | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "desktop shortcut ownership registration failed" }
         Write-Host ""
         Write-Host "IDE ready. Models are auto-detected on every launch; Kilo Code reads"
         Write-Host "its generated config from state\generated\kilo\kilo.jsonc (local provider only)."
