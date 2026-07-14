@@ -4,6 +4,7 @@ import hashlib
 import http.client
 import inspect
 import json
+import math
 import plistlib
 import re
 import shlex
@@ -2899,6 +2900,172 @@ def test_final_review_metal_placement_respects_wired_memory_limit() -> None:
         requested_backend="auto",
     )
     assert fallback.backend == Backend.CPU
+
+
+def test_metal_shared_placement_offloads_all_layers_with_trusted_metadata() -> None:
+    layers = (GIB,) * 48
+    resources = ResourceSnapshot(
+        system_total_mib=192 * GIB,
+        system_available_mib=180 * GIB,
+        backend=Backend.METAL,
+        accelerator_total_mib=160 * GIB,
+        accelerator_available_mib=160 * GIB,
+        accelerator_shared=True,
+        capability_source="fixture metal offload",
+    )
+    for requested in ("auto", "metal"):
+        placement = serving.plan_model_placement(
+            model_name="chat",
+            model_memory_mib=48 * GIB,
+            layer_mib=layers,
+            kv_runtime_mib=2 * GIB,
+            resources=resources,
+            requested_backend=requested,
+        )
+        assert placement.backend == Backend.METAL
+        assert placement.offloaded_layers == len(layers)
+        assert placement.total_layers == len(layers)
+        assert placement.split_mode == "unified"
+
+
+def test_shared_metal_placements_offload_every_model_to_metal() -> None:
+    resources = ResourceSnapshot(
+        system_total_mib=256 * GIB,
+        system_available_mib=240 * GIB,
+        backend=Backend.METAL,
+        accelerator_total_mib=200 * GIB,
+        accelerator_available_mib=200 * GIB,
+        accelerator_shared=True,
+        capability_source="fixture metal shared",
+    )
+    plans = serving.plan_shared_model_placements(
+        model_names=("chat", "embed"),
+        resident_names=("chat", "embed"),
+        model_memory_mib={"chat": 30 * GIB, "embed": 4 * GIB},
+        layer_mib={"chat": (GIB,) * 48, "embed": (GIB,) * 36},
+        kv_runtime_mib={"chat": 2 * GIB, "embed": GIB},
+        resources=resources,
+        requested_backend="auto",
+    )
+    assert plans["chat"].backend == Backend.METAL
+    assert plans["chat"].offloaded_layers == 48
+    assert plans["embed"].backend == Backend.METAL
+    assert plans["embed"].offloaded_layers == 36
+
+
+def test_offload_evidence_tolerates_metal_output_layer_off_by_one() -> None:
+    # Metal accepts the exact block count and the +1 output-layer report.
+    assert serving.offload_evidence_matches("metal", 48, 48)
+    assert serving.offload_evidence_matches("metal", 48, 49)
+    # A CPU-loaded model (zero offload) must never satisfy a Metal plan.
+    assert not serving.offload_evidence_matches("metal", 48, 0)
+    assert not serving.offload_evidence_matches("metal", 48, 47)
+    # CPU semantics stay exact at zero.
+    assert serving.offload_evidence_matches("cpu", 0, 0)
+    assert not serving.offload_evidence_matches("cpu", 0, 1)
+    # Discrete GPUs keep brittle-free exact equality (no output-layer quirk).
+    assert serving.offload_evidence_matches("cuda", 32, 32)
+    assert not serving.offload_evidence_matches("cuda", 32, 33)
+    assert not serving.offload_evidence_matches("cuda", 32, 31)
+
+
+@pytest.mark.parametrize(
+    ("observed_offload", "expected_status"),
+    [(48, PASS), (49, PASS), (0, FAIL)],
+)
+def test_metal_verify_tolerates_output_layer_off_by_one(
+    observed_offload: int, expected_status: str
+) -> None:
+    def transport(
+        _method: str, path: str, _payload: dict[str, object] | None
+    ) -> HttpResponse:
+        if path == "/health":
+            return HttpResponse(200, {"status": "ok"}, {}, 1)
+        if path == "/v1/models":
+            return HttpResponse(
+                200, {"data": [{"id": "chat"}, {"id": "embed"}]}, {}, 1
+            )
+        if path == "/running":
+            return HttpResponse(
+                200,
+                {
+                    "running": [
+                        {
+                            "model": "chat",
+                            "state": "ready",
+                            "loaded_backend": "metal",
+                            "offloaded_layers": observed_offload,
+                        }
+                    ]
+                },
+                {},
+                1,
+            )
+        if path == "/v1/embeddings":
+            return HttpResponse(200, {"data": [{"embedding": [0.0] * 8}]}, {}, 1)
+        if path == "/v1/messages":
+            return HttpResponse(
+                200, {"content": [{"type": "text", "text": "ORACLE-OK"}]}, {}, 1
+            )
+        if path == "/v1/chat/completions":
+            return HttpResponse(
+                200,
+                {
+                    "choices": [{"message": {"content": "ORACLE-OK"}}],
+                    "usage": {"prompt_tokens": 25000},
+                },
+                {},
+                1,
+            )
+        raise AssertionError(path)
+
+    results = serving.run_offline_probes(
+        transport=transport,
+        contexts={"chat": production_plan()},
+        chat_model="chat",
+        embedding_model="embed",
+        listeners=("127.0.0.1:9099",),
+        planned_placements={"chat": {"backend": "metal", "offloaded_layers": 48}},
+        engine_runner=None,
+    )
+    probe = next(result for result in results if result.name == "loaded_backend")
+    assert probe.status == expected_status
+
+
+def test_model_authorities_pin_trusted_layer_counts_for_metal_offload() -> None:
+    expected_layers = {
+        "deepseek-v3.2": 61,
+        "kimi-k2-thinking": 61,
+        "qwen3-coder-480b": 62,
+        "qwen3-coder-30b": 48,
+        "qwen3-coder-30b-q4": 48,
+        "qwen2.5-coder-7b": 28,
+        "qwen3-embedding-4b": 36,
+    }
+    payload = json.loads(
+        (REPO_ROOT / "serving" / "model-authorities.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    models = payload["models"]
+    assert set(models) == set(expected_layers)
+    for name, count in expected_layers.items():
+        layer_mib = models[name]["layer_mib"]
+        assert isinstance(layer_mib, list)
+        assert len(layer_mib) == count
+        assert all(
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value > 0
+            for value in layer_mib
+        )
+        total_size = sum(int(item["size"]) for item in models[name]["files"])
+        model_size_mib = max(1, math.ceil(total_size / (1024 * 1024)))
+        assert (
+            math.floor(model_size_mib * 0.75)
+            <= sum(layer_mib)
+            <= math.ceil(model_size_mib * 1.25)
+        )
 
 
 def test_final_review_gateway_forwards_normalized_completion_limit() -> None:

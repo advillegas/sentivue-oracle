@@ -624,6 +624,30 @@ def with_loaded_backend(
     return updated
 
 
+def offload_evidence_matches(
+    expected_backend: str,
+    expected_offload: int | None,
+    observed_offload: int | None,
+) -> bool:
+    """Decide whether observed offload evidence satisfies the placement plan.
+
+    CPU placement must report zero offloaded layers. Discrete GPUs report the
+    exact planned layer count. Apple Silicon (Metal, unified memory) offloads
+    every transformer block, but llama.cpp may additionally count the
+    non-repeating output layer, reporting block_count or block_count + 1. We
+    therefore accept any fully-offloaded report (observed >= expected) on Metal
+    rather than brittle exact equality that would fail on a real Mac.
+    """
+
+    if expected_offload is None or observed_offload is None:
+        return False
+    if expected_backend == Backend.CPU.value:
+        return observed_offload == 0
+    if expected_backend == Backend.METAL.value:
+        return expected_offload > 0 and observed_offload >= expected_offload
+    return expected_offload > 0 and observed_offload == expected_offload
+
+
 def plan_model_placement(
     *,
     model_name: str,
@@ -3575,14 +3599,8 @@ def run_offline_probes(
     if expected_backend:
         placement_matches = (
             normalized_loaded == expected_backend
-            and expected_offload is not None
-            and offloaded_layers == expected_offload
-            and (
-                (expected_backend == Backend.CPU.value and offloaded_layers == 0)
-                or (
-                    expected_backend != Backend.CPU.value
-                    and offloaded_layers > 0
-                )
+            and offload_evidence_matches(
+                expected_backend, expected_offload, offloaded_layers
             )
         )
     results.append(
@@ -3689,17 +3707,10 @@ def run_offline_probes(
         if model_expected_backend:
             model_placement_matches = (
                 normalized_backend == model_expected_backend
-                and model_expected_offload is not None
-                and model_offload == model_expected_offload
-                and (
-                    (
-                        model_expected_backend == Backend.CPU.value
-                        and model_offload == 0
-                    )
-                    or (
-                        model_expected_backend != Backend.CPU.value
-                        and model_offload > 0
-                    )
+                and offload_evidence_matches(
+                    model_expected_backend,
+                    model_expected_offload,
+                    model_offload,
                 )
             )
         results.append(

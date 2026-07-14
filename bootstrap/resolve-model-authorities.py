@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import math
 import os
 import re
 import sys
@@ -20,6 +21,22 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 REPOSITORY_RE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$"
 )
+
+# Trusted per-model transformer layer counts are sourced from each model's
+# OFFICIAL BASE repository config.json (num_hidden_layers == GGUF block_count),
+# never from the downloaded GGUF bytes. The GGUF re-quantization repos carry no
+# config.json, so the base repos below are the independent authority. This map
+# is pinned and explicit on purpose: an unmapped model fails closed rather than
+# guessing its layer count.
+LAYER_AUTHORITY_BASE_REPOS: dict[str, str] = {
+    "deepseek-v3.2": "deepseek-ai/DeepSeek-V3.2-Exp",
+    "kimi-k2-thinking": "moonshotai/Kimi-K2-Thinking",
+    "qwen3-coder-480b": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+    "qwen3-coder-30b": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "qwen3-coder-30b-q4": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "qwen2.5-coder-7b": "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "qwen3-embedding-4b": "Qwen/Qwen3-Embedding-4B",
+}
 
 
 class ResolutionError(RuntimeError):
@@ -57,7 +74,7 @@ def _request_text(url: str, token: str | None) -> str:
     request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
-            return response.read().decode("ascii")
+            return response.read().decode("utf-8")
     except Exception as exc:
         raise ResolutionError(f"request failed for {url}: {exc}") from exc
 
@@ -133,6 +150,33 @@ def _repo_metadata(repository: str, token: str | None) -> dict[str, Any]:
     return {"revision": revision}
 
 
+def _base_repo_layer_count(
+    repository: str, revision: str, token: str | None
+) -> int:
+    """Read num_hidden_layers from a base repo config.json at a pinned commit."""
+
+    encoded_repository = urllib.parse.quote(repository, safe="/")
+    encoded_revision = urllib.parse.quote(revision, safe="")
+    raw = _request_text(
+        f"https://huggingface.co/{encoded_repository}/resolve/"
+        f"{encoded_revision}/config.json",
+        token,
+    )
+    try:
+        config = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ResolutionError(
+            f"{repository}@{revision}: config.json is not valid JSON: {exc}"
+        ) from exc
+    layers = config.get("num_hidden_layers") if isinstance(config, dict) else None
+    if not isinstance(layers, int) or isinstance(layers, bool) or layers <= 0:
+        raise ResolutionError(
+            f"{repository}@{revision}: config.json lacks a positive "
+            "num_hidden_layers"
+        )
+    return layers
+
+
 def _repo_files(
     repository: str, revision: str, token: str | None
 ) -> list[dict[str, Any]]:
@@ -154,6 +198,7 @@ def _repo_files(
 def resolve_authorities(root: Path, token: str | None) -> dict[str, Any]:
     rows = _manifest_rows(root / "serving" / "models.manifest")
     cache: dict[str, tuple[str, list[dict[str, Any]]]] = {}
+    layer_cache: dict[str, int] = {}
     models: dict[str, Any] = {}
     for row in rows:
         repository = row["repository"]
@@ -199,11 +244,27 @@ def resolve_authorities(root: Path, token: str | None) -> dict[str, Any]:
             raise ResolutionError(
                 f"{row['name']}: pattern {row['include']!r} matched no LFS files"
             )
+        base_repo = LAYER_AUTHORITY_BASE_REPOS.get(row["name"])
+        if base_repo is None:
+            raise ResolutionError(
+                f"{row['name']}: no pinned base repository for trusted layer "
+                "metadata; add it to LAYER_AUTHORITY_BASE_REPOS"
+            )
+        if base_repo not in layer_cache:
+            base_revision = str(_repo_metadata(base_repo, token)["revision"])
+            layer_cache[base_repo] = _base_repo_layer_count(
+                base_repo, base_revision, token
+            )
+        layer_count = layer_cache[base_repo]
+        total_size = sum(int(item["size"]) for item in selected)
+        model_size_mib = max(1, math.ceil(total_size / (1024 * 1024)))
+        per_layer_mib = max(1, math.ceil(model_size_mib / layer_count))
         models[row["name"]] = {
             "repository": repository,
             "revision": revision,
             "include": row["include"],
             "files": sorted(selected, key=lambda item: item["path"]),
+            "layer_mib": [per_layer_mib] * layer_count,
         }
     return {"schema_version": 1, "models": dict(sorted(models.items()))}
 
