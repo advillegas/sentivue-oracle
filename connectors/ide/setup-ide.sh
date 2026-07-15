@@ -85,25 +85,84 @@ register_ide_ownership() {
     --root "$ROOT" --home "$HOME" --path "$VSCODIUM_ROOT" >/dev/null
   "$python_bin" "$ROOT/verification/lifecycle.py" state own-tree \
     --root "$ROOT" --home "$HOME" --path "$ROOT/state/generated" >/dev/null
-  if [[ -e "$HOME/Desktop/SentiVue Oracle.command" ]]; then
-    "$python_bin" "$ROOT/verification/lifecycle.py" state own \
+  if [[ -e "$HOME/Desktop/SentiVue Oracle.app" ]]; then
+    "$python_bin" "$ROOT/verification/lifecycle.py" state own-tree \
       --root "$ROOT" --home "$HOME" \
-      --path "$HOME/Desktop/SentiVue Oracle.command" >/dev/null
+      --path "$HOME/Desktop/SentiVue Oracle.app" >/dev/null
   fi
 }
 
 install_desktop_shortcut() {
-  # Double-clickable Desktop launcher; created locally so it carries no
-  # quarantine attribute, and ownership-registered so uninstall removes it.
-  local desktop="$HOME/Desktop" shortcut temporary
+  # A real .app bundle (not a bare .command script) so Finder shows a proper
+  # icon - VSCodium's own - and one double-click opens the IDE. Built in a
+  # staging dir and moved into place atomically; created locally so it carries
+  # no quarantine, and ownership-registered so uninstall removes the whole tree.
+  local desktop="$HOME/Desktop" app staging contents macos resources
+  local declared icon_src icon_name=""
   mkdir -p "$desktop"
-  shortcut="$desktop/SentiVue Oracle.command"
-  temporary="$(mktemp "$desktop/.sentivue-shortcut.XXXXXX")"
-  printf '#!/bin/bash\nexec /bin/bash %q launch\n' \
-    "$ROOT/connectors/ide/setup-ide.sh" > "$temporary"
-  chmod 755 "$temporary"
-  mv -f "$temporary" "$shortcut"
-  echo "==> desktop shortcut: SentiVue Oracle.command -> your IDE"
+  app="$desktop/SentiVue Oracle.app"
+  staging="$(mktemp -d "$desktop/.sentivue-app.XXXXXX")"
+  contents="$staging/Contents"
+  macos="$contents/MacOS"
+  resources="$contents/Resources"
+  mkdir -p "$macos" "$resources"
+
+  # GUI-launched apps inherit a minimal PATH, so bake the toolbelt (jq in
+  # .tools/bin, the venv python, codium) in before handing off to the launcher.
+  {
+    printf '#!/bin/bash\n'
+    printf 'export PATH=%q\n' \
+      "$ROOT/.tools/bin:$ROOT/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    printf 'exec /bin/bash %q launch\n' "$ROOT/connectors/ide/setup-ide.sh"
+  } > "$macos/launcher"
+  chmod 755 "$macos/launcher"
+
+  # Icon: copy VSCodium's own .icns so the bundle looks like the IDE. Best-effort
+  # - a missing IDE or icon must never stop the bundle from being created.
+  if [[ -d "$VSCODIUM_APP" ]]; then
+    icon_src=""
+    declared="$(defaults read "$VSCODIUM_APP/Contents/Info" CFBundleIconFile 2>/dev/null || true)"
+    if [[ -n "$declared" ]]; then
+      [[ "$declared" == *.icns ]] || declared="${declared}.icns"
+      [[ -f "$VSCODIUM_APP/Contents/Resources/$declared" ]] &&
+        icon_src="$VSCODIUM_APP/Contents/Resources/$declared"
+    fi
+    if [[ -z "$icon_src" ]]; then
+      icon_src="$(find "$VSCODIUM_APP/Contents/Resources" -maxdepth 1 -name '*.icns' -type f 2>/dev/null | head -1 || true)"
+    fi
+    if [[ -n "$icon_src" && -f "$icon_src" ]]; then
+      cp "$icon_src" "$resources/icon.icns" && icon_name="icon"
+    fi
+  fi
+
+  # Info.plist - CFBundleIconFile is emitted only when an icon was copied.
+  {
+    cat <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>SentiVue Oracle</string>
+  <key>CFBundleDisplayName</key><string>SentiVue Oracle</string>
+  <key>CFBundleExecutable</key><string>launcher</string>
+  <key>CFBundleIdentifier</key><string>com.sentivue.oracle.launcher</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+PLIST
+    [[ -n "$icon_name" ]] && printf '  <key>CFBundleIconFile</key><string>%s</string>\n' "$icon_name"
+    cat <<'PLIST'
+</dict>
+</plist>
+PLIST
+  } > "$contents/Info.plist"
+
+  rm -rf "$app"
+  mv "$staging" "$app"
+  # Locally created files carry no quarantine; strip it anyway so Gatekeeper
+  # never second-guesses the first double-click.
+  xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
+  echo "==> desktop app: SentiVue Oracle.app -> your IDE"
 }
 
 install_codium_from_cache() {
@@ -327,6 +386,12 @@ case "${1:-launch}" in
   sync)
     exec bash "$ROOT/connectors/ide/sync-models.sh"
     ;;
+  shortcut)
+    # Idempotently (re)create the Desktop .app so the top-level installer has a
+    # single source of truth for the double-clickable IDE launcher.
+    install_desktop_shortcut
+    register_ide_ownership
+    ;;
   launch)
     [[ -x "$CODIUM_BIN" ]] || { echo "IDE not installed - run: bash connectors/ide/setup-ide.sh install"; exit 1; }
     # Refresh model detection + profile paths before selecting generated configs.
@@ -338,5 +403,5 @@ case "${1:-launch}" in
     exec "$CODIUM_BIN" --user-data-dir "$USER_DATA_DIR" \
       --extensions-dir "$EXTENSIONS_DIR" "$ROOT"
     ;;
-  *) echo "usage: setup-ide.sh {install|sync|launch}"; exit 1 ;;
+  *) echo "usage: setup-ide.sh {install|sync|launch|shortcut}"; exit 1 ;;
 esac

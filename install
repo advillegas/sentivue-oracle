@@ -351,14 +351,16 @@ if [[ $NO_MODELS -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------- desktop shortcut
+# The IDE connector is the single source of truth: it builds a real .app bundle
+# (VSCodium's icon, one double-click opens the IDE) and registers its ownership.
+# Best-effort and NON-FATAL - a finished, serving platform must never be undone
+# by a desktop-cosmetics failure.
 if [[ -d "$HOME/Desktop" ]]; then
-  atomic_from_stdin "$HOME/Desktop/SentiVue Oracle.command" <<EOF
-#!/bin/bash
-exec bash "$ROOT/bin/oracle-menu"
-EOF
-  chmod +x "$HOME/Desktop/SentiVue Oracle.command"
-  own_path "$HOME/Desktop/SentiVue Oracle.command"
-  ok "desktop shortcut created: SentiVue Oracle"
+  if bash connectors/ide/setup-ide.sh shortcut; then
+    ok "desktop app created: SentiVue Oracle"
+  else
+    warn "could not create the desktop app; the platform is installed and serving"
+  fi
 fi
 
 # ---------------------------------------------------------------- done

@@ -3483,9 +3483,18 @@ def test_ide_setups_create_owned_desktop_shortcuts() -> None:
         encoding="utf-8"
     )
 
-    assert 'shortcut="$desktop/SentiVue Oracle.command"' in bash_source
+    # macOS: the Desktop shortcut is a real .app bundle (Finder shows a proper
+    # icon), and it is owned as a TREE so uninstall removes the whole bundle.
+    assert 'app="$desktop/SentiVue Oracle.app"' in bash_source
     assert "install_desktop_shortcut" in bash_source
-    assert 'state own \\' in bash_source
+    assert 'state own-tree \\' in bash_source
+    assert '--path "$HOME/Desktop/SentiVue Oracle.app"' in bash_source
+    # The bundle's launcher opens the IDE (setup-ide.sh launch), and the plist
+    # marks it a proper app; the retired .command launcher is fully gone.
+    assert "exec /bin/bash %q launch" in bash_source
+    assert "com.sentivue.oracle.launcher" in bash_source
+    assert "Oracle.command" not in bash_source
+    # Windows keeps its .lnk with the codium icon that opens the IDE.
     assert 'SentiVue Oracle.lnk' in powershell_source
     assert "Install-DesktopShortcut" in powershell_source
     assert "desktop shortcut ownership registration failed" in powershell_source
@@ -3819,6 +3828,18 @@ def test_install_continues_and_keeps_shortcut_when_verify_offline_fails(
     )
     put(root, "models/chat/model.gguf", b"model")
     put(root, "bin/oracle-menu", "#!/usr/bin/env bash\nexit 0\n").chmod(0o755)
+    # The installer's desktop-shortcut block delegates to the IDE connector,
+    # which builds the real .app bundle. Provide the connector plus the two files
+    # it sources so `setup-ide.sh shortcut` runs here. VSCodium is absent, so the
+    # icon is skipped and only the guaranteed launcher + Info.plist are produced.
+    put(root, "connectors/ide/setup-ide.sh", "")
+    shutil.copy2(
+        REPO_ROOT / "connectors/ide/setup-ide.sh",
+        root / "connectors/ide/setup-ide.sh",
+    )
+    (root / "connectors/ide/setup-ide.sh").chmod(0o755)
+    put(root, "engines/shared/lean-ctx-env.sh", "")
+    put(root, "VERSIONS.lock", "")
     put(
         root,
         "bootstrap/download-models.sh",
@@ -3896,10 +3917,18 @@ esac
     # The failure surfaced as a warning, not a fatal error.
     assert "offline verification reported issues" in combined
     assert "Install complete" in combined
-    # The desktop shortcut is created and points at the menu launcher.
-    shortcut = home / "Desktop" / "SentiVue Oracle.command"
-    assert shortcut.is_file()
-    assert "bin/oracle-menu" in shortcut.read_text(encoding="utf-8")
+    # The macOS desktop shortcut is now a real .app bundle that opens the IDE.
+    # The harness has no VSCodium, so assert only the structure the installer
+    # guarantees regardless of VSCodium: the launcher and the Info.plist.
+    bundle = home / "Desktop" / "SentiVue Oracle.app"
+    launcher = bundle / "Contents" / "MacOS" / "launcher"
+    assert launcher.is_file(), combined
+    launcher_text = launcher.read_text(encoding="utf-8")
+    assert "connectors/ide/setup-ide.sh" in launcher_text
+    assert "launch" in launcher_text
+    assert (bundle / "Contents" / "Info.plist").is_file()
+    # The retired .command shortcut is gone.
+    assert not (home / "Desktop" / "SentiVue Oracle.command").exists()
 
 
 def test_second_review_model_ownership_excludes_unselected_files(
