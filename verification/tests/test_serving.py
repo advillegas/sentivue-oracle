@@ -3028,6 +3028,228 @@ def test_shared_metal_placements_offload_every_model_to_metal() -> None:
     assert plans["embed"].offloaded_layers == 36
 
 
+def test_metal_placement_selects_gpu_on_minimum_kv_and_only_cpu_when_weights_dont_fit() -> None:
+    # A 96 GiB wired budget cannot hold a 30B model's FULL 262144-token KV
+    # (~64 GiB) beside its ~35 GiB of weights, but it easily holds the weights
+    # plus a production-minimum KV. Placement must therefore stay on Metal when
+    # handed the minimum-viable KV, and only fall back to CPU when the WEIGHTS
+    # themselves overflow the accelerator.
+    layers = (768,) * 48
+    resources = ResourceSnapshot(
+        system_total_mib=256 * GIB,
+        system_available_mib=240 * GIB,
+        backend=Backend.METAL,
+        accelerator_total_mib=96 * GIB,
+        accelerator_available_mib=96 * GIB,
+        accelerator_shared=True,
+        capability_source="fixture wired 96 GiB",
+    )
+    weights_mib = 35 * GIB
+    minimum_kv = serving._minimum_viable_kv_runtime_mib(
+        slot="fast",
+        parallel_slots=serving.RESIDENT_PARALLEL_SLOTS,
+        kv_mib_per_token=0.25,
+    )
+    nominal_kv = math.ceil(262144 * 0.25) + serving.MODEL_RUNTIME_OVERHEAD_MIB
+    assert weights_mib + nominal_kv > (96 * GIB - 1024)
+    assert weights_mib + minimum_kv < (96 * GIB - 1024)
+
+    for requested in ("auto", "metal"):
+        placement = serving.plan_model_placement(
+            model_name="chat",
+            model_memory_mib=weights_mib,
+            layer_mib=layers,
+            kv_runtime_mib=minimum_kv,
+            resources=resources,
+            requested_backend=requested,
+        )
+        assert placement.backend == Backend.METAL
+        assert placement.offloaded_layers == len(layers) == placement.total_layers
+        assert placement.split_mode == "unified"
+
+    # Weights that genuinely overflow the wired budget are the ONLY reason to
+    # fall back (auto) or fail (explicit) — never an oversized nominal context.
+    too_big = serving.plan_model_placement(
+        model_name="chat",
+        model_memory_mib=120 * GIB,
+        layer_mib=layers,
+        kv_runtime_mib=minimum_kv,
+        resources=resources,
+        requested_backend="auto",
+    )
+    assert too_big.backend == Backend.CPU
+    with pytest.raises(ServingError, match="wired|accelerator"):
+        serving.plan_model_placement(
+            model_name="chat",
+            model_memory_mib=120 * GIB,
+            layer_mib=layers,
+            kv_runtime_mib=minimum_kv,
+            resources=resources,
+            requested_backend="metal",
+        )
+
+
+def _metal_shrink_fixture(
+    root: Path,
+) -> tuple[Path, Path]:
+    revision = "a" * 40
+    put(
+        root,
+        "serving/profiles.conf",
+        "mid | 64 | chat,embed | chat | chat | chat | ~40 GB\n",
+    )
+    put(
+        root,
+        "serving/models.manifest",
+        f"chat | example/chat | *.gguf | fast | 262144 | --temp 0.7 | {revision}\n"
+        f"embed | example/embed | *.gguf | embed | 8192 |  | {revision}\n",
+    )
+    put(root, "serving/models.profile", "chat\nembed\n")
+    put(
+        root,
+        "serving/tiers.env",
+        "OPUS_MODEL=chat\nSONNET_MODEL=chat\nHAIKU_MODEL=chat\n",
+    )
+    server = put(root, ".tools/bin/llama-server", b"trusted server")
+    swap = put(root, ".tools/bin/llama-swap", b"trusted swap")
+    return server, swap
+
+
+def _metal_shrink_snapshots(
+    _root: Path,
+    _models: dict[str, serving.ModelSpec],
+    selected: tuple[str, ...],
+) -> dict[str, serving.ModelSnapshot]:
+    sizes = {"chat": 33000, "embed": 4000}
+    layer_counts = {"chat": 48, "embed": 36}
+    return {
+        name: serving.ModelSnapshot(
+            name=name,
+            paths=(Path(f"/models/{name}/{name}.gguf"),),
+            size_bytes=sizes[name] * 1024 * 1024,
+            authority_digest="b" * 64,
+            layer_mib=(700,) * layer_counts[name],
+            kv_mib_per_token=0.25,
+        )
+        for name in selected
+    }
+
+
+def test_metal_runtime_shrinks_context_to_stay_gpu_resident_not_cpu(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # End-to-end regression guard: on a 256 GiB Mac whose DEFAULT wired budget
+    # (96 GiB here) cannot hold the 262144-token nominal KV, the runtime must
+    # keep the model on Metal by SHRINKING the served context to fit — never
+    # silently launch on CPU (which is what hung the 5-minute chat probe and
+    # cascaded into the 429 slot-contention failures on real hardware).
+    server, swap = _metal_shrink_fixture(tmp_path)
+    monkeypatch.setattr(
+        serving, "validate_policy_bound_models", _metal_shrink_snapshots
+    )
+    resources = ResourceSnapshot(
+        system_total_mib=256 * GIB,
+        system_available_mib=240 * GIB,
+        backend=Backend.METAL,
+        accelerator_total_mib=96 * GIB,
+        accelerator_available_mib=96 * GIB,
+        accelerator_shared=True,
+        capability_source="fixture metal wired default",
+    )
+
+    plan = serving.prepare_runtime(
+        root=tmp_path,
+        server_path=server,
+        llama_swap_path=swap,
+        platform="posix",
+        resources=resources,
+        requested_backend="auto",
+    )
+
+    # Whole profile stays on the GPU; no CPU fallback.
+    assert plan.backend == Backend.METAL
+    for name in ("chat", "embed"):
+        placement = plan.placements[name]
+        assert placement.backend == Backend.METAL
+        assert placement.split_mode == "unified"
+        assert placement.offloaded_layers == placement.total_layers
+        assert placement.offloaded_layers > 0
+
+    chat_context = plan.contexts["chat"]
+    # The context shrank below the 262144 nominal ceiling but still clears the
+    # production-minimum envelope, and the fast lane now runs a single slot.
+    assert chat_context.parallel_slots == 1
+    assert chat_context.slot_context_tokens < 262144
+    assert chat_context.advertised_context_tokens >= serving.PRODUCTION_ADVERTISED_CONTEXT
+
+    # The launched server reflects the fitted (shrunk) context and full offload.
+    parsed = serving.parse_runtime_config(
+        plan.rendered.path.read_text(encoding="utf-8")
+    )
+    argv = shlex.split(parsed["models"]["chat"]["cmd"])
+    ngpu = argv[argv.index("--n-gpu-layers") + 1]
+    ctx_size = argv[argv.index("--ctx-size") + 1]
+    assert ngpu != "0"
+    assert ngpu == str(plan.placements["chat"].offloaded_layers)
+    assert ctx_size == str(
+        chat_context.slot_context_tokens * chat_context.parallel_slots
+    )
+    assert argv[argv.index("--parallel") + 1] == "1"
+
+    # Peak GPU memory (weights + fitted KV) stays within the wired budget.
+    wired_budget = (
+        resources.accelerator_available_mib - resources.accelerator_reserve_mib
+    )
+    assert chat_context.peak_memory_mib <= wired_budget
+
+
+def test_metal_runtime_falls_back_to_cpu_when_weights_exceed_wired_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # If the WEIGHTS themselves cannot fit the accelerator, CPU is the correct
+    # (and only) fallback — the shrink-to-fit logic must not force Metal.
+    server, swap = _metal_shrink_fixture(tmp_path)
+
+    def tiny_wired_snapshots(
+        root: Path,
+        models: dict[str, serving.ModelSpec],
+        selected: tuple[str, ...],
+    ) -> dict[str, serving.ModelSnapshot]:
+        # Both resident models are individually too large for the 8 GiB budget.
+        base = _metal_shrink_snapshots(root, models, selected)
+        return {
+            name: replace(snapshot, size_bytes=20000 * 1024 * 1024)
+            for name, snapshot in base.items()
+        }
+
+    monkeypatch.setattr(
+        serving, "validate_policy_bound_models", tiny_wired_snapshots
+    )
+    resources = ResourceSnapshot(
+        system_total_mib=256 * GIB,
+        system_available_mib=240 * GIB,
+        backend=Backend.METAL,
+        accelerator_total_mib=8 * GIB,
+        accelerator_available_mib=8 * GIB,
+        accelerator_shared=True,
+        capability_source="fixture metal starved wired",
+    )
+
+    plan = serving.prepare_runtime(
+        root=tmp_path,
+        server_path=server,
+        llama_swap_path=swap,
+        platform="posix",
+        resources=resources,
+        requested_backend="auto",
+    )
+
+    assert plan.backend == Backend.CPU
+    for name in ("chat", "embed"):
+        assert plan.placements[name].backend == Backend.CPU
+        assert plan.placements[name].offloaded_layers == 0
+
+
 def test_offload_evidence_tolerates_metal_output_layer_off_by_one() -> None:
     # Metal accepts the exact block count and the +1 output-layer report.
     assert serving.offload_evidence_matches("metal", 48, 48)

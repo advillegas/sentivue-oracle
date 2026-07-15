@@ -232,6 +232,10 @@ PRODUCTION_ADVERTISED_CONTEXT = 52000
 DEFAULT_REQUEST_OUTPUT_TOKENS = 1024
 CONSERVATIVE_KV_MIB_PER_TOKEN = 0.25
 MODEL_RUNTIME_OVERHEAD_MIB = 512
+# A single resident slot halves the fast lane's KV footprint (leaving more wired
+# memory for context) and removes the self-contention 429 cascade that two
+# sequential verification probes triggered when they collided on two slots.
+RESIDENT_PARALLEL_SLOTS = 1
 SENSITIVE_KEY = re.compile(
     r"(?:authorization|bearer|cookie|credential|password|secret|"
     r"(?:access[_-]?|refresh[_-]?|auth[_-]?)?token|"
@@ -707,13 +711,20 @@ def plan_model_placement(
             resources.accelerator_available_mib
             - resources.accelerator_reserve_mib,
         )
-        if required > ram_available or model_memory_mib > wired_available:
+        # A GPU-resident unified plan keeps BOTH the weights and the KV cache in
+        # wired accelerator memory. Checking only the weights here (and letting a
+        # huge KV live in system RAM) is what silently forced oversized-nominal
+        # models onto the CPU; the KV must fit the same wired budget. Callers keep
+        # the KV viable by shrinking the served context (see plan_context) against
+        # this identical budget, so weights that fit the accelerator stay on it.
+        if required > ram_available or required > wired_available:
             if requested == "auto":
                 return cpu_plan()
             raise ServingError(
-                f"{model_name}: unified placement needs {required} MiB RAM "
-                f"and {model_memory_mib} MiB wired accelerator memory; "
-                f"available RAM/wired memory is {ram_available}/{wired_available} MiB"
+                f"{model_name}: unified placement needs {required} MiB wired "
+                f"accelerator memory (model {model_memory_mib} + KV "
+                f"{kv_runtime_mib}); available RAM/wired memory is "
+                f"{ram_available}/{wired_available} MiB"
             )
         return PlacementPlan(
             model_name=model_name,
@@ -1129,6 +1140,34 @@ def plan_context(
     raise ServingError(
         f"{model_name}: no safe context/concurrency envelope fits available memory"
     )
+
+
+def _context_overhead_tokens(slot: str) -> tuple[int, int]:
+    """Prompt/tool and output-reserve token overhead for a model slot."""
+
+    if slot == "embed":
+        return 512, 256
+    return 4096, 4096
+
+
+def _minimum_viable_kv_runtime_mib(
+    *, slot: str, parallel_slots: int, kv_mib_per_token: float
+) -> int:
+    """Smallest KV footprint that still serves a production-minimum context.
+
+    Backend placement must be decided against the context we are willing to
+    SHRINK to, never the model's nominal ceiling. A model whose weights fit the
+    accelerator must stay on it: we size the fits-check KV to the production
+    minimum context so an oversized nominal context can never force CPU.
+    """
+
+    minimum_context = (
+        MINIMUM_ADVERTISED_CONTEXT if slot == "embed" else PRODUCTION_ADVERTISED_CONTEXT
+    )
+    prompt_overhead, output_reserve = _context_overhead_tokens(slot)
+    per_slot_tokens = minimum_context + prompt_overhead + output_reserve
+    total_tokens = per_slot_tokens * max(1, parallel_slots)
+    return math.ceil(total_tokens * kv_mib_per_token) + MODEL_RUNTIME_OVERHEAD_MIB
 
 
 def _estimate_text_tokens(value: Any) -> int:
@@ -1617,18 +1656,21 @@ def prepare_runtime(
                 name: snapshots[name].layer_mib or None for name in active
             }
             selected_resources = replace(resources, backend=backend)
+            # Decide the backend against the context we can SHRINK to, not the
+            # nominal ceiling: a model whose weights (plus a production-minimum
+            # KV) fit the accelerator must stay on it. Sizing this fits-check KV
+            # from the full nominal context is exactly what silently forced a
+            # 33 GiB model that fits a 256 GiB Apple GPU onto the CPU.
             preliminary_placements = plan_shared_model_placements(
                 model_names=active,
                 resident_names=resident_names,
                 model_memory_mib=model_memory,
                 layer_mib=layers,
                 kv_runtime_mib={
-                    name: (
-                        math.ceil(
-                            models[name].nominal_context
-                            * snapshots[name].kv_mib_per_token
-                        )
-                        + MODEL_RUNTIME_OVERHEAD_MIB
+                    name: _minimum_viable_kv_runtime_mib(
+                        slot=models[name].slot,
+                        parallel_slots=RESIDENT_PARALLEL_SLOTS,
+                        kv_mib_per_token=snapshots[name].kv_mib_per_token,
                     )
                     for name in active
                 },
@@ -1651,25 +1693,39 @@ def prepare_runtime(
                     f"{profile.minimum_mib / 1024:.1f} GiB but only "
                     f"{usable / 1024:.1f} GiB is usable after reserves"
                 )
+            # Context and placement must share ONE budget so the advertised
+            # context, the launched --ctx-size, and the offloaded layers stay
+            # mutually consistent and GPU-resident. On unified Metal that budget
+            # is the wired accelerator ceiling (weights AND KV live there), not
+            # the larger system-RAM capacity; elsewhere it is the usable capacity.
+            if backend == Backend.METAL:
+                placement_budget = min(
+                    usable,
+                    max(
+                        0,
+                        selected_resources.accelerator_available_mib
+                        - selected_resources.accelerator_reserve_mib,
+                    ),
+                )
+            else:
+                placement_budget = usable
             resident_memory = sum(model_memory[name] for name in resident_names)
             largest_big = max(
                 (model_memory[name] for name in big_names),
                 default=0,
             )
             simultaneous_weights = resident_memory + largest_big
-            if simultaneous_weights + MODEL_RUNTIME_OVERHEAD_MIB >= usable:
+            if simultaneous_weights + MODEL_RUNTIME_OVERHEAD_MIB >= placement_budget:
                 raise ServingError(
                     f"profile {profile.name} policy-bound weights require "
                     f"{simultaneous_weights} MiB before context, but only "
-                    f"{usable} MiB is usable"
+                    f"{placement_budget} MiB is usable"
                 )
             desired = {
-                name: models[name].nominal_context
-                * (2 if models[name].slot == "fast" else 1)
-                for name in active
+                name: models[name].nominal_context for name in active
             }
             desired_total = sum(desired.values())
-            context_pool = usable - simultaneous_weights
+            context_pool = placement_budget - simultaneous_weights
             contexts = {}
             for name in active:
                 model = models[name]
@@ -1681,10 +1737,10 @@ def prepare_runtime(
                 contexts[name] = plan_context(
                     model_name=name,
                     nominal_context_tokens=model.nominal_context,
-                    requested_parallel=2 if model.slot == "fast" else 1,
+                    requested_parallel=RESIDENT_PARALLEL_SLOTS,
                     model_memory_mib=simultaneous_weights,
                     usable_memory_mib=min(
-                        usable,
+                        placement_budget,
                         simultaneous_weights + share,
                     ),
                     prompt_tool_overhead_tokens=(
