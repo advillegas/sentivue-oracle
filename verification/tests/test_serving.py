@@ -559,7 +559,7 @@ def test_oversize_and_contention_reject_before_upstream_invocation() -> None:
     with pytest.raises(ServingError, match="context"):
         serving.dispatch_admitted(
             plan,
-            {"messages": [{"role": "user", "content": "x " * 70000}]},
+            {"messages": [{"role": "user", "content": "x " * 210000}]},
             active_requests=0,
             invoke=lambda payload: invoked.append(payload),
         )
@@ -812,7 +812,7 @@ def test_admission_controller_rejects_contention_and_oversize_before_forwarding(
     with pytest.raises(ServingError, match="context"):
         controller.try_begin(
             "chat",
-            {"messages": [{"role": "user", "content": "x " * 70000}]},
+            {"messages": [{"role": "user", "content": "x " * 210000}]},
         )
     assert forwarded == []
 
@@ -904,7 +904,7 @@ def test_loopback_gateway_rejects_oversize_before_upstream_http_call() -> None:
         oversize = json.dumps(
             {
                 "model": "chat",
-                "messages": [{"role": "user", "content": "x " * 70000}],
+                "messages": [{"role": "user", "content": "x " * 210000}],
             }
         ).encode("utf-8")
         request = urllib.request.Request(
@@ -1136,7 +1136,10 @@ def test_offline_verifier_uses_production_shaped_api_payloads_and_all_protocols(
         and not payload.get("response_format")
     )
     estimate = serving.estimate_request_tokens(production_chat)
-    assert estimate.prompt_tokens >= 25000
+    # The probe still sends a ~25k-token production-shaped prompt; the estimator
+    # now sizes it in tokens (bytes / CONSERVATIVE_BYTES_PER_TOKEN) rather than
+    # raw bytes, so its estimate is a smaller but still substantial token count.
+    assert estimate.prompt_tokens >= 16000
     plan = production_plan()
     assert (
         estimate.total_tokens
@@ -1642,6 +1645,9 @@ def test_launchd_descriptor_is_atomic_and_preserves_special_paths(
     assert str(root) in payload["ProgramArguments"]
     assert str(llama_swap) in payload["ProgramArguments"]
     assert payload["KeepAlive"] is True
+    # macOS throttles "Background" ProcessType jobs off the GPU, so the service
+    # must run "Interactive" to keep the model server on the Metal accelerator.
+    assert payload["ProcessType"] == "Interactive"
     assert output.read_bytes()[:3] != b"\xef\xbb\xbf"
     assert not list(output.parent.glob("*.tmp"))
 
@@ -1942,19 +1948,31 @@ def test_review_token_admission_is_a_recursive_utf8_upper_bound() -> None:
     }
 
     estimate = serving.estimate_request_tokens(payload)
-    serialized_bytes = len(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # The estimator canonicalizes the whole request recursively (including tool
+    # calls nested inside messages and unknown extension fields) and sizes it
+    # with a conservative bytes-per-token ratio. The estimate must never fall
+    # below bytes / ratio, which itself stays above the real byte-level token
+    # count, so admission remains a safe over-estimate of true tokens.
+    canonical_bytes = len(
+        json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
     )
+    conservative_floor = serving._bytes_to_tokens(canonical_bytes)
 
-    assert estimate.prompt_tokens + estimate.tool_schema_tokens >= serialized_bytes
+    assert estimate.prompt_tokens == conservative_floor
+    assert estimate.prompt_tokens + estimate.tool_schema_tokens >= conservative_floor
     assert estimate.output_tokens == 257
 
 
 def test_review_token_admission_keeps_ordinary_25k_request_usable() -> None:
+    # ~25k tokens of content: sized in tokens, 75k bytes / CONSERVATIVE_BYTES_PER_TOKEN
+    # lands around 25k, so an ordinary agent request stays comfortably admissible
+    # instead of being inflated ~4x by counting every byte as a token.
     estimate = serving.estimate_request_tokens(
         {
             "model": "chat",
-            "messages": [{"role": "user", "content": "a" * 25000}],
+            "messages": [{"role": "user", "content": "a" * 75000}],
             "max_tokens": 128,
         }
     )
@@ -1963,6 +1981,67 @@ def test_review_token_admission_keeps_ordinary_25k_request_usable() -> None:
     with pytest.raises(ServingError, match="JSON|binary|unsupported"):
         serving.estimate_request_tokens(
             {"messages": [{"role": "user", "content": b"\x00\xff"}]}
+        )
+
+
+def test_request_estimator_sizes_in_tokens_not_bytes() -> None:
+    # Whole bytes round up to whole tokens at the conservative ratio.
+    assert serving.CONSERVATIVE_BYTES_PER_TOKEN == 3
+    assert serving._bytes_to_tokens(0) == 0
+    assert serving._bytes_to_tokens(3000) == 1000
+    assert serving._bytes_to_tokens(3001) == 1001
+    assert serving._bytes_to_tokens(3002) == 1001
+    # A known ASCII string is sized as ceil(bytes / 3), not one token per byte.
+    assert serving._estimate_text_tokens("a" * 3000) == 1000
+
+    plan = production_plan()
+    controller = serving.AdmissionController({"chat": plan})
+
+    # A request whose raw UTF-8 byte length exceeds the slot context but whose
+    # token estimate (bytes / 3) still fits is now admitted. Under the old
+    # byte==token estimator this ordinary request was wrongly rejected with 413.
+    fits_in_tokens = {
+        "model": "chat",
+        "max_tokens": 128,
+        "messages": [
+            {"role": "user", "content": "a" * (plan.slot_context_tokens + 4096)}
+        ],
+    }
+    serialized_bytes = len(
+        json.dumps(
+            fits_in_tokens, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+    )
+    assert serialized_bytes > plan.slot_context_tokens
+    estimate = serving.estimate_request_tokens(fits_in_tokens)
+    assert (
+        estimate.total_tokens
+        + plan.prompt_tool_overhead_tokens
+        + plan.output_reserve_tokens
+        <= plan.slot_context_tokens
+    )
+    lease = controller.try_begin("chat", fits_in_tokens)
+    lease.close()
+
+    # A genuinely token-oversize request (bytes / 3 already exceeds the budget)
+    # is still rejected before it can reach the model.
+    with pytest.raises(ServingError, match="context"):
+        controller.try_begin(
+            "chat",
+            {
+                "model": "chat",
+                "max_tokens": 128,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "a"
+                        * (
+                            serving.CONSERVATIVE_BYTES_PER_TOKEN
+                            * plan.slot_context_tokens
+                        ),
+                    }
+                ],
+            },
         )
 
 

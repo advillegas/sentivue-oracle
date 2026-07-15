@@ -1170,6 +1170,18 @@ def _minimum_viable_kv_runtime_mib(
     return math.ceil(total_tokens * kv_mib_per_token) + MODEL_RUNTIME_OVERHEAD_MIB
 
 
+# Byte-level BPE tokenizers average ~3.5-4 UTF-8 bytes/token on natural
+# language, code, and JSON; dividing by a conservative 3 over-estimates real
+# tokens (safe against context overflow) while matching what token-counting
+# clients like Kilo actually pack. The previous behavior counted every byte as a
+# token, over-estimating ~4x and rejecting legitimate requests with HTTP 413.
+CONSERVATIVE_BYTES_PER_TOKEN = 3
+
+
+def _bytes_to_tokens(nbytes: int) -> int:
+    return (nbytes + CONSERVATIVE_BYTES_PER_TOKEN - 1) // CONSERVATIVE_BYTES_PER_TOKEN
+
+
 def _estimate_text_tokens(value: Any) -> int:
     if value is None:
         return 0
@@ -1189,10 +1201,11 @@ def _estimate_text_tokens(value: Any) -> int:
         raise ServingError(
             "request contains binary or unsupported non-JSON content"
         ) from exc
-    # Byte-level tokenizers cannot emit more ordinary tokens than input bytes.
-    # Counting every UTF-8 byte is intentionally conservative for code,
-    # punctuation, emoji, and tokenizer variants.
-    return len(serialized.encode("utf-8"))
+    # Size in tokens with a conservative bytes-per-token ratio. Real tokenizers
+    # emit far fewer tokens than input bytes, so this stays a safe over-estimate
+    # for code, punctuation, emoji, and tokenizer variants without the ~4x
+    # inflation of counting every UTF-8 byte as a token.
+    return _bytes_to_tokens(len(serialized.encode("utf-8")))
 
 
 def estimate_request_tokens(payload: Mapping[str, Any]) -> RequestEstimate:
@@ -1251,7 +1264,7 @@ def estimate_request_tokens(payload: Mapping[str, Any]) -> RequestEstimate:
         raise ServingError(
             "request contains binary or unsupported non-JSON content"
         ) from exc
-    prompt = len(canonical.encode("utf-8"))
+    prompt = _bytes_to_tokens(len(canonical.encode("utf-8")))
     tool_fields = {
         field: payload[field]
         for field in (
@@ -1369,7 +1382,10 @@ def write_launchd_plist(
         },
         "RunAtLoad": True,
         "KeepAlive": True,
-        "ProcessType": "Background",
+        # macOS throttles "Background" ProcessType jobs off the Metal GPU (it
+        # treats them as low-priority efficiency work), which pins the model
+        # server to the CPU. Run "Interactive" so the service keeps GPU access.
+        "ProcessType": "Interactive",
         "StandardOutPath": str(stdout),
         "StandardErrorPath": str(stderr),
     }
@@ -3137,7 +3153,14 @@ def run_offline_probes(
             {
                 "role": "user",
                 "content": "boundary "
-                + ("a" * max(1, boundary_available - boundary_base_tokens)),
+                + (
+                    "a"
+                    * max(
+                        1,
+                        CONSERVATIVE_BYTES_PER_TOKEN
+                        * (boundary_available - boundary_base_tokens),
+                    )
+                ),
             }
         ]
         boundary = transport(
@@ -3167,8 +3190,11 @@ def run_offline_probes(
                         + (
                             "a"
                             * (
-                                model_plan.slot_context_tokens
-                                + model_plan.prompt_tool_overhead_tokens
+                                CONSERVATIVE_BYTES_PER_TOKEN
+                                * (
+                                    model_plan.slot_context_tokens
+                                    + model_plan.prompt_tool_overhead_tokens
+                                )
                             )
                         ),
                     }
@@ -3413,7 +3439,8 @@ def run_offline_probes(
                 "a"
                 * max(
                     1,
-                    embedding_available - embedding_base_tokens,
+                    CONSERVATIVE_BYTES_PER_TOKEN
+                    * (embedding_available - embedding_base_tokens),
                 )
             ),
         }
@@ -3442,8 +3469,11 @@ def run_offline_probes(
                 + (
                     "a"
                     * (
-                        embedding_plan.slot_context_tokens
-                        + embedding_plan.prompt_tool_overhead_tokens
+                        CONSERVATIVE_BYTES_PER_TOKEN
+                        * (
+                            embedding_plan.slot_context_tokens
+                            + embedding_plan.prompt_tool_overhead_tokens
+                        )
                     )
                 ),
             },
@@ -3491,7 +3521,10 @@ def run_offline_probes(
         ],
     }
     boundary_base_tokens = estimate_request_tokens(boundary_base).total_tokens
-    boundary_filler = max(1, boundary_available - boundary_base_tokens)
+    boundary_filler = max(
+        1,
+        CONSERVATIVE_BYTES_PER_TOKEN * (boundary_available - boundary_base_tokens),
+    )
     boundary_payload = dict(boundary_base)
     boundary_payload["messages"] = [
         {"role": "user", "content": "boundary " + ("a" * boundary_filler)}
@@ -3519,7 +3552,16 @@ def run_offline_probes(
             {
                 "role": "user",
                 "content": "oversize-boundary "
-                + ("a" * (plan.slot_context_tokens + plan.prompt_tool_overhead_tokens)),
+                + (
+                    "a"
+                    * (
+                        CONSERVATIVE_BYTES_PER_TOKEN
+                        * (
+                            plan.slot_context_tokens
+                            + plan.prompt_tool_overhead_tokens
+                        )
+                    )
+                ),
             }
         ],
     }
