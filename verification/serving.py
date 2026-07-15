@@ -4191,7 +4191,19 @@ def detect_resources(requested_backend: str = "auto") -> ResourceSnapshot:
             adapter_ram_bytes=None,
         )
     elif system == "Darwin":
-        wired_limit = _macos_wired_limit_mib()
+        explicit_wired = _macos_wired_limit_mib()
+        if explicit_wired > 0:
+            wired_limit = explicit_wired
+            wired_source = "Metal unified memory; iogpu.wired_limit_mb"
+        else:
+            # iogpu.wired_limit_mb == 0 is the macOS DEFAULT and means "system
+            # managed" (Metal may wire ~75% of unified memory), NOT "no GPU
+            # memory". Treating 0 as zero made the planner think the GPU had no
+            # capacity and always fall back to CPU. Plan against a conservative
+            # 70% of unified memory so Apple Silicon uses the GPU without an
+            # explicit wired-limit raise; the context still shrinks to fit it.
+            wired_limit = int(total * 70 // 100)
+            wired_source = "Metal unified memory; default working-set (0.70 x RAM)"
         snapshot = ResourceSnapshot(
             system_total_mib=total,
             system_available_mib=available,
@@ -4199,11 +4211,7 @@ def detect_resources(requested_backend: str = "auto") -> ResourceSnapshot:
             accelerator_total_mib=wired_limit,
             accelerator_available_mib=min(available, wired_limit),
             accelerator_shared=True,
-            capability_source=(
-                "Metal unified memory; iogpu.wired_limit_mb"
-                if wired_limit
-                else "Metal unified memory; wired accelerator limit unavailable"
-            ),
+            capability_source=wired_source,
         )
     elif nvidia_output:
         devices = parse_nvidia_smi(nvidia_output)

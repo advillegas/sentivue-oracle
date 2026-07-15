@@ -1263,6 +1263,39 @@ def test_offline_probe_progress_reports_each_phase() -> None:
     assert not any("headless engine sessions" in message for message in without_engine)
 
 
+def test_detect_resources_metal_uses_default_working_set_when_wired_limit_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # iogpu.wired_limit_mb defaults to 0 ("system managed"); that must NOT be
+    # read as zero GPU memory (which forced CPU on every un-raised Mac).
+    monkeypatch.setattr(serving.host_platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(serving, "_system_memory_mib", lambda: (262144, 240000))
+    monkeypatch.setattr(serving, "_macos_wired_limit_mib", lambda: 0)
+    monkeypatch.setattr(serving, "_nvidia_smi_output", lambda: None)
+    monkeypatch.setattr(serving, "_vulkan_available", lambda: False)
+
+    snapshot = serving.detect_resources("auto")
+
+    assert snapshot.backend == serving.Backend.METAL
+    assert snapshot.accelerator_shared is True
+    assert snapshot.accelerator_available_mib == min(240000, 262144 * 70 // 100)
+    assert snapshot.accelerator_available_mib > 0
+
+
+def test_detect_resources_metal_honors_explicit_wired_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(serving.host_platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(serving, "_system_memory_mib", lambda: (262144, 240000))
+    monkeypatch.setattr(serving, "_macos_wired_limit_mib", lambda: 196608)
+    monkeypatch.setattr(serving, "_nvidia_smi_output", lambda: None)
+    monkeypatch.setattr(serving, "_vulkan_available", lambda: False)
+
+    snapshot = serving.detect_resources("auto")
+
+    assert snapshot.accelerator_available_mib == min(240000, 196608)
+
+
 def test_health_only_can_never_make_verification_green() -> None:
     results = [
         serving.ProbeResult("health", PASS, "healthy", {}),
