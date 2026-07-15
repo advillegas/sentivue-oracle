@@ -1449,15 +1449,25 @@ def render_runtime_config(
             str(context.parallel_slots),
             "--n-gpu-layers",
             str(placement.offloaded_layers),
-            "--no-kv-offload",
-            "--jinja",
-            "--cache-reuse",
-            "256",
-            "--cache-type-k",
-            "q8_0",
-            "--cache-type-v",
-            "q8_0",
         ]
+        if placement.offloaded_layers <= 0:
+            # Pure CPU placement: keep the KV cache in system RAM. When layers
+            # are offloaded to the GPU (Metal), the KV cache MUST stay on the
+            # GPU as well — forcing it to CPU shuttles the entire cache across
+            # the bus on every token and makes generation crawl even though the
+            # weights are GPU-resident.
+            argv.append("--no-kv-offload")
+        argv.extend(
+            [
+                "--jinja",
+                "--cache-reuse",
+                "256",
+                "--cache-type-k",
+                "q8_0",
+                "--cache-type-v",
+                "q8_0",
+            ]
+        )
         if placement.split_mode == "layer":
             argv.extend(["--split-mode", "layer"])
         if model.slot == "embed":

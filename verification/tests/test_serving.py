@@ -646,6 +646,8 @@ def test_generated_runtime_config_is_atomic_parseable_and_path_safe(
     assert argv[argv.index("-m") + 1] == str(chat)
     assert argv[argv.index("--host") + 1] == "127.0.0.1"
     assert argv[argv.index("--n-gpu-layers") + 1] == "0"
+    # CPU placement keeps the KV cache in system RAM.
+    assert "--no-kv-offload" in argv
     assert parsed["models"]["chat"]["advertised_context"] == (
         plan.advertised_context_tokens
     )
@@ -3228,6 +3230,9 @@ def test_metal_runtime_shrinks_context_to_stay_gpu_resident_not_cpu(
         chat_context.slot_context_tokens * chat_context.parallel_slots
     )
     assert argv[argv.index("--parallel") + 1] == "1"
+    # GPU-resident placement must keep the KV cache on the GPU, not force it to
+    # CPU (which would shuttle the cache across the bus every token).
+    assert "--no-kv-offload" not in argv
 
     # Peak GPU memory (weights + fitted KV) stays within the wired budget.
     wired_budget = (
