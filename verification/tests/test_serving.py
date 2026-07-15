@@ -652,6 +652,10 @@ def test_generated_runtime_config_is_atomic_parseable_and_path_safe(
     assert parsed["models"]["chat"]["advertised_context"] == (
         plan.advertised_context_tokens
     )
+    # Any served coder fast lane also answers to "qwen3-coder-30b-q4" so the
+    # claude-code engine template (which pins that model name) resolves on every
+    # profile, not just the lite profile that literally serves the Q4 build.
+    assert "qwen3-coder-30b-q4" in output.read_text(encoding="utf-8")
 
 
 def test_generated_config_rejects_non_loopback_and_multi_shard_ambiguity(

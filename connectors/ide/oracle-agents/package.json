@@ -2,7 +2,7 @@
   "name": "oracle-agents",
   "displayName": "SentiVue Oracle Agents",
   "description": "Agent sidebar in the Secondary Side Bar: open agents and missions, see everything running, jump between them - all on local models.",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "publisher": "sentivue",
   "license": "MIT",
   "engines": { "vscode": "^1.80.0" },
@@ -22,6 +22,7 @@
     "views": {
       "oracle-agents": [
         { "id": "oracleAgents.live", "name": "Agents & Missions", "icon": "media/oracle.svg", "initialSize": 2, "visibility": "visible" },
+        { "id": "oracleAgents.conversations", "name": "Conversations", "icon": "media/oracle.svg", "initialSize": 2, "visibility": "visible" },
         { "id": "oracleAgents.mission", "name": "Mission Status", "icon": "media/oracle.svg", "initialSize": 1, "visibility": "visible" },
         { "id": "oracleAgents.sessions", "name": "Session Journals", "icon": "media/oracle.svg", "initialSize": 1, "visibility": "collapsed" }
       ]
@@ -29,7 +30,7 @@
     "viewsWelcome": [
       {
         "view": "oracleAgents.live",
-        "contents": "No agents or missions are running yet.\n[New Agent Conversation](command:oracleAgents.newConversation)\n[New Agent Terminal (Claude Code)](command:oracleAgents.newClaude)\n[New Agent in Worktree](command:oracleAgents.newClaudeWorktree)\n[New Agent (OpenCode)](command:oracleAgents.newOpenCode)\n[New Agent (Kilo Code)](command:oracleAgents.newKilo)\n[Design a New Mission](command:oracleAgents.designMission)\n[Run an Existing Mission](command:oracleAgents.startMission)\n[Open Browser (localhost)](command:oracleAgents.openBrowser)\n[Open Mission Console](command:oracleAgents.openConsole)\n[Orchestration Viewer (Agent-MCP)](command:oracleAgents.orchestrationViewer)\nUse the + menu in this view's title bar to open more at any time."
+        "contents": "No agents or missions are running yet.\n[New Agent Conversation](command:oracleAgents.newConversation)\n[New Agent Terminal (Claude Code)](command:oracleAgents.newClaude)\n[New Agent in Worktree](command:oracleAgents.newClaudeWorktree)\n[New Agent (OpenCode)](command:oracleAgents.newOpenCode)\n[New Agent (Kilo Code)](command:oracleAgents.newKilo)\n[Design a New Mission](command:oracleAgents.designMission)\n[Run an Existing Mission](command:oracleAgents.startMission)\n[Open Browser (localhost)](command:oracleAgents.openBrowser)\n[Open Mission Console](command:oracleAgents.openConsole)\n[Open Notes (Obsidian)](command:oracleAgents.openNotes)\n[Orchestration Viewer (Agent-MCP)](command:oracleAgents.orchestrationViewer)\nUse the + menu in this view's title bar to open more at any time."
       }
     ],
     "commands": [
@@ -48,10 +49,13 @@
       { "command": "oracleAgents.kill", "title": "Oracle: Close Agent", "icon": "$(trash)" },
       { "command": "oracleAgents.openLatestReport", "title": "Oracle: Open Latest Mission Report" },
       { "command": "oracleAgents.openLedger", "title": "Oracle: Open Ledger" },
+      { "command": "oracleAgents.openConversation", "title": "Oracle: Open Conversation" },
+      { "command": "oracleAgents.openNotes", "title": "Oracle: Open Repo in Obsidian", "icon": "$(notebook)" },
       { "command": "oracleAgents.refresh", "title": "Oracle: Refresh Agents Sidebar", "icon": "$(refresh)" }
     ],
     "keybindings": [
-      { "command": "oracleAgents.openBrowser", "key": "ctrl+alt+b", "mac": "cmd+alt+b" }
+      { "command": "oracleAgents.openBrowser", "key": "ctrl+alt+b", "mac": "cmd+alt+b" },
+      { "command": "oracleAgents.openNotes", "key": "ctrl+alt+shift+o", "mac": "cmd+alt+shift+o" }
     ],
     "submenus": [
       { "id": "oracleAgents.newMenu", "label": "New Agent / Mission", "icon": "$(add)" }
@@ -60,6 +64,8 @@
       "view/title": [
         { "submenu": "oracleAgents.newMenu", "when": "view == oracleAgents.live", "group": "navigation@1" },
         { "command": "oracleAgents.refresh", "when": "view == oracleAgents.live", "group": "navigation@2" },
+        { "command": "oracleAgents.openNotes", "when": "view == oracleAgents.conversations", "group": "navigation@1" },
+        { "command": "oracleAgents.refresh", "when": "view == oracleAgents.conversations", "group": "navigation@2" },
         { "command": "oracleAgents.refresh", "when": "view == oracleAgents.mission", "group": "navigation@1" },
         { "command": "oracleAgents.refresh", "when": "view == oracleAgents.sessions", "group": "navigation@1" }
       ],
@@ -73,10 +79,12 @@
         { "command": "oracleAgents.startMission", "group": "2_mission@1" },
         { "command": "oracleAgents.openBrowser", "group": "3_tools@0" },
         { "command": "oracleAgents.openConsole", "group": "3_tools@1" },
-        { "command": "oracleAgents.orchestrationViewer", "group": "3_tools@2" }
+        { "command": "oracleAgents.openNotes", "group": "3_tools@2" },
+        { "command": "oracleAgents.orchestrationViewer", "group": "3_tools@3" }
       ],
       "view/item/context": [
-        { "command": "oracleAgents.kill", "when": "view == oracleAgents.live && viewItem == runningAgent", "group": "inline" }
+        { "command": "oracleAgents.kill", "when": "view == oracleAgents.live && viewItem == runningAgent", "group": "inline" },
+        { "command": "oracleAgents.openNotes", "when": "view == oracleAgents.conversations && viewItem == conversationRepo", "group": "inline" }
       ]
     }
   }

@@ -1508,13 +1508,18 @@ def render_runtime_config(
         if model.slot == "fast" and not fast_alias_used:
             fast_alias_used = True
             alias_map.update({"gpt-4o-mini": name, "gpt-4o": name})
-            lines.extend(
-                [
-                    "    aliases:",
-                    "      - gpt-4o-mini",
-                    "      - gpt-4o",
-                ]
-            )
+            fast_aliases = ["gpt-4o-mini", "gpt-4o"]
+            # Engine configs may pin a specific coder-model name (the claude-code
+            # template pins "qwen3-coder-30b-q4"); a profile that serves a
+            # different coder build would 404 that name. Route the common coder
+            # names to whichever coder model this profile actually serves so a
+            # stale reference never rejects. (Skip the served name itself.)
+            for coder_alias in ("qwen3-coder-30b", "qwen3-coder-30b-q4"):
+                if coder_alias != name:
+                    alias_map[coder_alias] = name
+                    fast_aliases.append(coder_alias)
+            lines.append("    aliases:")
+            lines.extend(f"      - {alias}" for alias in fast_aliases)
         elif model.slot == "embed" and not embed_alias_used:
             embed_alias_used = True
             alias_map.update(

@@ -110,6 +110,40 @@ async function openSimpleBrowser(url) {
   }
 }
 
+// ---- Obsidian: open any repository/worktree as its own vault (decision 0002) ------
+
+function openObsidian(repoPath) {
+  // Per-repository memory/code lens: graph, backlinks, full-text search across
+  // that repo's code + notes. Degrades gracefully when Obsidian is absent and
+  // offers a first-use install (brew/winget) as the decision doc describes.
+  const name = "Notes (Obsidian)";
+  if (WIN) {
+    const ps =
+      `$u = 'obsidian://open?path=' + [uri]::EscapeDataString('${repoPath}'); ` +
+      `Start-Process $u -ErrorAction SilentlyContinue; ` +
+      `if (-not $?) { Write-Host 'Obsidian is optional; install it (winget install Obsidian.Obsidian) and retry.' }`;
+    const t = vscode.window.createTerminal({
+      name, iconPath: new vscode.ThemeIcon("notebook"),
+      shellPath: "powershell.exe",
+      shellArgs: ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+    });
+    t.show();
+    return;
+  }
+  const script =
+    `enc=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "${repoPath}" 2>/dev/null || echo "${repoPath}"); ` +
+    `if [ ! -d "/Applications/Obsidian.app" ] && [ ! -d "$HOME/Applications/Obsidian.app" ]; then ` +
+    `echo "Obsidian (optional memory/code lens) is not installed."; ` +
+    `if command -v brew >/dev/null 2>&1; then echo "Installing via Homebrew (needs network)..."; brew install --cask obsidian; fi; fi; ` +
+    `open "obsidian://open?path=$enc" 2>/dev/null || open -a Obsidian "${repoPath}" 2>/dev/null || ` +
+    `echo "Could not open Obsidian. Install it from https://obsidian.md and retry.";`;
+  const t = vscode.window.createTerminal({
+    name, iconPath: new vscode.ThemeIcon("notebook"),
+    shellPath: "/bin/bash", shellArgs: ["-lc", script],
+  });
+  t.show();
+}
+
 // ---- conversation panels (Cursor-style chat over claude stream-json) ------------
 
 const conversations = new Map(); // id -> ConversationPanel
@@ -316,6 +350,7 @@ function item(label, opts = {}) {
   if (opts.tip) it.tooltip = opts.tip;
   if (opts.ctx) it.contextValue = opts.ctx;
   if (opts.cmd) it.command = { command: opts.cmd, title: label, arguments: opts.args || [] };
+  if (opts.repoPath) it._repoPath = opts.repoPath;
   it._children = opts.children || null;
   return it;
 }
@@ -405,12 +440,100 @@ function buildSessions() {
   });
 }
 
+// ---- conversations across engines (repository -> conversations) -------------------
+// A research log: past agent chats (Claude, Continue) and session journals, grouped
+// under the repository they ran in. Read-only aggregation of what each engine already
+// persists on disk; nothing here writes or couples to the agents.
+
+function convLabel(p, f) {
+  if (f.endsWith(".md")) {
+    const doing = /## DOING[^\n]*\n- (.+)/.exec(read(p));
+    return (doing ? doing[1] : f.replace(/\.md$/, "")).slice(0, 60);
+  }
+  try {
+    const d = JSON.parse(read(p));
+    const title = d && (d.title || d.name || d.summary);
+    if (typeof title === "string" && title.trim()) return title.trim().slice(0, 60);
+    const first =
+      (d && d.history && d.history[0] && d.history[0].message && d.history[0].message.content) ||
+      (d && Array.isArray(d.messages) && d.messages[0] && d.messages[0].content) || "";
+    if (typeof first === "string" && first.trim()) {
+      return first.trim().replace(/\s+/g, " ").slice(0, 60);
+    }
+  } catch { /* not json or an unknown shape - fall back to the filename */ }
+  return f.replace(/\.(json|jsonl)$/, "").slice(0, 40);
+}
+
+const CONV_SOURCES = [
+  { engine: "Claude", rel: ["engines", "claude-code", "home", "sessions"], ext: ".json", icon: "comment-discussion" },
+  { engine: "Continue", rel: ["state", "generated", "continue", "sessions"], ext: ".json", icon: "extensions" },
+  { engine: "Journal", rel: ["memory", "sessions"], ext: ".md", icon: "notebook" },
+];
+
+function conversationEntries(base) {
+  const out = [];
+  for (const src of CONV_SOURCES) {
+    const dir = path.join(base, ...src.rel);
+    let files = [];
+    try { files = fs.readdirSync(dir).filter((f) => f.endsWith(src.ext)); } catch { continue; }
+    for (const f of files) {
+      const p = path.join(dir, f);
+      let t = 0;
+      try { t = fs.statSync(p).mtimeMs; } catch { continue; }
+      out.push({ engine: src.engine, icon: src.icon, label: convLabel(p, f), date: t, file: p });
+    }
+  }
+  out.sort((a, b) => b.date - a.date);
+  return out;
+}
+
+// Every repository/worktree open in the IDE, plus the Oracle appliance root so
+// its central conversation stores always have a home. Deduped by resolved path.
+function repositories() {
+  const repos = new Map();
+  const add = (p) => {
+    if (!p) return;
+    const rp = path.resolve(p);
+    if (!repos.has(rp)) repos.set(rp, { name: path.basename(rp) || rp, path: rp });
+  };
+  for (const f of (vscode.workspace.workspaceFolders || [])) add(f.uri.fsPath);
+  add(ROOT);
+  return [...repos.values()];
+}
+
+function buildConversations() {
+  return repositories().map((repo) => {
+    const entries = conversationEntries(repo.path);
+    const children = entries.length
+      ? entries.slice(0, 80).map((e) => item(e.label || "conversation", {
+          icon: e.icon,
+          desc: `${e.engine} \u00b7 ${new Date(e.date).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`,
+          tip: e.file,
+          cmd: "oracleAgents.openConversation", args: [e.file],
+        }))
+      : [item("No conversations tracked here yet", { icon: "info" })];
+    return item(repo.name, {
+      icon: "repo",
+      desc: `${entries.length} conversation${entries.length === 1 ? "" : "s"}`,
+      tip: `${repo.path}\nClick the notebook icon to open this repo in Obsidian`,
+      ctx: "conversationRepo",
+      repoPath: repo.path,
+      children,
+    });
+  });
+}
+
 // ---- activation --------------------------------------------------------------------
 
 function activate(ctx) {
   ROOT = findRoot();
   EXT_URI = ctx.extensionUri;
-  const trees = { live: new Tree(buildLive), mission: new Tree(buildMission), sessions: new Tree(buildSessions) };
+  const trees = {
+    live: new Tree(buildLive),
+    conversations: new Tree(buildConversations),
+    mission: new Tree(buildMission),
+    sessions: new Tree(buildSessions),
+  };
   const refreshAll = () => Object.values(trees).forEach((t) => t.refresh());
 
   // Adopt agent terminals that already existed before activation (e.g. reload).
@@ -428,6 +551,7 @@ function activate(ctx) {
 
   ctx.subscriptions.push(
     vscode.window.registerTreeDataProvider("oracleAgents.live", trees.live),
+    vscode.window.registerTreeDataProvider("oracleAgents.conversations", trees.conversations),
     vscode.window.registerTreeDataProvider("oracleAgents.mission", trees.mission),
     vscode.window.registerTreeDataProvider("oracleAgents.sessions", trees.sessions),
     vscode.window.onDidOpenTerminal((t) => { if (AGENT_RE.test(t.name) && !started.has(t)) started.set(t, Date.now()); trees.live.refresh(); }),
@@ -556,10 +680,39 @@ function activate(ctx) {
       // Give the stdlib server a moment to bind before pointing a tab at it.
       setTimeout(() => openSimpleBrowser("http://127.0.0.1:8800"), 3000);
     }),
+    vscode.commands.registerCommand("oracleAgents.openConversation", (file) => {
+      if (!file) return;
+      vscode.commands.executeCommand("vscode.open", vscode.Uri.file(String(file)));
+    }),
+    vscode.commands.registerCommand("oracleAgents.openNotes", async (node) => {
+      // From a Conversations repo node -> that repo. From the palette / keybinding
+      // / Agents menu -> the open repository, or a quick-pick when several are open.
+      let target = node && node._repoPath;
+      if (!target) {
+        const repos = repositories();
+        if (repos.length === 1) {
+          target = repos[0].path;
+        } else {
+          const pick = await vscode.window.showQuickPick(
+            repos.map((r) => ({ label: r.name, description: r.path, path: r.path })),
+            { placeHolder: "Open which repository in Obsidian?" });
+          if (!pick) return;
+          target = pick.path;
+        }
+      }
+      openObsidian(target);
+    }),
   );
 
-  // Live refresh from disk: mission state, reports, session journals.
-  for (const rel of ["memory/STATE.md", "memory/sessions/*.md", "reports/*.md"]) {
+  // Live refresh from disk: mission state, reports, session journals, and the
+  // per-engine conversation stores that feed the Conversations view.
+  for (const rel of [
+    "memory/STATE.md",
+    "memory/sessions/*.md",
+    "reports/*.md",
+    "engines/claude-code/home/sessions/*.json",
+    "state/generated/continue/sessions/*.json",
+  ]) {
     const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(ROOT, rel));
     w.onDidChange(refreshAll); w.onDidCreate(refreshAll); w.onDidDelete(refreshAll);
     ctx.subscriptions.push(w);

@@ -10,11 +10,11 @@
                 "DISABLE_AUTOUPDATER":  "1",
                 "DISABLE_NON_ESSENTIAL_MODEL_CALLS":  "1",
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":  "1",
-                "ANTHROPIC_MODEL":  "qwen3-coder-30b-q4",
-                "ANTHROPIC_DEFAULT_OPUS_MODEL":  "qwen3-coder-30b-q4",
-                "ANTHROPIC_DEFAULT_SONNET_MODEL":  "qwen3-coder-30b-q4",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "qwen3-coder-30b-q4",
-                "ANTHROPIC_SMALL_FAST_MODEL":  "qwen3-coder-30b-q4"
+                "ANTHROPIC_MODEL":  "qwen3-coder-30b",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL":  "qwen3-coder-30b",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL":  "qwen3-coder-30b",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL":  "qwen3-coder-30b",
+                "ANTHROPIC_SMALL_FAST_MODEL":  "qwen3-coder-30b"
             },
     "includeCoAuthoredBy":  false,
     "permissions":  {
@@ -81,5 +81,5 @@
                                      }
                                  ]
               },
-    "model":  "qwen3-coder-30b-q4"
+    "model":  "qwen3-coder-30b"
 }

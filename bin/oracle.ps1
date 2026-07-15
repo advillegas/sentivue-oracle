@@ -365,13 +365,15 @@ switch ($Cmd) {
         exit $LASTEXITCODE
     }
     "notes" {
-        # Obsidian over the repo: the operator's lens on memory/doctrine/reports
+        # Obsidian over a repository (default: this repo). Decision 0002:
+        # the operator's per-repository lens on code + memory/doctrine.
+        $target = if ($Rest.Count -ge 1) { $Rest[0] } else { $Root }
+        if (-not [System.IO.Path]::IsPathRooted($target)) { $target = Join-Path $Root $target }
         $exe = "$env:LOCALAPPDATA\Programs\Obsidian\Obsidian.exe"
         if (-not (Test-Path $exe)) {
-            throw "Obsidian is optional and must be provisioned separately"
+            throw "Obsidian is optional and not installed - get it from https://obsidian.md (or your package manager), then rerun."
         }
-        if (Test-Path $exe) { Start-Process $exe "obsidian://open?path=$([uri]::EscapeDataString($Root))" }
-        else { Write-Host "Obsidian installed - launch it once from the Start menu, then open this folder as a vault: $Root" }
+        Start-Process "obsidian://open?path=$([uri]::EscapeDataString($target))"
     }
     "agents-ui" {
         # Agent-MCP orchestration viewer (optional): watch agents/tasks/context live
@@ -452,7 +454,7 @@ switch ($Cmd) {
         Write-Host "  retro | state                             process retrospective | mission state"
         Write-Host "  agents-ui [install|start|stop|status]     orchestration viewer (Agent-MCP, optional)"
         Write-Host "  loops   audit|init|cost|sync              loop-engineering toolkit"
-        Write-Host "  notes                                     Obsidian over the repo (memory lens)"
+        Write-Host "  notes  [path]                             Obsidian over a repository (default: this repo)"
         Write-Host "  ide  [install|sync]                       VSCodium with local-only engine extensions"
         Write-Host "  menu                                      interactive operator menu"
         Write-Host "  vault   init|sync|new|clone|list|backup   local private git remote"

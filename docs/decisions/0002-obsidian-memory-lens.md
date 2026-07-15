@@ -14,12 +14,15 @@ it with grep. The human deserves better than `type memory\LEDGER.md`.
 
 ## Decision
 
-Adopt **Obsidian** as the optional, operator-side viewer over the repo itself:
+Adopt **Obsidian** as the optional, operator-side viewer over each repository:
 
-- **The repo is the vault.** No export, no sync, no second copy — Obsidian
-  opens the working tree directly; `.obsidian/app.json` is checked in with
-  heavy/runtime dirs excluded from indexing (models, toolchains, worktrees,
-  vendor checkouts). The volatile rest of `.obsidian/` is gitignored.
+- **Every repository is its own vault.** No export, no sync, no second copy -
+  Obsidian opens the working tree of *any* repository or worktree open in the
+  IDE directly, each as its own vault. (Originally scoped to the single Oracle
+  repo; extended to per-repository so research across projects is browsable.)
+  `.obsidian/app.json` is checked in for the Oracle repo with heavy/runtime dirs
+  excluded from indexing (models, toolchains, worktrees, vendor checkouts). The
+  volatile rest of `.obsidian/` is gitignored.
 - **Local-first fits the constitution:** Obsidian reads local files, needs no
   account, and its optional sync/publish services are simply not used. The
   machine firewall applies to it like everything else. It is closed-source,
@@ -27,8 +30,11 @@ Adopt **Obsidian** as the optional, operator-side viewer over the repo itself:
   model access, and touches nothing the agents depend on).
 - **Zero platform coupling.** Nothing reads `.obsidian/`; deleting it changes
   nothing. Agents continue to use grep/ripgrep (C4: no always-on injection).
-- `oracle notes` opens the vault (installs Obsidian on first use via
-  brew/winget where available).
+- `oracle notes [path]` opens any repository as its own vault (default: the
+  current repo). The IDE surfaces this everywhere a repository appears: the
+  Agents panel, a command ("Oracle: Open Repo in Obsidian"), a keybinding, and
+  an inline "open in Obsidian" action on each repository in the Conversations
+  panel. Obsidian is installed on first use via brew/winget where available.
 
 ## What it buys the operator
 
