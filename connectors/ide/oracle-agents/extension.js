@@ -94,6 +94,22 @@ function missionTerminal(tomlPath, engine, hours) {
   return t;
 }
 
+// ---- localhost browser helper ---------------------------------------------------
+
+function normalizeUrl(raw) {
+  const url = String(raw || "").trim();
+  return /^https?:\/\//i.test(url) ? url : "http://" + url;
+}
+
+async function openSimpleBrowser(url) {
+  try {
+    await vscode.commands.executeCommand("simpleBrowser.show", url);
+  } catch (e) {
+    try { await vscode.env.openExternal(vscode.Uri.parse(url)); }
+    catch { /* nothing else to try */ }
+  }
+}
+
 // ---- conversation panels (Cursor-style chat over claude stream-json) ------------
 
 const conversations = new Map(); // id -> ConversationPanel
@@ -107,9 +123,11 @@ function claudeBin() {
 }
 
 class ConversationPanel {
-  constructor(refreshLive) {
+  constructor(refreshLive, opts = {}) {
     this.id = ++convSeq;
-    this.name = `Chat: Claude ${this.id}`;
+    this.name = opts.title || `Chat: Claude ${this.id}`;
+    this.seed = typeof opts.seed === "string" ? opts.seed : "";
+    this.seeded = false;
     this.refreshLive = refreshLive;
     this.child = null;
     this.buf = "";
@@ -223,16 +241,26 @@ class ConversationPanel {
     try { this.panel.webview.postMessage(ev); } catch { /* disposed */ }
   }
 
+  sendUser(text) {
+    if (!this.child || this.child.exitCode !== null) this.spawnEngine();
+    this.post({ type: "echo-user", text });
+    const msg = { type: "user",
+      message: { role: "user", content: [{ type: "text", text }] } };
+    try { this.child.stdin.write(JSON.stringify(msg) + "\n"); }
+    catch (e) { this.post({ type: "proc-error", text: "stdin write failed: " + e }); }
+  }
+
   onMessage(m) {
     if (m.type === "ready") {
       this.spawnEngine();
+      // A seeded panel (e.g. the Mission Designer) opens the conversation itself:
+      // send the seed as the first user turn once the webview is live.
+      if (this.seed && !this.seeded) {
+        this.seeded = true;
+        this.sendUser(this.seed);
+      }
     } else if (m.type === "send") {
-      if (!this.child || this.child.exitCode !== null) this.spawnEngine();
-      this.post({ type: "echo-user", text: m.text });
-      const msg = { type: "user",
-        message: { role: "user", content: [{ type: "text", text: m.text }] } };
-      try { this.child.stdin.write(JSON.stringify(msg) + "\n"); }
-      catch (e) { this.post({ type: "proc-error", text: "stdin write failed: " + e }); }
+      this.sendUser(m.text);
     } else if (m.type === "stop") {
       // best effort: control-protocol interrupt, then a hard kill fallback
       try {
@@ -468,6 +496,65 @@ function activate(ctx) {
       const hours = await vscode.window.showInputBox({ prompt: "Hour budget", value: "24" });
       if (!hours) return;
       missionTerminal(path.join(dir, pick), engine, hours);
+      // Reveal Mission Status so the launched loop is immediately observable.
+      vscode.commands.executeCommand("oracleAgents.mission.focus");
+    }),
+    vscode.commands.registerCommand("oracleAgents.designMission", () => {
+      const seed = [
+        "You are the Mission Designer for SentiVue Oracle. Help me design one new autonomous mission, then write it to disk.",
+        "",
+        "First, learn the format: read conductor/missions/example.toml (the mission .toml schema) and skills/loop-engineering/SKILL.md (loop-design patterns). Do this before asking anything.",
+        "",
+        "Then interview me one focused question at a time, waiting for each answer before asking the next:",
+        "1. The mission goal, in one sentence.",
+        "2. The concrete tasks to accomplish it - and for EACH task a model tier: opus, sonnet, or haiku.",
+        "3. The hour budget.",
+        "4. The success criteria (how we know it is done).",
+        "",
+        "When you have enough, write the finished mission to conductor/missions/<slug>.toml, where <slug> is a kebab-case slug derived from the goal. Match the schema and conventions in example.toml.",
+        "",
+        "Then sanity-check it: re-read the file and confirm it parses as valid TOML (you may run the conductor mission loader, conductor/conductor.py, to validate it).",
+        "",
+        "Finally, tell me it is ready and how to launch it: the Agents panel \"Run an Existing Mission...\" action, or `oracle mission conductor/missions/<slug>.toml <engine> <hours>` (engine = claude, opencode, or kilo).",
+        "",
+        "Start now by reading the two files, then ask me question 1.",
+      ].join("\n");
+      new ConversationPanel(() => trees.live.refresh(), { title: "Mission Designer", seed });
+    }),
+    vscode.commands.registerCommand("oracleAgents.openBrowser", async () => {
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: "Mission Console — 127.0.0.1:8800", url: "http://127.0.0.1:8800" },
+          { label: "Agent-MCP Viewer — 127.0.0.1:3847", url: "http://127.0.0.1:3847" },
+          { label: "Custom URL…", url: "" },
+        ],
+        { placeHolder: "Open a localhost page in an editor tab" });
+      if (!pick) return;
+      let url = pick.url;
+      if (!url) {
+        url = await vscode.window.showInputBox({ prompt: "URL to open", value: "http://localhost:3000" });
+        if (!url) return;
+      }
+      await openSimpleBrowser(normalizeUrl(url));
+    }),
+    vscode.commands.registerCommand("oracleAgents.openConsole", () => {
+      const name = "Mission Console";
+      let t = vscode.window.terminals.find((x) => x.name === name);
+      if (!t) {
+        const opts = { name, iconPath: new vscode.ThemeIcon("dashboard") };
+        if (WIN) {
+          opts.shellPath = "powershell.exe";
+          opts.shellArgs = ["-NoExit", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+            `cd '${ROOT}'; uv run --project env python conductor/console.py`];
+        } else {
+          opts.shellPath = "/bin/bash";
+          opts.shellArgs = ["-lc", `cd '${ROOT}' && uv run --project env python conductor/console.py`];
+        }
+        t = vscode.window.createTerminal(opts);
+      }
+      t.show();
+      // Give the stdlib server a moment to bind before pointing a tab at it.
+      setTimeout(() => openSimpleBrowser("http://127.0.0.1:8800"), 3000);
     }),
   );
 

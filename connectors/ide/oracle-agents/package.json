@@ -2,7 +2,7 @@
   "name": "oracle-agents",
   "displayName": "SentiVue Oracle Agents",
   "description": "Agent sidebar in the Secondary Side Bar: open agents and missions, see everything running, jump between them - all on local models.",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "publisher": "sentivue",
   "license": "MIT",
   "engines": { "vscode": "^1.80.0" },
@@ -29,7 +29,7 @@
     "viewsWelcome": [
       {
         "view": "oracleAgents.live",
-        "contents": "No agents or missions are running yet.\n[New Agent Conversation](command:oracleAgents.newConversation)\n[New Agent Terminal (Claude Code)](command:oracleAgents.newClaude)\n[New Agent in Worktree](command:oracleAgents.newClaudeWorktree)\n[New Agent (OpenCode)](command:oracleAgents.newOpenCode)\n[New Agent (Kilo Code)](command:oracleAgents.newKilo)\n[Start Mission (autonomous loop)](command:oracleAgents.startMission)\n[Orchestration Viewer (Agent-MCP)](command:oracleAgents.orchestrationViewer)\nUse the + menu in this view's title bar to open more at any time."
+        "contents": "No agents or missions are running yet.\n[New Agent Conversation](command:oracleAgents.newConversation)\n[New Agent Terminal (Claude Code)](command:oracleAgents.newClaude)\n[New Agent in Worktree](command:oracleAgents.newClaudeWorktree)\n[New Agent (OpenCode)](command:oracleAgents.newOpenCode)\n[New Agent (Kilo Code)](command:oracleAgents.newKilo)\n[Design a New Mission](command:oracleAgents.designMission)\n[Run an Existing Mission](command:oracleAgents.startMission)\n[Open Browser (localhost)](command:oracleAgents.openBrowser)\n[Open Mission Console](command:oracleAgents.openConsole)\n[Orchestration Viewer (Agent-MCP)](command:oracleAgents.orchestrationViewer)\nUse the + menu in this view's title bar to open more at any time."
       }
     ],
     "commands": [
@@ -40,12 +40,18 @@
       { "command": "oracleAgents.newClaudeWorktree", "title": "Oracle: New Agent in Worktree", "icon": "$(git-branch)" },
       { "command": "oracleAgents.newOpenCode", "title": "Oracle: New Agent (OpenCode)", "icon": "$(rocket)" },
       { "command": "oracleAgents.newKilo", "title": "Oracle: New Agent (Kilo Code)", "icon": "$(circuit-board)" },
-      { "command": "oracleAgents.startMission", "title": "Oracle: Start Mission...", "icon": "$(play)" },
+      { "command": "oracleAgents.startMission", "title": "Oracle: Run an Existing Mission...", "icon": "$(play)" },
+      { "command": "oracleAgents.designMission", "title": "Oracle: Design a New Mission...", "icon": "$(edit)" },
+      { "command": "oracleAgents.openConsole", "title": "Oracle: Open Mission Console", "icon": "$(dashboard)" },
+      { "command": "oracleAgents.openBrowser", "title": "Oracle: Open Browser (localhost)", "icon": "$(globe)" },
       { "command": "oracleAgents.reveal", "title": "Oracle: Focus Agent" },
       { "command": "oracleAgents.kill", "title": "Oracle: Close Agent", "icon": "$(trash)" },
       { "command": "oracleAgents.openLatestReport", "title": "Oracle: Open Latest Mission Report" },
       { "command": "oracleAgents.openLedger", "title": "Oracle: Open Ledger" },
       { "command": "oracleAgents.refresh", "title": "Oracle: Refresh Agents Sidebar", "icon": "$(refresh)" }
+    ],
+    "keybindings": [
+      { "command": "oracleAgents.openBrowser", "key": "ctrl+alt+b", "mac": "cmd+alt+b" }
     ],
     "submenus": [
       { "id": "oracleAgents.newMenu", "label": "New Agent / Mission", "icon": "$(add)" }
@@ -63,8 +69,11 @@
         { "command": "oracleAgents.newClaudeWorktree", "group": "1_agents@3" },
         { "command": "oracleAgents.newOpenCode", "group": "1_agents@4" },
         { "command": "oracleAgents.newKilo", "group": "1_agents@5" },
+        { "command": "oracleAgents.designMission", "group": "2_mission@0" },
         { "command": "oracleAgents.startMission", "group": "2_mission@1" },
-        { "command": "oracleAgents.orchestrationViewer", "group": "3_tools@1" }
+        { "command": "oracleAgents.openBrowser", "group": "3_tools@0" },
+        { "command": "oracleAgents.openConsole", "group": "3_tools@1" },
+        { "command": "oracleAgents.orchestrationViewer", "group": "3_tools@2" }
       ],
       "view/item/context": [
         { "command": "oracleAgents.kill", "when": "view == oracleAgents.live && viewItem == runningAgent", "group": "inline" }

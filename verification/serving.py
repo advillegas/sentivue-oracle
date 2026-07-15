@@ -236,6 +236,12 @@ MODEL_RUNTIME_OVERHEAD_MIB = 512
 # memory for context) and removes the self-contention 429 cascade that two
 # sequential verification probes triggered when they collided on two slots.
 RESIDENT_PARALLEL_SLOTS = 1
+# When every admitted slot is busy, briefly queue a concurrent request for a slot
+# to free rather than rejecting it outright: the GPU answers in seconds so a short
+# queue drains fast, whereas the old instant reject 429'd the IDE's ordinary
+# concurrent traffic (chat + autocomplete + background). Kept module-level so it
+# stays monkeypatchable (tests set it to 0 to assert prompt rejection).
+ADMISSION_QUEUE_TIMEOUT_SECONDS = 60
 SENSITIVE_KEY = re.compile(
     r"(?:authorization|bearer|cookie|credential|password|secret|"
     r"(?:access[_-]?|refresh[_-]?|auth[_-]?)?token|"
@@ -2283,7 +2289,12 @@ class AdmissionLease:
 
 
 class AdmissionController:
-    """Non-blocking per-model request admission used by the loopback gateway."""
+    """Per-model request admission for the loopback gateway.
+
+    A concurrent request for a busy slot briefly queues (up to
+    ``ADMISSION_QUEUE_TIMEOUT_SECONDS``) before it is rejected for contention,
+    so ordinary bursts of IDE traffic drain instead of hitting a 429.
+    """
 
     def __init__(
         self,
@@ -2337,7 +2348,7 @@ class AdmissionController:
         ]
         acquired: list[threading.BoundedSemaphore] = []
         for semaphore in semaphores:
-            if semaphore.acquire(blocking=False):
+            if semaphore.acquire(timeout=ADMISSION_QUEUE_TIMEOUT_SECONDS):
                 acquired.append(semaphore)
                 continue
             for held in reversed(acquired):

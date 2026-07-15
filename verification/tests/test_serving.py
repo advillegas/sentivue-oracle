@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -795,7 +796,9 @@ def test_request_estimator_counts_tool_call_history_inside_messages() -> None:
     assert estimate.prompt_tokens >= 10000
 
 
-def test_admission_controller_rejects_contention_and_oversize_before_forwarding() -> None:
+def test_admission_controller_rejects_contention_and_oversize_before_forwarding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     plan = production_plan()
     controller = serving.AdmissionController({"chat": plan})
     first = controller.try_begin(
@@ -804,6 +807,9 @@ def test_admission_controller_rejects_contention_and_oversize_before_forwarding(
     )
     forwarded: list[str] = []
 
+    # The admission queue would otherwise hold this held-slot probe for a full
+    # minute; drop the timeout to zero so contention is still rejected promptly.
+    monkeypatch.setattr(serving, "ADMISSION_QUEUE_TIMEOUT_SECONDS", 0)
     with pytest.raises(ServingError, match="contention"):
         controller.try_begin(
             "chat",
@@ -824,7 +830,9 @@ def test_admission_controller_rejects_contention_and_oversize_before_forwarding(
     second.close()
 
 
-def test_admission_controller_rejects_cross_model_exclusive_group_contention() -> None:
+def test_admission_controller_rejects_cross_model_exclusive_group_contention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     plans = {
         name: serving.plan_context(
             model_name=name,
@@ -844,6 +852,8 @@ def test_admission_controller_rejects_cross_model_exclusive_group_contention() -
     first = controller.try_begin(
         "big-a", {"messages": [{"role": "user", "content": "work"}]}
     )
+    # Reject the held exclusive group immediately instead of queuing for a minute.
+    monkeypatch.setattr(serving, "ADMISSION_QUEUE_TIMEOUT_SECONDS", 0)
     with pytest.raises(ServingError, match="contention"):
         controller.try_begin(
             "big-b", {"messages": [{"role": "user", "content": "work"}]}
@@ -853,6 +863,51 @@ def test_admission_controller_rejects_cross_model_exclusive_group_contention() -
         "big-b", {"messages": [{"role": "user", "content": "work"}]}
     )
     second.close()
+
+
+def test_admission_controller_queues_concurrent_request_until_slot_frees(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A concurrent request for a busy slot now briefly queues instead of being
+    # rejected outright: once the in-flight lease is released the queued
+    # acquisition succeeds rather than raising a 429-style contention error.
+    monkeypatch.setattr(serving, "ADMISSION_QUEUE_TIMEOUT_SECONDS", 5)
+    controller = serving.AdmissionController({"chat": production_plan()})
+    first = controller.try_begin(
+        "chat", {"messages": [{"role": "user", "content": "in flight"}]}
+    )
+
+    outcome: list[object] = []
+    started = threading.Event()
+
+    def queued() -> None:
+        started.set()
+        try:
+            outcome.append(
+                controller.try_begin(
+                    "chat",
+                    {"messages": [{"role": "user", "content": "queued"}]},
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - recorded for the assertion below
+            outcome.append(exc)
+
+    worker = threading.Thread(target=queued)
+    worker.start()
+    assert started.wait(timeout=5)
+    # While the single slot is held the queued request is still waiting, not errored.
+    time.sleep(0.2)
+    assert worker.is_alive()
+    assert outcome == []
+
+    # Releasing the in-flight lease lets the queued acquisition through.
+    first.close()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    lease = outcome[0]
+    assert isinstance(lease, serving.AdmissionLease)
+    lease.close()
 
 
 def test_loopback_gateway_rejects_oversize_before_upstream_http_call() -> None:
