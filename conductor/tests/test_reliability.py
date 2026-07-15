@@ -10,7 +10,9 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import types
 
 import pytest
 
@@ -857,3 +859,163 @@ def test_checkpoint_reconciles_crash_after_atomic_ref_update(
     assert second.m.tasks[0].status == "done"
     assert second.task_commits["one"] == tip
     assert second.pending_merge is None
+
+
+CONTENTION_429 = (
+    'API Error 429 {"error":"Oracle admission rejected request",'
+    '"reason":"qwen3-coder-30b: unsafe contention; an admitted slot or '
+    'exclusive model group is already active"}'
+)
+
+
+def test_fast_lane_independent_detects_collapsed_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # full/coder: three distinct models -> a real, always-resident fast lane.
+    monkeypatch.setattr(
+        C,
+        "TIER_MODEL",
+        {"opus": "kimi", "sonnet": "qwen-480b", "haiku": "qwen-30b"},
+    )
+    assert C.fast_lane_independent() is True
+    # mid/lite: every tier collapses to one single-slot model -> no fast lane.
+    monkeypatch.setattr(
+        C,
+        "TIER_MODEL",
+        {"opus": "solo", "sonnet": "solo", "haiku": "solo"},
+    )
+    assert C.fast_lane_independent() is False
+    # partial collapse (haiku shares the big model) is also NOT independent.
+    monkeypatch.setattr(
+        C,
+        "TIER_MODEL",
+        {"opus": "big", "sonnet": "solo", "haiku": "solo"},
+    )
+    assert C.fast_lane_independent() is False
+
+
+@pytest.mark.skipif(GIT is None, reason="git required")
+def test_collapsed_tiers_serialize_haiku_on_the_big_slot(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """workers=2 on a collapsed (single-slot) profile must NOT dispatch a second
+    request while the one slot is busy -- even a haiku request has to take the
+    big-slot lock, or the admission gateway rejects it with 'unsafe contention'."""
+    isolate_runtime(tmp_path, monkeypatch)
+    repo = make_repo(tmp_path / "repo")
+    monkeypatch.setattr(
+        C,
+        "TIER_MODEL",
+        {"opus": "solo", "sonnet": "solo", "haiku": "solo"},
+    )
+    collapsed = C.Mission(
+        name="reliability",
+        goal="collapsed single-slot profile",
+        repo=repo,
+        tasks=[checked_task(tier="haiku")],
+        engine="claude",
+        hours=1.0,
+        report_minutes=60,
+        workers=2,
+    )
+    conductor = C.Conductor(collapsed)
+    monkeypatch.setattr(conductor, "ensure_serving", lambda: None)
+    ran = threading.Event()
+
+    def fake_sh(_argv: object, **_kwargs: object) -> object:
+        ran.set()
+        return types.SimpleNamespace(stdout="DONE", returncode=0)
+
+    monkeypatch.setattr(C, "sh", fake_sh)
+    worker = threading.Thread(
+        target=conductor.run_engine,
+        args=("p", "haiku", repo, 1, "one-dev1"),
+    )
+    conductor.biglock.acquire()          # simulate the main worker holding the slot
+    try:
+        worker.start()
+        assert not ran.wait(0.5)         # the haiku request blocks on the lock
+        assert worker.is_alive()
+    finally:
+        conductor.biglock.release()
+    worker.join(timeout=5)
+    assert ran.is_set()                  # and proceeds once the slot frees
+    assert not worker.is_alive()
+
+
+@pytest.mark.skipif(GIT is None, reason="git required")
+def test_independent_fast_lane_still_runs_haiku_in_parallel(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely separate fast lane (distinct haiku model, as on full/coder
+    profiles) keeps true parallelism: a haiku request runs even while the big
+    slot is busy, so real fast-lane concurrency is preserved."""
+    isolate_runtime(tmp_path, monkeypatch)   # distinct tiers
+    repo = make_repo(tmp_path / "repo")
+    conductor = C.Conductor(mission(repo, [checked_task(tier="haiku")]))
+    monkeypatch.setattr(conductor, "ensure_serving", lambda: None)
+    ran = threading.Event()
+
+    def fake_sh(_argv: object, **_kwargs: object) -> object:
+        ran.set()
+        return types.SimpleNamespace(stdout="DONE", returncode=0)
+
+    monkeypatch.setattr(C, "sh", fake_sh)
+    worker = threading.Thread(
+        target=conductor.run_engine,
+        args=("p", "haiku", repo, 1, "one-dev1"),
+    )
+    conductor.biglock.acquire()          # big slot busy with a sonnet/opus request
+    try:
+        worker.start()
+        worker.join(timeout=5)
+        assert ran.is_set()              # haiku ran without waiting on the big slot
+        assert not worker.is_alive()
+    finally:
+        conductor.biglock.release()
+
+
+@pytest.mark.skipif(GIT is None, reason="git required")
+def test_engine_failure_flags_admission_contention_as_infrastructure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    isolate_runtime(tmp_path, monkeypatch)
+    repo = make_repo(tmp_path / "repo")
+    conductor = C.Conductor(mission(repo, [checked_task()]))
+    # returncode 0 (the engine printed the 429 as ordinary output) must still
+    # be classified as infrastructure, not accepted as a task result.
+    assert conductor.engine_failure("one-dev1", CONTENTION_429)
+    # ordinary developer prose that merely lacks a status line is NOT infra.
+    assert conductor.engine_failure("one-dev1", "I did some analysis, thanks!") is None
+
+
+@pytest.mark.skipif(GIT is None, reason="git required")
+def test_admission_contention_is_refunded_not_a_task_failure(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The serving-side 'unsafe contention' 429 is transient infrastructure: it
+    is refunded (infra strike) and retried bounded, never charged against the
+    task's real attempts (AGENTS.md convention #6)."""
+    isolate_runtime(tmp_path, monkeypatch)
+    repo = make_repo(tmp_path / "repo")
+    task = checked_task(max_attempts=1)
+    conductor = C.Conductor(mission(repo, [task]))
+    monkeypatch.setattr(conductor, "ensure_serving", lambda: None)
+    monkeypatch.setattr(C.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(conductor, "run_engine", lambda *a, **k: CONTENTION_429)
+
+    conductor.run_task(task)
+
+    assert task.status == "blocked"
+    assert task.attempts == 0                 # every attempt was refunded
+    assert task.infra_strikes == 3            # bounded retry, then blocked
+    assert "infrastructure failure" in task.note
+    trace = [
+        json.loads(line)
+        for line in conductor.trace_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len([row for row in trace if row["kind"] == "infra"]) == 3

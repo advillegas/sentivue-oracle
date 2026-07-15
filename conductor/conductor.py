@@ -130,6 +130,26 @@ if _tiers_file.exists():
             TIER_MODEL[_tier] = _v.strip()
 
 
+def fast_lane_independent() -> bool:
+    """True only when the haiku "fast lane" runs on a model distinct from every
+    big-tier model, so haiku requests reach a separate, always-resident slot and
+    can run concurrently with the big slot (full/coder profiles).
+
+    On collapsed profiles (mid/lite) serving/tiers.env maps every tier onto ONE
+    model served with a single admission slot (verification/serving.py
+    RESIDENT_PARALLEL_SLOTS == 1). Then there is no independent fast lane: a
+    haiku request and a big request contend for that one slot, so the second
+    concurrent request is rejected with an "unsafe contention" 429. The
+    conductor uses this signal to serialize every request on the big-slot lock
+    and to degrade a workers=2 mission to serial automatically."""
+    haiku_model = TIER_MODEL["haiku"]
+    return all(
+        model != haiku_model
+        for tier, model in TIER_MODEL.items()
+        if tier != "haiku"
+    )
+
+
 def now() -> str:
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -2032,10 +2052,18 @@ class Conductor:
         argv, env = engine_cmd(self.m.engine, prompt, tier)
         env["ORACLE_PROJECT_ROOT"] = str(cwd.resolve())
         env["LEAN_CTX_PROJECT_ROOT"] = str(cwd.resolve())
-        # Only one big-slot (sonnet/opus) request at a time: concurrent big requests
-        # from the parallel worker would thrash the model hot-swap. Fast-lane requests
-        # (haiku model, always resident, --parallel 2) run without the lock.
-        need_big = TIER_MODEL[tier] != TIER_MODEL["haiku"]
+        # Only one big-slot request at a time: concurrent big requests from the
+        # parallel worker would thrash the model hot-swap. A request may skip the
+        # lock ONLY on a genuinely independent, always-resident fast lane (the
+        # haiku model must be distinct from every big-tier model). When tiers
+        # collapse to one single-slot model (mid/lite profiles) the "fast lane"
+        # IS the big slot, so EVERY request -- haiku included -- must take the
+        # lock, or two workers collide on the one admission slot and the second
+        # is rejected with an "unsafe contention" 429.
+        need_big = (
+            not fast_lane_independent()
+            or TIER_MODEL[tier] != TIER_MODEL["haiku"]
+        )
         gate = self.biglock if need_big else contextlib.nullcontext()
         with gate:
             r = sh(argv, cwd=cwd, timeout=timeout_min * 60, env=env,
@@ -2095,8 +2123,16 @@ class Conductor:
         stripped = output.strip()
         if not stripped:
             return "engine produced empty output"
+        # A serving-side admission rejection ("unsafe contention" 429, emitted as
+        # `API Error 429 {"error":"Oracle admission rejected request",...}`) is a
+        # transient INFRASTRUCTURE hiccup -- two requests briefly collided on the
+        # single model slot. It must be refunded and retried bounded, never
+        # counted against the task's real attempts (AGENTS.md convention #6).
+        lowered = stripped.lower()
         if (
-            re.match(r"API Error:", stripped)
+            re.match(r"API Error\b", stripped)
+            or "unsafe contention" in lowered
+            or "oracle admission rejected" in lowered
             or "exceeds the available context size" in stripped
             or (
                 len(stripped) < 500
@@ -3626,12 +3662,22 @@ class Conductor:
                 name=f"conductor-report-{self.run_id[:8]}",
             )
         ]
-        if self.m.workers > 1:
+        # A second (fast-lane) worker only helps when haiku runs on its own
+        # always-resident slot. On collapsed profiles (mid/lite) every tier maps
+        # to one single-slot model, so a parallel worker would just collide with
+        # the main worker on that slot ("unsafe contention" 429). Degrade to
+        # serial automatically instead of forcing the operator to edit workers.
+        if self.m.workers > 1 and fast_lane_independent():
             worker_threads.append(
                 threading.Thread(
                     target=self.fast_worker,
                     name=f"conductor-fast-{self.run_id[:8]}",
                 )
+            )
+        elif self.m.workers > 1:
+            self.ledger(
+                "FAST-LANE COLLAPSED",
+                "tiers map to one single-slot model; workers=2 degraded to serial",
             )
         for worker_thread in worker_threads:
             worker_thread.start()
