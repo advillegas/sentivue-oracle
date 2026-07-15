@@ -3241,6 +3241,82 @@ def test_metal_runtime_shrinks_context_to_stay_gpu_resident_not_cpu(
     assert chat_context.peak_memory_mib <= wired_budget
 
 
+def test_metal_runtime_at_131072_nominal_stays_gpu_resident_and_fits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Right-sizing the fast lane from 262144 to a 131072 nominal must keep the
+    # whole profile GPU-resident on a large-memory Mac Studio and grant a fast,
+    # fitting context — the KV halves, the slot frees quickly, and the served
+    # window never exceeds the (now smaller) 131072 ceiling.
+    revision = "a" * 40
+    put(
+        tmp_path,
+        "serving/profiles.conf",
+        "mid | 64 | chat,embed | chat | chat | chat | ~40 GB\n",
+    )
+    put(
+        tmp_path,
+        "serving/models.manifest",
+        f"chat | example/chat | *.gguf | fast | 131072 | --temp 0.7 | {revision}\n"
+        f"embed | example/embed | *.gguf | embed | 8192 |  | {revision}\n",
+    )
+    put(tmp_path, "serving/models.profile", "chat\nembed\n")
+    put(
+        tmp_path,
+        "serving/tiers.env",
+        "OPUS_MODEL=chat\nSONNET_MODEL=chat\nHAIKU_MODEL=chat\n",
+    )
+    server = put(tmp_path, ".tools/bin/llama-server", b"trusted server")
+    swap = put(tmp_path, ".tools/bin/llama-swap", b"trusted swap")
+    monkeypatch.setattr(
+        serving, "validate_policy_bound_models", _metal_shrink_snapshots
+    )
+    # A 256 GiB Mac Studio (mid profile) with a generous wired budget: weights
+    # plus the full 131072-token KV fit with room to spare.
+    resources = ResourceSnapshot(
+        system_total_mib=256 * GIB,
+        system_available_mib=240 * GIB,
+        backend=Backend.METAL,
+        accelerator_total_mib=200 * GIB,
+        accelerator_available_mib=200 * GIB,
+        accelerator_shared=True,
+        capability_source="fixture metal wired 200 GiB",
+    )
+
+    plan = serving.prepare_runtime(
+        root=tmp_path,
+        server_path=server,
+        llama_swap_path=swap,
+        platform="posix",
+        resources=resources,
+        requested_backend="auto",
+    )
+
+    assert plan.backend == Backend.METAL
+    for name in ("chat", "embed"):
+        placement = plan.placements[name]
+        assert placement.backend == Backend.METAL
+        assert placement.split_mode == "unified"
+        assert placement.offloaded_layers == placement.total_layers
+        assert placement.offloaded_layers > 0
+
+    chat_context = plan.contexts["chat"]
+    # A single always-resident slot, a context capped at the new 131072 nominal,
+    # and a served window that clears the production-minimum envelope.
+    assert chat_context.parallel_slots == 1
+    assert chat_context.nominal_context_tokens == 131072
+    assert chat_context.slot_context_tokens <= 131072
+    assert chat_context.advertised_context_tokens >= serving.PRODUCTION_ADVERTISED_CONTEXT
+    # On this large budget the served context reaches the full (smaller) nominal.
+    assert chat_context.slot_context_tokens == 131072
+
+    # Peak GPU memory (weights + fitted KV) stays within the wired budget.
+    wired_budget = (
+        resources.accelerator_available_mib - resources.accelerator_reserve_mib
+    )
+    assert chat_context.peak_memory_mib <= wired_budget
+
+
 def test_metal_runtime_falls_back_to_cpu_when_weights_exceed_wired_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

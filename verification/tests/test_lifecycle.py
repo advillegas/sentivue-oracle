@@ -3784,6 +3784,124 @@ esac
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_install_continues_and_keeps_shortcut_when_verify_offline_fails(
+    tmp_path: Path,
+) -> None:
+    # The deep offline probe can be slow on real Metal hardware. Serving is
+    # already proven healthy by the health-check loop, so a FAILING
+    # verify-offline.sh must degrade to a warning: the install still finishes,
+    # exits 0, and the desktop shortcut is (re)created every run.
+    bash = (
+        Path("C:/Program Files/Git/bin/bash.exe")
+        if os.name == "nt"
+        else Path(shutil.which("bash") or "")
+    )
+    if not bash.is_file():
+        pytest.skip("Bash is unavailable")
+    root = tmp_path / "resume root"
+    home = tmp_path / "home"
+    fake_bin = root / "fake-bin"
+    root.mkdir()
+    home.mkdir()
+    (home / "Desktop").mkdir()
+    fake_bin.mkdir()
+    shutil.copy2(REPO_ROOT / "install", root / "install")
+    put(root, "serving/models.profile", "chat\n")
+    put(
+        root,
+        "serving/models.manifest",
+        "chat | example/chat | model.gguf | fast | 8192 | | " + ("e" * 40) + "\n",
+    )
+    put(
+        root,
+        "serving/tiers.env",
+        "OPUS_MODEL=chat\nSONNET_MODEL=chat\nHAIKU_MODEL=chat\n",
+    )
+    put(root, "models/chat/model.gguf", b"model")
+    put(root, "bin/oracle-menu", "#!/usr/bin/env bash\nexit 0\n").chmod(0o755)
+    put(
+        root,
+        "bootstrap/download-models.sh",
+        "#!/usr/bin/env bash\nexit 0\n",
+    ).chmod(0o755)
+    fake_python = put(
+        fake_bin,
+        "python3",
+        """#!/usr/bin/env bash
+if [[ "${1:-}" == "-c" ]]; then exit 0; fi
+case " $* " in
+  *" state phase-current "*" --phase models "*) exit 1 ;;
+  *) exit 0 ;;
+esac
+""",
+    )
+    fake_curl = put(fake_bin, "curl", "#!/usr/bin/env bash\nexit 0\n")
+    fake_df = put(
+        fake_bin,
+        "df",
+        "#!/usr/bin/env bash\n"
+        "printf 'Filesystem Blocks Used Available Capacity Mounted\\n"
+        "fixture 2000000000 1 1900000000 1%% /\\n'\n",
+    )
+    for path in (fake_python, fake_curl, fake_df):
+        path.chmod(0o755)
+    put(
+        root,
+        "connectors/ide/sync-models.sh",
+        '#!/usr/bin/env bash\nmkdir -p "$PWD/state/generated"\n',
+    ).chmod(0o755)
+    put(
+        root,
+        "bootstrap/render-config.sh",
+        '#!/usr/bin/env bash\nmkdir -p "$PWD/serving"; : > "$PWD/serving/llama-swap.rendered.yaml"\n',
+    ).chmod(0o755)
+    put(
+        root,
+        "serving/service.sh",
+        '#!/usr/bin/env bash\nmkdir -p "$PWD/logs" "$HOME/Library/LaunchAgents"; '
+        ': > "$HOME/Library/LaunchAgents/com.sentivue.llamaswap.plist"\n',
+    ).chmod(0o755)
+    # The deep offline probe fails (e.g. slow at a large context): non-zero exit.
+    put(
+        root,
+        "bootstrap/verify-offline.sh",
+        "#!/usr/bin/env bash\nexit 3\n",
+    ).chmod(0o755)
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = str(fake_bin) + os.pathsep + env["PATH"]
+
+    completed = subprocess.run(
+        [
+            str(bash),
+            "-c",
+            'if command -v cygpath >/dev/null 2>&1; then '
+            'stub_bin="$(cygpath -u "$1")"; else stub_bin="$1"; fi; '
+            'export PATH="$stub_bin:$PATH"; shift; exec bash "$@"',
+            "_",
+            str(fake_bin),
+            str(root / "install"),
+            "--yes",
+        ],
+        cwd=root,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    combined = completed.stdout + completed.stderr
+    # Install did not abort despite the failing probe.
+    assert completed.returncode == 0, combined
+    # The failure surfaced as a warning, not a fatal error.
+    assert "offline verification reported issues" in combined
+    assert "Install complete" in combined
+    # The desktop shortcut is created and points at the menu launcher.
+    shortcut = home / "Desktop" / "SentiVue Oracle.command"
+    assert shortcut.is_file()
+    assert "bin/oracle-menu" in shortcut.read_text(encoding="utf-8")
+
+
 def test_second_review_model_ownership_excludes_unselected_files(
     tmp_path: Path,
 ) -> None:

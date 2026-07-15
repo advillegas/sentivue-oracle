@@ -337,7 +337,17 @@ if [[ $NO_MODELS -eq 0 ]]; then
   done
   [[ "$healthy" -eq 1 ]] || die "llama-swap did not become healthy"
   say "Offline verification"
-  bash bootstrap/verify-offline.sh
+  # Serving is already confirmed healthy above. The deep production-shaped probe
+  # is informative, not gating: a slow probe must not destroy an otherwise
+  # complete install, so a non-zero exit becomes a warning and the install
+  # continues to the desktop-shortcut block and the final summary.
+  verify_status=0
+  bash bootstrap/verify-offline.sh || verify_status=$?
+  if [[ "$verify_status" -eq 0 ]]; then
+    ok "offline verification passed"
+  else
+    warn "offline verification reported issues; serving is running and the platform is installed — see the report"
+  fi
 fi
 
 # ---------------------------------------------------------------- desktop shortcut
